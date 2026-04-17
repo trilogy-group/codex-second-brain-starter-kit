@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product Intelligence Factory"
+  short_description: "Bootstrap product systems from manifests"
+  default_prompt: "Set up or evolve a manifest-driven product intelligence system with reusable ingestion, code sync, Obsidian, and automation layers."

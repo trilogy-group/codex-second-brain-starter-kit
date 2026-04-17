@@ -1,0 +1,69 @@
+product:
+  name: Acme Platform
+  slug: acme-platform
+  mode: hybrid
+  vault_path: /absolute/path/to/Obsidian/Acme Platform
+  workspace_path: /absolute/path/to/acme-platform-workspace
+
+sources:
+  corpus_path: /absolute/path/to/acme-platform-workspace/_source_corpus/acme-platform
+  mirror_path: /absolute/path/to/acme-platform-workspace/_source_extract/acme-platform
+  docx_extract_path: /absolute/path/to/acme-platform-workspace/_source_extract/docx_text
+  auth_cache_path: /absolute/path/to/acme-platform-workspace/_acme-platform_auth_cache.json
+  support_login: browser-session
+
+repositories:
+  local_clone_root: /absolute/path/to/acme-platform-workspace/_repos
+  safe_mirror_root: /absolute/path/to/acme-platform-workspace/_repo_mirrors
+  items:
+    - owner: acme-inc
+      name: acme-web
+      role: core-app
+      default_branch: main
+      local_path: /absolute/path/to/acme-platform-workspace/_repos/acme-web
+      url: https://github.com/acme-inc/acme-web
+    - owner: acme-inc
+      name: acme-api
+      role: api
+      default_branch: main
+      local_path: /absolute/path/to/acme-platform-workspace/_repos/acme-api
+      url: https://github.com/acme-inc/acme-api
+
+automation_pack:
+  source_truth_sync:
+    automation_id: acme-platform-source-truth-sync
+    status: planned
+  pr_merge_sync:
+    automation_id: acme-platform-pr-merge-sync
+    status: planned
+  repo_mirror_sync:
+    automation_id: acme-platform-repo-mirror-sync
+    status: planned
+  readiness_audit:
+    automation_id: acme-platform-engineering-readiness
+    status: planned
+
+engineering_readiness:
+  categories:
+    - key: reusable-import-factory
+      title: Reusable product import factory
+      ask: 1
+      status: partial
+      summary: Manifest and scaffold are present, but no recurring automation has been installed yet.
+      evidence:
+        - /absolute/path/to/acme-platform-workspace/manifests/acme-platform.yaml
+      missing:
+        - Recurring automations
+      next_steps:
+        - Create the standard automation pack
+    - key: code-and-repo-intelligence
+      title: Code and repo intelligence
+      ask: 2
+      status: missing
+      summary: Repositories are declared but not yet synthesized into vault notes.
+      evidence: []
+      missing:
+        - repo notes
+        - architecture notes
+      next_steps:
+        - Build the engineering layer

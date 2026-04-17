@@ -1,0 +1,61 @@
+product:
+  name: Example Product
+  slug: example-product
+  mode: hybrid
+  vault_path: /absolute/path/to/obsidian/Example Product
+  workspace_path: /absolute/path/to/example-product-workspace
+
+sources:
+  corpus_path: /absolute/path/to/example-product-workspace/_source_corpus/example-product
+  mirror_path: /absolute/path/to/example-product-workspace/_source_extract/example-product
+  docx_extract_path: /absolute/path/to/example-product-workspace/_source_extract/docx_text
+  auth_cache_path: /absolute/path/to/example-product-workspace/_example-product_auth_cache.json
+  support_login: browser-session
+
+repositories:
+  local_clone_root: /absolute/path/to/example-product-workspace/_repos
+  safe_mirror_root: /absolute/path/to/example-product-workspace/_repo_mirrors
+  items:
+    - owner: your-org
+      name: repo-one
+      role: core-app
+      default_branch: main
+      local_path: /absolute/path/to/example-product-workspace/_repos/repo-one
+      url: https://github.com/your-org/repo-one
+
+automation_pack:
+  source_truth_sync:
+    automation_id: example-product-source-truth-sync
+    status: planned
+  pr_merge_sync:
+    automation_id: example-product-pr-merge-sync
+    status: planned
+  repo_mirror_sync:
+    automation_id: example-product-repo-mirror-sync
+    status: planned
+  readiness_audit:
+    automation_id: example-product-engineering-readiness
+    status: planned
+
+engineering_readiness:
+  categories:
+    - key: reusable-import-factory
+      title: Reusable product import factory
+      ask: 1
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Add first real evidence for this category.
+      next_steps:
+        - Validate the manifest and run the first import.
+    - key: code-and-repo-intelligence
+      title: Code and repo intelligence
+      ask: 2
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Add repo notes and implementation maps.
+      next_steps:
+        - Connect repositories to the vault and create code-intelligence notes.

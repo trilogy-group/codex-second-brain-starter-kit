@@ -1,0 +1,4 @@
+interface:
+  display_name: "Product Engineering Ops"
+  short_description: "Build engineering-ready product intelligence"
+  default_prompt: "Audit or build the engineering operations layer for this product, including runtime, CI/CD, deployment, support-to-code flow, and readiness gaps."

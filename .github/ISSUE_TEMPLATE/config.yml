@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Maintainers
+    url: https://github.com/trilogy-group
+    about: Contact the maintainers listed in MAINTAINERS.md for governance or adoption questions.
