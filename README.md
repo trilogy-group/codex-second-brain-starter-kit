@@ -113,6 +113,7 @@ I want the result to be a real Obsidian second brain, not a flat summary dump. P
 - preserve raw-source provenance before summarizing anything
 - run the packaged source-index build and vault rebuild scripts when they are available
 - extract useful content from support articles, repo documentation, wiki pages, and reachable external references
+- if any page requires authentication, open a new browser session and ask me to authenticate with my data, store the authentication details for next iterations
 - create notes using Obsidian wikilinks throughout
 - create the references in Obsidian syntax
 - keep raw extracts separate from synthesized notes
