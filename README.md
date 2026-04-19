@@ -99,9 +99,116 @@ If plan mode is available, use it.
 Ask me only the questions that are necessary to keep going. In particular, ask only if you are blocked by a missing path, missing access, or a decision that would materially change the output.
 
 These are the repositories that must be covered:
-- `repo-one`
-- `repo-two`
-- `repo-three`
+- "trilogy-group/influitive-advocatehub-Wiki",
+- "trilogy-group/influitive-advocatehub-influitive",
+- "trilogy-group/influitive-advocatehub-integrations-customers",
+- "trilogy-group/influitive-advocatehub-integrations-authenticator",
+- "trilogy-group/influitive-advocatehub-integrations-middleware",
+- "trilogy-group/influitive-advocatehub-ios-whitelabel"
+
+For the code repositories, I want a full code-intelligence layer in the Obsidian second brain, not just repo summaries.
+
+Please traverse every repository deeply and extract all important engineering data from the code itself, including architecture, implementation details, feature mappings, bugs, risks, code quality signals, runtime behavior, and operational context.
+
+Requirements for the code-intelligence layer:
+
+- Preserve raw-source provenance before summarizing anything.
+- Record repo origin, branch, commit SHA, local path, main entrypoints.
+- Create repo catalog notes for every repository with purpose, business role, tech stack, runtime surfaces, deploy surfaces, key directories, important files, and representative code paths.
+- Create architecture and service-map notes that explain services, apps, packages, modules, APIs, queues, jobs, workers, databases, event flows, and dependencies between repos and systems.
+- Create rich code-reference notes for important files, packages, modules, classes, interfaces, methods, functions, jobs, routes, schemas, migrations, and tests.
+- For each code-reference note, capture:
+  - what it does
+  - why it exists
+  - implementation intent
+  - inputs and outputs
+  - dependencies and dependents
+  - interfaces it implements or exposes
+  - related routes, events, tables, schemas, configs, feature flags, and tests
+  - side effects, state changes, and external integrations
+  - static risk signals
+  - known conflicts, ambiguity, or stale assumptions
+- Map product features and support topics to code.
+- For every important capability, build links from feature -> repo -> file -> class/interface -> method/function -> test -> runbook/config where possible.
+- Build support-to-code traceability notes that connect support articles, bug reports, wiki pages, and operational docs to the exact implementation anchors in code.
+- Extract data-model intelligence:
+  - domain entities
+  - tables and migrations
+  - DTOs, schemas, protobuf/graphql/openapi contracts
+  - events, messages, topics, queues, webhooks
+  - producers and consumers
+  - data lineage between systems when visible in code
+- Extract runtime and operational intelligence:
+  - env vars
+  - configuration files
+  - background jobs
+  - schedulers and cron flows
+  - deployment config
+  - CI/CD workflows
+  - infra code
+  - observability/logging hooks
+  - auth/authz boundaries
+  - caching layers
+  - rate limiting
+  - retries
+  - failure handling
+- Extract test intelligence:
+  - unit/integration/e2e test structure
+  - important fixtures and factories
+  - untested critical paths
+  - flaky-looking areas
+  - gaps between implementation and tests
+  - tests that anchor high-risk features
+- Extract bug and risk intelligence, including:
+  - TODO/FIXME/HACK markers
+  - dead or orphaned code
+  - duplicated logic
+  - large or overly central files
+  - weak error handling
+  - missing validation
+  - suspicious nil/null handling
+  - race conditions or async hazards
+  - performance hotspots
+  - security/privacy risks
+  - migration risks
+  - brittle feature-flag logic
+  - stale compatibility layers
+  - places where docs and code disagree
+- If git history is available, include hotspots such as:
+  - high-churn files
+  - bug-prone areas
+  - ownership concentration
+  - recent risky edits
+  - modules with large blast radius
+- Explicitly identify probable bug candidates and quality concerns, with evidence and code references, not just generic warnings.
+- Create notes for cross-repo relationships:
+  - shared libraries
+  - duplicated contracts
+  - API consumers/providers
+  - frontend/backend pairings
+  - service boundaries
+  - integration seams
+  - migration paths
+  - legacy vs current implementations
+- Where code is inaccessible, missing, generated, vendored, or blocked, record that explicitly instead of silently skipping it.
+- Keep raw extracts separate from synthesized notes.
+- Use Obsidian wikilinks throughout.
+- Ensure every note has YAML frontmatter and at least one meaningful wikilink.
+- Build or update the following vault notes as needed:
+  - repo catalog
+  - code reference index
+  - architecture and service map
+  - feature-to-code map
+  - support-to-code traceability map
+  - bug candidate log
+  - code quality watchlist
+  - runtime and deployment map
+  - data model map
+  - test coverage and testing gaps note
+  - blocked code access note
+  - conflicts and stale documentation note
+- Do not stop at file names or directory trees. I want implementation-level understanding rich enough that an engineer could use the vault to debug, extend, review, or hand off the product safely.
+
 
 Additional source material:
 - I am attaching support article files and other documentation in this thread.
