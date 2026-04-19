@@ -91,6 +91,8 @@ Using https://github.com/trilogy-group/codex-second-brain-starter-kit, prepare m
 
 Start by reading that repository and following its recommended workflow. If you need to clone it, set it up, create a manifest, or scaffold a workspace or vault, do that as part of the job instead of asking me to do it first.
 
+Create and fill the product manifest yourself. Infer as much as you can from the repository list, the attached documentation, and any source material you discover while following the workflow. Only ask me for manifest values if a missing path, access requirement, or product decision would materially change the result.
+
 If plan mode is available, use it.
 
 Ask me only the questions that are necessary to keep going. In particular, ask only if you are blocked by a missing path, missing access, or a decision that would materially change the output.
