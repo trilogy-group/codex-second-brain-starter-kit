@@ -6,7 +6,7 @@ This is a generic Codex setup for testing the second-brain workflow on any codeb
 
 This demo explains the concept behind the repository:
 
-[![Watch the video overview](https://69jr5v75rc.execute-api.eu-west-1.amazonaws.com/prod/52d11cfd-a0e6-4fca-ba51-3bdf2097c587/thumbnail.jpg)](https://share.synthesia.io/52d11cfd-a0e6-4fca-ba51-3bdf2097c587)
+[![Watch the video overview](assets/video-overview.gif)](https://share.synthesia.io/52d11cfd-a0e6-4fca-ba51-3bdf2097c587)
 
 [Watch the demo now!](https://share.synthesia.io/52d11cfd-a0e6-4fca-ba51-3bdf2097c587)
 
