@@ -81,3 +81,56 @@ Typical use cases:
 - [TEST-ON-YOUR-CODEBASE.md](TEST-ON-YOUR-CODEBASE.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [MAINTAINERS.md](MAINTAINERS.md)
+
+## Sample prompt: Influitive second brain
+
+If you already initialized a manifest and staged the repositories plus source files, this is a stronger paste-ready Codex prompt for the Influitive use case. Attach the support article files and any other Influitive docs to the Codex thread before sending it.
+
+```md
+Use `product-intelligence-factory`, `obsidian-intelligence-system`, and `product-engineering-ops`.
+
+Run in plan mode.
+
+Using this starter kit, prepare my second brain for Influitive.
+
+Use this manifest:
+`/absolute/path/to/second-brain-portfolio/manifests/product.yaml`
+
+The product is Influitive. These repositories must be covered:
+- `influitive-advocatehub-Wiki`
+- `influitive-advocatehub-influitive`
+- `influitive-advocatehub-integrations-customers`
+- `influitive-advocatehub-integrations-authenticator`
+- `influitive-advocatehub-integrations-middleware`
+- `influitive-advocatehub-ios-whitelabel`
+
+Additional source material:
+- I am attaching Influitive support article files and other documentation in this thread.
+- Use the manifest's `corpus_path`, `mirror_path`, and `docx_extract_path` as the source boundaries.
+- Traverse every attached file and every reachable link referenced inside those files.
+- Traverse links found in the engineering wiki, support docs, and captured pages when they add real product or operational context.
+- If a page is restricted, redirected, deleted, timed out, or otherwise inaccessible, record that explicitly in the vault instead of silently skipping it.
+
+Build the second brain as a linked Obsidian knowledge system, not as a flat summary dump.
+
+Requirements:
+- preserve raw-source provenance before summarizing anything
+- extract usable content from support articles, repo documentation, wiki pages, and reachable external references
+- create Obsidian notes with YAML frontmatter and at least one wikilink per note
+- use Obsidian wikilinks consistently for products, features, services, integrations, runbooks, support themes, and repositories
+- keep raw extracts separate from synthesized notes
+- create or update home notes, source indexes, repo catalog notes, architecture maps, support-to-code traceability notes, and blocked-access notes where needed
+- connect documentation claims to the relevant repos, services, apps, and files
+- flag conflicts, stale documentation, and unresolved assumptions when docs, support content, and code do not agree
+- keep the workflow manifest-driven and generic rather than creating Influitive-specific one-off logic
+
+Working style:
+- continue traversing discovered links until the reachable high-value source graph is covered
+- prefer one durable note per concept, workflow, feature, service, decision, or problem
+- ask questions only if blocked by missing access or ambiguity that would materially change the output
+
+Finish with:
+- a concise summary of what was ingested, what was blocked, and what still needs manual access
+- a vault audit written into the vault
+- the next highest-leverage follow-ups to improve completeness, traceability, and automation
+```
