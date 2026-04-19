@@ -8,7 +8,7 @@ This demo explains the concept behind the repository:
 
 [![Watch the video overview](https://69jr5v75rc.execute-api.eu-west-1.amazonaws.com/prod/52d11cfd-a0e6-4fca-ba51-3bdf2097c587/thumbnail.jpg)](https://share.synthesia.io/52d11cfd-a0e6-4fca-ba51-3bdf2097c587)
 
-[Watch the demo on Synthesia](https://share.synthesia.io/52d11cfd-a0e6-4fca-ba51-3bdf2097c587)
+[Watch the demo now!](https://share.synthesia.io/52d11cfd-a0e6-4fca-ba51-3bdf2097c587)
 
 It packages:
 - reusable Codex skills for product intelligence, Obsidian synthesis, and engineering readiness
@@ -71,15 +71,6 @@ Typical use cases:
 5. Use Codex to ingest, synthesize, and connect the information.
 6. Generate or refresh the engineering-readiness report.
 7. Optionally add recurring automations after the first manual pass is proven.
-
-## Recommended first test
-
-Pick one real codebase and one small source corpus:
-- 1 to 3 repositories
-- 5 to 20 product or support documents
-- one Obsidian vault path
-
-Do not start with your largest product first. The goal of the first run is to prove the workflow, not to ingest everything.
 
 ## Next reads
 
