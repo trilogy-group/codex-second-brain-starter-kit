@@ -84,19 +84,18 @@ Typical use cases:
 
 ## Sample prompt: Influitive second brain
 
-If you already initialized a manifest and staged the repositories plus source files, this is a stronger paste-ready Codex prompt for the Influitive use case. Attach the support article files and any other Influitive docs to the Codex thread before sending it.
+This version is meant to be paste-ready from a fresh Codex session. It tells Codex to start from the starter-kit repository itself, bootstrap what is missing, and ask only the questions that are actually needed to continue.
 
 ```md
-Use `product-intelligence-factory`, `obsidian-intelligence-system`, and `product-engineering-ops`.
+Using https://github.com/trilogy-group/codex-second-brain-starter-kit, prepare my second brain for Influitive.
 
-Run in plan mode.
+Start by reading that repository and following its recommended workflow. If you need to clone it, set it up, create a manifest, or scaffold a workspace or vault, do that as part of the job instead of asking me to do it first.
 
-Using this starter kit, prepare my second brain for Influitive.
+If plan mode is available, use it.
 
-Use this manifest:
-`/absolute/path/to/second-brain-portfolio/manifests/product.yaml`
+Ask me only the questions that are necessary to keep going. In particular, ask only if you are blocked by a missing path, missing access, or a decision that would materially change the output.
 
-The product is Influitive. These repositories must be covered:
+These are the Influitive repositories that must be covered:
 - `influitive-advocatehub-Wiki`
 - `influitive-advocatehub-influitive`
 - `influitive-advocatehub-integrations-customers`
@@ -106,28 +105,20 @@ The product is Influitive. These repositories must be covered:
 
 Additional source material:
 - I am attaching Influitive support article files and other documentation in this thread.
-- Use the manifest's `corpus_path`, `mirror_path`, and `docx_extract_path` as the source boundaries.
 - Traverse every attached file and every reachable link referenced inside those files.
-- Traverse links found in the engineering wiki, support docs, and captured pages when they add real product or operational context.
-- If a page is restricted, redirected, deleted, timed out, or otherwise inaccessible, record that explicitly in the vault instead of silently skipping it.
+- Follow links found in the support docs, wiki pages, and related captured pages when they add useful product, support, engineering, or operational context.
+- If a page is restricted, redirected, deleted, timed out, or otherwise inaccessible, record that explicitly instead of silently skipping it.
 
-Build the second brain as a linked Obsidian knowledge system, not as a flat summary dump.
-
-Requirements:
+I want the result to be a real Obsidian second brain, not a flat summary dump. Please:
 - preserve raw-source provenance before summarizing anything
-- extract usable content from support articles, repo documentation, wiki pages, and reachable external references
-- create Obsidian notes with YAML frontmatter and at least one wikilink per note
-- use Obsidian wikilinks consistently for products, features, services, integrations, runbooks, support themes, and repositories
+- extract useful content from support articles, repo documentation, wiki pages, and reachable external references
+- create notes using Obsidian wikilinks throughout
+- create the references in Obsidian syntax
 - keep raw extracts separate from synthesized notes
-- create or update home notes, source indexes, repo catalog notes, architecture maps, support-to-code traceability notes, and blocked-access notes where needed
+- build or update the key index notes, source maps, repo catalog notes, architecture notes, support-to-code traceability notes, and blocked-access notes that are needed
 - connect documentation claims to the relevant repos, services, apps, and files
 - flag conflicts, stale documentation, and unresolved assumptions when docs, support content, and code do not agree
-- keep the workflow manifest-driven and generic rather than creating Influitive-specific one-off logic
-
-Working style:
-- continue traversing discovered links until the reachable high-value source graph is covered
-- prefer one durable note per concept, workflow, feature, service, decision, or problem
-- ask questions only if blocked by missing access or ambiguity that would materially change the output
+- continue traversing the reachable high-value source graph until the important material is covered
 
 Finish with:
 - a concise summary of what was ingested, what was blocked, and what still needs manual access
