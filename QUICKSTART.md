@@ -11,17 +11,30 @@ cd /absolute/path/to/codex-second-brain-starter-kit
 
 This copies the bundled generic skills into `${CODEX_HOME:-$HOME/.codex}/skills`.
 
-## 2. Bootstrap a product workspace
+## 2. Initialize a multi-brain portfolio
 
 Replace the placeholders below with your own values:
 
 ```bash
-./scripts/bootstrap_test_workspace.sh \
+./scripts/second_brain_wizard.py init-portfolio \
+  --portfolio-root "/absolute/path/to/second-brain-portfolio" \
+  --name "Acme Product Portfolio" \
+  --obsidian-root "/absolute/path/to/Obsidian/Product Brains"
+```
+
+What this creates:
+- a portfolio registry
+- shared roots for workspaces, manifests, and default vault locations
+- a repeatable starting point for multiple second brains
+
+## 3. Add your first second brain
+
+```bash
+./scripts/second_brain_wizard.py add-brain \
+  --portfolio-root "/absolute/path/to/second-brain-portfolio" \
   --name "Acme Platform" \
   --slug "acme-platform" \
-  --mode hybrid \
-  --vault "/absolute/path/to/Obsidian/Acme Platform" \
-  --workspace "/absolute/path/to/acme-product-workspace"
+  --mode hybrid
 ```
 
 What this creates:
@@ -30,7 +43,7 @@ What this creates:
 - a first vault audit
 - a first engineering-readiness report
 
-## 3. Put real material into the workspace
+## 4. Put real material into the workspace
 
 Open the generated manifest and place your real source material in the paths it describes:
 - `sources.corpus_path`
@@ -38,15 +51,15 @@ Open the generated manifest and place your real source material in the paths it 
 
 Then replace the sample repository entries with your actual repositories.
 
-## 4. Validate the manifest
+## 5. Validate the manifest
 
 ```bash
 python3 ./skills/product-intelligence-factory/scripts/validate_product_manifest.py \
-  --manifest "/absolute/path/to/acme-product-workspace/manifests/acme-platform.yaml" \
+  --manifest "/absolute/path/to/second-brain-portfolio/manifests/acme-platform.yaml" \
   --check-paths
 ```
 
-## 5. Open Codex and use the starter prompts
+## 6. Open Codex and use the starter prompts
 
 Recommended order:
 1. `prompts/01_bootstrap_product.md`
@@ -56,7 +69,7 @@ Recommended order:
 5. `prompts/05_create_automations.md`
 6. `prompts/06_review_readiness.md`
 
-## 6. Prove the workflow before scaling it
+## 7. Prove the workflow before scaling it
 
 A good first test should end with:
 - a usable Obsidian home note
@@ -64,3 +77,11 @@ A good first test should end with:
 - at least one code-intelligence path from docs to code
 - a real readiness report
 - a clear list of what is still manual
+
+## Helpful wizard commands
+
+```bash
+./scripts/second_brain_wizard.py list-brains --portfolio-root "/absolute/path/to/second-brain-portfolio"
+./scripts/second_brain_wizard.py doctor --portfolio-root "/absolute/path/to/second-brain-portfolio"
+./scripts/second_brain_wizard.py refresh --portfolio-root "/absolute/path/to/second-brain-portfolio"
+```

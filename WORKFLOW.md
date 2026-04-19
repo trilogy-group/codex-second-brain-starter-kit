@@ -13,7 +13,16 @@ Decide:
 
 If you are unsure, use `hybrid`.
 
-## Phase 2. Create the manifest
+## Phase 2. Create or initialize the portfolio
+
+If you want to support multiple second brains, start with the wizard and create a portfolio root first.
+
+The portfolio gives you:
+- one registry for all second brains
+- one consistent place for workspaces and manifests
+- one default place for vaults
+
+## Phase 3. Create the manifest
 
 The manifest is the contract for the whole system. It defines:
 - product identity
@@ -24,7 +33,7 @@ The manifest is the contract for the whole system. It defines:
 
 Do not skip this. The manifest is what makes the approach reusable instead of ad hoc.
 
-## Phase 3. Scaffold the vault
+## Phase 4. Scaffold the vault
 
 Use the bootstrap script or the packaged scaffold script to create:
 - home dashboards
@@ -37,7 +46,7 @@ Use the bootstrap script or the packaged scaffold script to create:
 
 At this point, the vault exists before heavy ingestion starts.
 
-## Phase 4. Add real sources
+## Phase 5. Add real sources
 
 Typical source material:
 - repositories
@@ -51,7 +60,7 @@ Typical source material:
 
 Preserve raw material first. Synthesize after capture.
 
-## Phase 5. Use Codex to build the second brain
+## Phase 6. Use Codex to build the second brain
 
 Use Codex with:
 - `product-intelligence-factory` for the scale boundary
@@ -65,7 +74,7 @@ Expected outputs:
 - conflicts when docs and code disagree
 - audit and readiness reports
 
-## Phase 6. Prove engineering value
+## Phase 7. Prove engineering value
 
 A good proof run should show at least one of these:
 - a doc-to-code trace
@@ -73,7 +82,7 @@ A good proof run should show at least one of these:
 - a local runtime or repo map
 - an explicit readiness gap report
 
-## Phase 7. Add recurring automations
+## Phase 8. Add recurring automations
 
 Only after the manual flow works, add the standard automation pack:
 - source-truth sync
@@ -81,7 +90,7 @@ Only after the manual flow works, add the standard automation pack:
 - repo mirror sync
 - readiness audit
 
-## Phase 8. Scale to product 2
+## Phase 9. Scale to product 2
 
 Once the first product works:
 - keep the skills generic

@@ -59,8 +59,13 @@ def normalize_link_target(target: str) -> str:
     return target
 
 
-def collect_notes(vault: Path) -> list[Path]:
-    return sorted(path for path in vault.rglob("*.md") if ".obsidian" not in path.parts)
+def collect_notes(vault: Path, ignored: set[Path] | None = None) -> list[Path]:
+    ignored = ignored or set()
+    return sorted(
+        path
+        for path in vault.rglob("*.md")
+        if ".obsidian" not in path.parts and path.resolve() not in ignored
+    )
 
 
 def build_resolution_maps(vault: Path, notes: list[Path]) -> tuple[dict[str, list[Path]], dict[str, Path]]:
@@ -136,7 +141,11 @@ def main() -> None:
         print(f"vault not found: {vault}", file=sys.stderr)
         sys.exit(1)
 
-    notes = collect_notes(vault)
+    ignored: set[Path] = set()
+    if args.write:
+        ignored.add(Path(args.write).expanduser().resolve())
+
+    notes = collect_notes(vault, ignored=ignored)
     by_stem, by_relative = build_resolution_maps(vault, notes)
 
     inbound: Counter[Path] = Counter()

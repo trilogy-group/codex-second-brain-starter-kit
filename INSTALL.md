@@ -32,6 +32,7 @@ You should see:
 - the three skill directories present
 - Python available
 - the bundled scripts callable
+- the portfolio wizard callable
 
 ## Reinstall behavior
 

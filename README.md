@@ -4,6 +4,7 @@ This is a generic Codex setup for testing the second-brain workflow on any codeb
 
 It packages:
 - reusable Codex skills for product intelligence, Obsidian synthesis, and engineering readiness
+- a portfolio wizard that can initialize and manage multiple second brains
 - bootstrap scripts to create a manifest, scaffold an Obsidian vault, and generate the first audit and readiness report
 - starter prompts you can paste into Codex to run the workflow end to end
 - templates and examples so you can test the approach without any product-specific customization
@@ -36,7 +37,7 @@ Typical use cases:
 
 1. Read [QUICKSTART.md](QUICKSTART.md).
 2. Run `scripts/install_codex_starter.sh`.
-3. Run `scripts/bootstrap_test_workspace.sh` with your product name, slug, vault path, and workspace path.
+3. Use `scripts/second_brain_wizard.py` to initialize a portfolio and add your first second brain.
 4. Copy your local repositories and source material into the workspace paths described in the generated manifest.
 5. Use the prompts in `prompts/` inside Codex.
 
@@ -45,7 +46,7 @@ Typical use cases:
 - `skills/`
   - portable copies of the generic skills
 - `scripts/`
-  - install, bootstrap, and verification helpers
+  - install, wizard, bootstrap, and verification helpers
 - `prompts/`
   - ready-to-paste Codex prompts for each phase
 - `templates/`
@@ -56,11 +57,11 @@ Typical use cases:
 ## Core workflow
 
 1. Install the skills into your Codex home.
-2. Bootstrap a manifest-driven workspace for your product.
-3. Scaffold the Obsidian vault.
+2. Initialize a portfolio root for one or many second brains.
+3. Add a new second brain into that portfolio.
 4. Add source material and repositories.
 5. Use Codex to ingest, synthesize, and connect the information.
-6. Generate the engineering-readiness report.
+6. Generate or refresh the engineering-readiness report.
 7. Optionally add recurring automations after the first manual pass is proven.
 
 ## Recommended first test
@@ -77,6 +78,7 @@ Do not start with your largest product first. The goal of the first run is to pr
 - [QUICKSTART.md](QUICKSTART.md)
 - [INSTALL.md](INSTALL.md)
 - [WORKFLOW.md](WORKFLOW.md)
+- [WIZARD.md](WIZARD.md)
 - [TEST-ON-YOUR-CODEBASE.md](TEST-ON-YOUR-CODEBASE.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [MAINTAINERS.md](MAINTAINERS.md)
