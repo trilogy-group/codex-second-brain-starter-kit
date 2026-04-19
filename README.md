@@ -6,16 +6,7 @@ This is a generic Codex setup for testing the second-brain workflow on any codeb
 
 This demo explains the concept behind the repository:
 
-<div style="position: relative; overflow: hidden; aspect-ratio: 1920/1080">
-  <iframe
-    src="https://share.synthesia.io/embeds/videos/52d11cfd-a0e6-4fca-ba51-3bdf2097c587"
-    loading="lazy"
-    title="Synthesia video player - Product Abstract Tree Introduction"
-    allowfullscreen
-    allow="encrypted-media; fullscreen; microphone; screen-wake-lock;"
-    style="position: absolute; width: 100%; height: 100%; top: 0; left: 0; border: none; padding: 0; margin: 0; overflow: hidden;"
-  ></iframe>
-</div>
+[![Watch the video overview](https://69jr5v75rc.execute-api.eu-west-1.amazonaws.com/prod/52d11cfd-a0e6-4fca-ba51-3bdf2097c587/thumbnail.jpg)](https://share.synthesia.io/52d11cfd-a0e6-4fca-ba51-3bdf2097c587)
 
 [Watch the demo now!](https://share.synthesia.io/52d11cfd-a0e6-4fca-ba51-3bdf2097c587)
 
