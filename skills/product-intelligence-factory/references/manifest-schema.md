@@ -4,6 +4,7 @@
 
 - `product`
 - `sources`
+- `profile`
 - `repositories`
 - `automation_pack`
 - `engineering_readiness`
@@ -24,6 +25,12 @@ sources:
   docx_extract_path: /absolute/path/to/workspace/_source_extract/docx_text
   auth_cache_path: /absolute/path/to/workspace/_auth_cache.json
   support_login: browser-session
+  support_article_url_template: https://support.example.com/article/{article_id}
+  stale_doc_hosts:
+    - legacy.example.com
+
+profile:
+  intelligence_path: /absolute/path/to/workspace/config/intelligence-profile.yaml
 
 repositories:
   local_clone_root: /absolute/path/to/workspace/_repos
@@ -53,7 +60,7 @@ automation_pack:
 engineering_readiness:
   categories:
     - key: reusable-import-factory
-      title: Reusable product import factory
+      title: Source coverage and provenance
       ask: 1
       status: partial
       summary: One-line status summary.
@@ -74,5 +81,7 @@ engineering_readiness:
 ## Notes
 
 - `ask: 1` maps to the manager ask about importing any product into the system.
-- `ask: 2` maps to the manager ask about making the product engineering-ready for feature work, bugs, CI/CD, deployment, and infra support.
+- `ask: 2` through `ask: 8` can be used to break engineering readiness into distinct operational categories such as linked-page capture, code intelligence, runtime understanding, traceability, runbooks, blockers, and automation opportunities.
 - Keep evidence entries as absolute paths or URLs when possible.
+- `profile.intelligence_path` should point to a capability profile that stays generic at the tooling layer but is allowed to carry product-specific keywords and repo mappings.
+- Leave `sources.support_article_url_template` empty if the source system does not have a stable article URL pattern.

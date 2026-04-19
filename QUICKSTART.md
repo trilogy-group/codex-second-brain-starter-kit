@@ -39,6 +39,7 @@ What this creates:
 
 What this creates:
 - a starter manifest
+- a starter intelligence profile
 - a scaffolded Obsidian vault
 - a first vault audit
 - a first engineering-readiness report
@@ -49,7 +50,10 @@ Open the generated manifest and place your real source material in the paths it 
 - `sources.corpus_path`
 - `repositories.local_clone_root`
 
-Then replace the sample repository entries with your actual repositories.
+Then:
+- replace the sample repository entries with your actual repositories
+- update `profile.intelligence_path` if you want the profile elsewhere
+- edit the generated `config/intelligence-profile.yaml` to reflect your real capabilities, keywords, and repo mappings
 
 ## 5. Validate the manifest
 
@@ -68,6 +72,16 @@ Recommended order:
 4. `prompts/04_bug_workflow.md`
 5. `prompts/05_create_automations.md`
 6. `prompts/06_review_readiness.md`
+
+If you want the packaged helpers to do the heavy lifting before the prompt pass, run:
+
+```bash
+python3 ./skills/product-intelligence-factory/scripts/build_source_indices.py \
+  --manifest "/absolute/path/to/second-brain-portfolio/manifests/acme-platform.yaml"
+
+python3 ./skills/product-intelligence-factory/scripts/rebuild_product_brain.py \
+  --manifest "/absolute/path/to/second-brain-portfolio/manifests/acme-platform.yaml"
+```
 
 ## 7. Prove the workflow before scaling it
 

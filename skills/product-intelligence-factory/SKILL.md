@@ -41,6 +41,13 @@ python3 scripts/validate_product_manifest.py \
   --check-paths
 ```
 
+Create or refresh the generic capability profile with:
+
+```bash
+python3 scripts/init_intelligence_profile.py \
+  --output "/absolute/path/to/workspace/config/intelligence-profile.yaml"
+```
+
 ### 2. Treat manifests as the scale boundary
 
 The manifest should hold:
@@ -64,7 +71,36 @@ python3 scripts/sync_repo_mirrors.py \
 
 This gives the system a refreshable code source of truth that does not disturb local feature branches.
 
-### 4. Keep the factory generic and specializations thin
+### 4. Build inventories before synthesis
+
+When real sources are present, prefer the packaged inventory builder before manual note synthesis:
+
+```bash
+python3 scripts/build_source_indices.py \
+  --manifest "/absolute/path/to/product.yaml"
+```
+
+This stage should:
+- preserve raw-source provenance
+- extract DOCX text when available
+- classify linked pages into mirrored, local evidence, restricted, or stale-documentation buckets
+- generate source inventories and repo snapshots that the vault rebuild can consume
+
+Then rebuild the vault with:
+
+```bash
+python3 scripts/rebuild_product_brain.py \
+  --manifest "/absolute/path/to/product.yaml"
+```
+
+The rebuild should produce:
+- full support and wiki note content, not thin summaries
+- Obsidian wikilinks across support, wiki, repo, capability, and code-reference notes
+- code-reference notes with intent, relevance, implementation signals, and risk/conflict summaries
+- explicit blocker and uncaptured-evidence sections instead of silent omissions
+- a privacy pass that redacts obvious PII from generated vault markdown
+
+### 5. Keep the factory generic and specializations thin
 
 The preferred layering is:
 - one generic product-import factory
@@ -75,7 +111,7 @@ The preferred layering is:
 
 If a workflow can be moved into the manifest or a generic helper script, do that before creating a new product-specific skill.
 
-### 5. Install the standard automation pack
+### 6. Install the standard automation pack
 
 Each product should normally have:
 - skill source-of-truth sync
@@ -85,7 +121,7 @@ Each product should normally have:
 
 Use [references/automation-pack.md](references/automation-pack.md) to keep those automations consistent across products.
 
-### 6. Produce a scale-readiness answer, not just a vault
+### 7. Produce a scale-readiness answer, not just a vault
 
 When finishing, be explicit about:
 - what is already automated

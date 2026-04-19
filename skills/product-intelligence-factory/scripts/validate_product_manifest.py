@@ -12,6 +12,7 @@ import yaml
 REQUIRED_TOP_LEVEL = [
     "product",
     "sources",
+    "profile",
     "repositories",
     "automation_pack",
     "engineering_readiness",
@@ -56,6 +57,14 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
     for key in ["corpus_path", "mirror_path", "auth_cache_path"]:
         if not sources.get(key):
             errors.append(f"Missing sources.{key}")
+
+    profile = data.get("profile")
+    if not isinstance(profile, dict):
+        errors.append("`profile` must be a mapping.")
+        profile = {}
+
+    if not profile.get("intelligence_path"):
+        errors.append("Missing profile.intelligence_path")
 
     repos = data.get("repositories")
     if not isinstance(repos, dict):
@@ -102,6 +111,7 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
             ("sources.mirror_path", sources.get("mirror_path"), False),
             ("sources.docx_extract_path", sources.get("docx_extract_path"), False),
             ("sources.auth_cache_path", sources.get("auth_cache_path"), False),
+            ("profile.intelligence_path", profile.get("intelligence_path"), False),
             ("repositories.local_clone_root", repos.get("local_clone_root"), True),
             ("repositories.safe_mirror_root", repos.get("safe_mirror_root"), False),
         ]

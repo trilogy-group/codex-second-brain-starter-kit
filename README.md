@@ -14,10 +14,11 @@ It packages:
 - reusable Codex skills for product intelligence, Obsidian synthesis, and engineering readiness
 - a portfolio wizard that can initialize and manage multiple second brains
 - bootstrap scripts to create a manifest, scaffold an Obsidian vault, and generate the first audit and readiness report
+- packaged source-index, vault-rebuild, and privacy-sanitizing scripts for richer second-brain generation
 - starter prompts you can paste into Codex to run the workflow end to end
 - templates and examples so you can test the approach without any product-specific customization
 
-This package is intentionally generic. It does not assume Influitive, any specific repository, or any specific support system.
+This package is intentionally generic. It does not assume any specific repository, product, or support system.
 
 ## Who this is for
 
@@ -35,7 +36,7 @@ Typical use cases:
 
 ## What you need
 
-- Codex desktop or Codex CLI with access to local skills
+- Codex desktop or Codex CLI with access to local skills and these installed plugins: `Computer Use`, `GitHub`, `Gmail`, `Google Calendar`, `Google Drive`, `Life Science Research`, `Superpowers`
 - Python 3
 - Git
 - Obsidian
@@ -54,13 +55,13 @@ Typical use cases:
 - `skills/`
   - portable copies of the generic skills
 - `scripts/`
-  - install, wizard, bootstrap, and verification helpers
+  - install, wizard, bootstrap, verification, and manifest/bootstrap helpers
 - `prompts/`
   - ready-to-paste Codex prompts for each phase
 - `templates/`
-  - manifest and automation templates
+  - manifest, profile, and automation templates
 - `examples/`
-  - a sample manifest and test setup notes
+  - a sample manifest, sample intelligence profile, and test setup notes
 
 ## Core workflow
 
@@ -82,12 +83,12 @@ Typical use cases:
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [MAINTAINERS.md](MAINTAINERS.md)
 
-## Sample prompt: Influitive second brain
+## Sample prompt: product second brain
 
 This version is meant to be paste-ready from a fresh Codex session. It tells Codex to start from the starter-kit repository itself, bootstrap what is missing, and ask only the questions that are actually needed to continue.
 
 ```md
-Using https://github.com/trilogy-group/codex-second-brain-starter-kit, prepare my second brain for Influitive.
+Using https://github.com/trilogy-group/codex-second-brain-starter-kit, prepare my second brain for my product.
 
 Start by reading that repository and following its recommended workflow. If you need to clone it, set it up, create a manifest, or scaffold a workspace or vault, do that as part of the job instead of asking me to do it first.
 
@@ -97,28 +98,27 @@ If plan mode is available, use it.
 
 Ask me only the questions that are necessary to keep going. In particular, ask only if you are blocked by a missing path, missing access, or a decision that would materially change the output.
 
-These are the Influitive repositories that must be covered:
-- `trilogy-group/influitive-advocatehub-Wiki`
-- `trilogy-group/influitive-advocatehub-influitive`
-- `trilogy-group/influitive-advocatehub-integrations-customers`
-- `trilogy-group/influitive-advocatehub-integrations-authenticator`
-- `trilogy-group/influitive-advocatehub-integrations-middleware`
-- `trilogy-group/influitive-advocatehub-ios-whitelabel`
+These are the repositories that must be covered:
+- `repo-one`
+- `repo-two`
+- `repo-three`
 
 Additional source material:
-- I am attaching Influitive support article files and other documentation in this thread.
+- I am attaching support article files and other documentation in this thread.
 - Traverse every attached file and every reachable link referenced inside those files.
 - Follow links found in the support docs, wiki pages, and related captured pages when they add useful product, support, engineering, or operational context.
 - If a page is restricted, redirected, deleted, timed out, or otherwise inaccessible, record that explicitly instead of silently skipping it.
 
 I want the result to be a real Obsidian second brain, not a flat summary dump. Please:
 - preserve raw-source provenance before summarizing anything
+- run the packaged source-index build and vault rebuild scripts when they are available
 - extract useful content from support articles, repo documentation, wiki pages, and reachable external references
 - create notes using Obsidian wikilinks throughout
 - create the references in Obsidian syntax
 - keep raw extracts separate from synthesized notes
 - build or update the key index notes, source maps, repo catalog notes, architecture notes, support-to-code traceability notes, and blocked-access notes that are needed
 - connect documentation claims to the relevant repos, services, apps, and files
+- make code-reference notes rich enough to include class or module summaries, implementation intent, relevance, static risk signals, and conflict notes
 - flag conflicts, stale documentation, and unresolved assumptions when docs, support content, and code do not agree
 - continue traversing the reachable high-value source graph until the important material is covered
 

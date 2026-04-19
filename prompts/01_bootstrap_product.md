@@ -9,6 +9,7 @@ Use this manifest:
 
 Goals:
 - validate the manifest
+- validate the intelligence profile path and capability coverage
 - inspect the workspace and vault
 - confirm the mode and source boundaries
 - tell me what is missing before ingestion starts

@@ -24,7 +24,11 @@ for skill in obsidian-intelligence-system product-intelligence-factory product-e
 done
 
 python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/init_product_manifest.py" --help >/dev/null
+python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/init_intelligence_profile.py" --help >/dev/null
 python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/validate_product_manifest.py" --help >/dev/null
+python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/build_source_indices.py" --help >/dev/null
+python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/rebuild_product_brain.py" --help >/dev/null
+python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/sanitize_vault_privacy.py" --help >/dev/null
 python3 "${PACKAGE_ROOT}/skills/product-engineering-ops/scripts/generate_engineering_readiness.py" --help >/dev/null
 python3 "${PACKAGE_ROOT}/skills/obsidian-intelligence-system/scripts/scaffold_vault.py" --help >/dev/null
 python3 "${PACKAGE_ROOT}/skills/obsidian-intelligence-system/scripts/audit_vault.py" --help >/dev/null

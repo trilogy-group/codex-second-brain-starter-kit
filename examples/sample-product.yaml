@@ -11,6 +11,12 @@ sources:
   docx_extract_path: /absolute/path/to/acme-platform-workspace/_source_extract/docx_text
   auth_cache_path: /absolute/path/to/acme-platform-workspace/_acme-platform_auth_cache.json
   support_login: browser-session
+  support_article_url_template: https://support.example.com/article/{article_id}
+  stale_doc_hosts:
+  - legacy.example.com
+
+profile:
+  intelligence_path: /absolute/path/to/acme-platform-workspace/config/intelligence-profile.yaml
 
 repositories:
   local_clone_root: /absolute/path/to/acme-platform-workspace/_repos
@@ -45,20 +51,32 @@ automation_pack:
 
 engineering_readiness:
   categories:
-    - key: reusable-import-factory
-      title: Reusable product import factory
+    - key: source-coverage-and-provenance
+      title: Source coverage and provenance
       ask: 1
       status: partial
-      summary: Manifest and scaffold are present, but no recurring automation has been installed yet.
+      summary: The manifest, workspace, and raw-source paths exist, but source inventories still need to be built.
       evidence:
         - /absolute/path/to/acme-platform-workspace/manifests/acme-platform.yaml
+        - /absolute/path/to/acme-platform-workspace/config/intelligence-profile.yaml
       missing:
-        - Recurring automations
+        - Source inventories
       next_steps:
-        - Create the standard automation pack
+        - Run the source-index build and connect provenance notes.
+    - key: linked-page-capture-completeness
+      title: Linked-page capture completeness
+      ask: 2
+      status: missing
+      summary: No linked-page registry has been created yet.
+      evidence: []
+      missing:
+        - Mirrored links
+        - Blocked-access registry
+      next_steps:
+        - Traverse and classify linked pages from the imported sources.
     - key: code-and-repo-intelligence
       title: Code and repo intelligence
-      ask: 2
+      ask: 3
       status: missing
       summary: Repositories are declared but not yet synthesized into vault notes.
       evidence: []
@@ -67,3 +85,56 @@ engineering_readiness:
         - architecture notes
       next_steps:
         - Build the engineering layer
+    - key: architecture-and-runtime-understanding
+      title: Architecture and runtime understanding
+      ask: 4
+      status: missing
+      summary: Architecture notes and runtime maps have not been created yet.
+      evidence: []
+      missing:
+        - service map
+        - runtime notes
+      next_steps:
+        - Build architecture and service notes from repo and documentation evidence.
+    - key: support-to-code-traceability
+      title: Support-to-code traceability
+      ask: 5
+      status: missing
+      summary: Documentation and support content are not yet connected to implementation anchors.
+      evidence: []
+      missing:
+        - support-to-code map
+        - code-reference links
+      next_steps:
+        - Build linked support, wiki, and code-reference notes.
+    - key: runbook-and-setup-coverage
+      title: Runbook and setup coverage
+      ask: 6
+      status: missing
+      summary: Operational setup and runbook coverage has not been captured yet.
+      evidence: []
+      missing:
+        - setup notes
+        - runbook notes
+      next_steps:
+        - Promote setup and runbook sources into the vault.
+    - key: blocked-dependencies-and-manual-work
+      title: Blocked dependencies and manual work
+      ask: 7
+      status: missing
+      summary: Manual access gaps and restricted sources have not been logged yet.
+      evidence: []
+      missing:
+        - blocked-access registry
+      next_steps:
+        - Record restricted and unresolved sources explicitly.
+    - key: future-automation-opportunities
+      title: Future automation opportunities
+      ask: 8
+      status: missing
+      summary: No automation opportunities have been captured yet.
+      evidence: []
+      missing:
+        - automation candidates
+      next_steps:
+        - Review the first manual run and identify safe refresh automations.

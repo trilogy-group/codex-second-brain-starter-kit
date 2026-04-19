@@ -11,6 +11,11 @@ sources:
   docx_extract_path: /absolute/path/to/example-product-workspace/_source_extract/docx_text
   auth_cache_path: /absolute/path/to/example-product-workspace/_example-product_auth_cache.json
   support_login: browser-session
+  support_article_url_template: ""
+  stale_doc_hosts: []
+
+profile:
+  intelligence_path: /absolute/path/to/example-product-workspace/config/intelligence-profile.yaml
 
 repositories:
   local_clone_root: /absolute/path/to/example-product-workspace/_repos
@@ -39,8 +44,8 @@ automation_pack:
 
 engineering_readiness:
   categories:
-    - key: reusable-import-factory
-      title: Reusable product import factory
+    - key: source-coverage-and-provenance
+      title: Source coverage and provenance
       ask: 1
       status: missing
       summary: Describe current status.
@@ -48,10 +53,20 @@ engineering_readiness:
       missing:
         - Add first real evidence for this category.
       next_steps:
-        - Validate the manifest and run the first import.
+        - Build source inventories and provenance notes.
+    - key: linked-page-capture-completeness
+      title: Linked-page capture completeness
+      ask: 2
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Classify mirrored, restricted, and stale-documentation links.
+      next_steps:
+        - Run linked-page traversal and capture restricted pages explicitly.
     - key: code-and-repo-intelligence
       title: Code and repo intelligence
-      ask: 2
+      ask: 3
       status: missing
       summary: Describe current status.
       evidence: []
@@ -59,3 +74,53 @@ engineering_readiness:
         - Add repo notes and implementation maps.
       next_steps:
         - Connect repositories to the vault and create code-intelligence notes.
+    - key: architecture-and-runtime-understanding
+      title: Architecture and runtime understanding
+      ask: 4
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Add architecture, service, and runtime notes.
+      next_steps:
+        - Build an architecture and service map from repos and documentation.
+    - key: support-to-code-traceability
+      title: Support-to-code traceability
+      ask: 5
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Link docs, support notes, and code references together.
+      next_steps:
+        - Connect high-value documentation paths to implementation anchors.
+    - key: runbook-and-setup-coverage
+      title: Runbook and setup coverage
+      ask: 6
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Add operational setup and runbook coverage.
+      next_steps:
+        - Promote runbooks and setup docs into dedicated notes.
+    - key: blocked-dependencies-and-manual-work
+      title: Blocked dependencies and manual work
+      ask: 7
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Record access blockers and manual gaps explicitly.
+      next_steps:
+        - Build blocker registries and unresolved-dependency notes.
+    - key: future-automation-opportunities
+      title: Future automation opportunities
+      ask: 8
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Identify safe automation candidates.
+      next_steps:
+        - Turn the best manual refresh points into automation candidates.

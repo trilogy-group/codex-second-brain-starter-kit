@@ -52,7 +52,7 @@ if [[ -z "${NAME}" || -z "${SLUG}" || -z "${VAULT}" || -z "${WORKSPACE}" ]]; the
   exit 1
 fi
 
-mkdir -p "${WORKSPACE}/manifests" "${WORKSPACE}/reports" "${WORKSPACE}/_source_corpus/${SLUG}" "${WORKSPACE}/_repos" "${WORKSPACE}/_repo_mirrors" "${WORKSPACE}/_source_extract"
+mkdir -p "${WORKSPACE}/manifests" "${WORKSPACE}/reports" "${WORKSPACE}/config" "${WORKSPACE}/_source_corpus/${SLUG}" "${WORKSPACE}/_repos" "${WORKSPACE}/_repo_mirrors" "${WORKSPACE}/_source_extract"
 
 if [[ -z "${MANIFEST}" ]]; then
   MANIFEST="${WORKSPACE}/manifests/${SLUG}.yaml"
@@ -65,6 +65,11 @@ python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/init_produc
   --mode "${MODE}" \
   --vault "${VAULT}" \
   --workspace "${WORKSPACE}"
+
+if [[ ! -f "${WORKSPACE}/config/intelligence-profile.yaml" ]]; then
+  python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/init_intelligence_profile.py" \
+    --output "${WORKSPACE}/config/intelligence-profile.yaml"
+fi
 
 python3 "${PACKAGE_ROOT}/skills/obsidian-intelligence-system/scripts/scaffold_vault.py" \
   --vault "${VAULT}" \
@@ -97,6 +102,10 @@ Created:
 
 Next:
 1. Replace the sample repository entry in the manifest.
-2. Add real source files to ${WORKSPACE}/_source_corpus/${SLUG}
-3. Use the prompts in ${PACKAGE_ROOT}/prompts
+2. Update ${WORKSPACE}/config/intelligence-profile.yaml with product-specific capabilities, keywords, and repo mappings.
+3. Add real source files to ${WORKSPACE}/_source_corpus/${SLUG}
+4. Run the source-index and rebuild flow after adding real material:
+   python3 ${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/build_source_indices.py --manifest ${MANIFEST}
+   python3 ${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/rebuild_product_brain.py --manifest ${MANIFEST}
+5. Use the prompts in ${PACKAGE_ROOT}/prompts
 EOF

@@ -10,6 +10,8 @@ Focus on:
 - service and architecture notes
 - support-to-code mapping
 - local runtime context
+- code-reference summaries with intent, relevance, risk, and mismatch detail
+- blocked-access and uncaptured-evidence transparency
 - engineering-readiness reporting
 
 Be explicit about what is done, partial, and missing.

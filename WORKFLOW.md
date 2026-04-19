@@ -27,6 +27,7 @@ The portfolio gives you:
 The manifest is the contract for the whole system. It defines:
 - product identity
 - source paths
+- the intelligence profile path
 - repositories
 - automation pack ids
 - engineering-readiness categories
@@ -67,10 +68,17 @@ Use Codex with:
 - `obsidian-intelligence-system` for the vault and synthesis layer
 - `product-engineering-ops` for engineering readiness
 
+When the packaged helpers are available, run the source-index and rebuild flow before asking Codex to do the final synthesis pass:
+- `python3 skills/product-intelligence-factory/scripts/build_source_indices.py --manifest "/absolute/path/to/product.yaml"`
+- `python3 skills/product-intelligence-factory/scripts/rebuild_product_brain.py --manifest "/absolute/path/to/product.yaml"`
+
 Expected outputs:
 - linked notes
 - code-intelligence layer
+- full support and wiki content preserved in-note
 - problem and initiative notes
+- code-reference notes with summaries, intent, relevance, risks, and conflicts
+- explicit uncaptured-evidence sections when linked sources stay blocked
 - conflicts when docs and code disagree
 - audit and readiness reports
 
