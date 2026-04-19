@@ -213,6 +213,7 @@ Requirements for the code-intelligence layer:
 Additional source material:
 - I am attaching support article files and other documentation in this thread.
 - Traverse every attached file and every reachable link referenced inside those files.
+- If there are video files, transcribe them using Whisper and use them as source material.
 - Follow links found in the support docs, wiki pages, and related captured pages when they add useful product, support, engineering, or operational context.
 - If a page is restricted, redirected, deleted, timed out, or otherwise inaccessible, record that explicitly instead of silently skipping it.
 
