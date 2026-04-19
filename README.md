@@ -42,14 +42,6 @@ Typical use cases:
 - Obsidian
 - optional: GitHub CLI (`gh`) if you want repo-mirror sync to resolve default branches automatically
 
-## Fastest path
-
-1. Read [QUICKSTART.md](QUICKSTART.md).
-2. Run `scripts/install_codex_starter.sh`.
-3. Use `scripts/second_brain_wizard.py` to initialize a portfolio and add your first second brain.
-4. Copy your local repositories and source material into the workspace paths described in the generated manifest.
-5. Use the prompts in `prompts/` inside Codex.
-
 ## Package layout
 
 - `skills/`
