@@ -98,12 +98,12 @@ If plan mode is available, use it.
 Ask me only the questions that are necessary to keep going. In particular, ask only if you are blocked by a missing path, missing access, or a decision that would materially change the output.
 
 These are the Influitive repositories that must be covered:
-- `influitive-advocatehub-Wiki`
-- `influitive-advocatehub-influitive`
-- `influitive-advocatehub-integrations-customers`
-- `influitive-advocatehub-integrations-authenticator`
-- `influitive-advocatehub-integrations-middleware`
-- `influitive-advocatehub-ios-whitelabel`
+- `trilogy-group/influitive-advocatehub-Wiki`
+- `trilogy-group/influitive-advocatehub-influitive`
+- `trilogy-group/influitive-advocatehub-integrations-customers`
+- `trilogy-group/influitive-advocatehub-integrations-authenticator`
+- `trilogy-group/influitive-advocatehub-integrations-middleware`
+- `trilogy-group/influitive-advocatehub-ios-whitelabel`
 
 Additional source material:
 - I am attaching Influitive support article files and other documentation in this thread.
