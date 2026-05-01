@@ -39,11 +39,15 @@ profile:
 #   min_cluster_size: 3
 #   similarity_threshold: 0.78
 #   max_clusters: 40
+#   llm_model: gpt-4.1-mini
+#   llm_cluster_synthesis: true
+#   max_llm_clusters: 40
 # code_intelligence:
 #   max_files_per_repo: 1200
 #   include_git_history: true
 #   include_tests: true
 #   include_dependency_graph: true
+#   parser_mode: ast-when-available
 
 repositories:
   local_clone_root: /absolute/path/to/workspace/_repos
@@ -97,5 +101,6 @@ engineering_readiness:
 - `ask: 2` and later can be used to break readiness into distinct operational categories such as linked-page capture, code intelligence, Product BASB alignment, progressive summarization, runtime understanding, traceability, runbooks, blockers, output conversion, archive hygiene, and automation opportunities.
 - Keep evidence entries as absolute paths or URLs when possible.
 - `profile.intelligence_path` should point to a capability profile that stays generic at the tooling layer but is allowed to carry product-specific keywords and repo mappings.
-- Semantic intermediate packets require OpenAI embeddings during rebuild. Set `OPENAI_API_KEY` in the runtime environment before running `rebuild_product_brain.py`; the generated cache is stored under `sources.mirror_path/inventories/embedding_cache.json`.
+- Semantic intermediate packets require OpenAI embeddings during rebuild. Set `OPENAI_API_KEY` in the runtime environment before running `rebuild_product_brain.py`; the generated embedding and LLM synthesis caches are stored under `sources.mirror_path/inventories/`.
+- Code intelligence uses AST parsers when optional tree-sitter packages are installed, then falls back to regex extraction without failing the rebuild.
 - Leave `sources.support_article_url_template` empty if the source system does not have a stable article URL pattern.

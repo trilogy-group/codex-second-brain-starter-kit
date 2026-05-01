@@ -13,7 +13,7 @@ Focus on:
 - intermediate packets that package reusable code investigations, support-to-code traces, and semantic evidence clusters
 - output candidates that can become PRDs, specs, tickets, PRs, runbooks, decisions, launch notes, or post-launch learnings
 - local runtime context
-- code-reference summaries with symbols, routes, schemas, calls, dependencies, tests, parser limitations, intent, relevance, risk, and mismatch detail
+- code-reference summaries with symbols, routes, schemas, calls, dependencies, tests, AST/parser metadata, parser limitations, intent, relevance, risk, and mismatch detail
 - blocked-access and uncaptured-evidence transparency
 - engineering-readiness reporting
 

@@ -132,13 +132,15 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
     code_intel = load_json_if_exists(inventory_dir / "code_intelligence.json")
     semantic = load_json_if_exists(inventory_dir / "semantic_clusters.json")
     embedding_cache = load_json_if_exists(inventory_dir / "embedding_cache.json")
-    if not code_intel and not semantic and not embedding_cache:
+    llm_cache = load_json_if_exists(inventory_dir / "llm_cluster_cache.json")
+    if not code_intel and not semantic and not embedding_cache and not llm_cache:
         return {}
     summary = code_intel.get("summary") if isinstance(code_intel.get("summary"), dict) else {}
     graph = code_intel.get("graph") if isinstance(code_intel.get("graph"), dict) else {}
     semantic_stats = semantic.get("stats") if isinstance(semantic.get("stats"), dict) else {}
     clusters = semantic.get("clusters") if isinstance(semantic.get("clusters"), list) else []
     cache_items = embedding_cache.get("items") if isinstance(embedding_cache.get("items"), dict) else {}
+    llm_cache_items = llm_cache.get("items") if isinstance(llm_cache.get("items"), dict) else {}
     dependency_graph = graph.get("dependencies") if isinstance(graph.get("dependencies"), list) else []
     hits = int(semantic_stats.get("cache_hits", 0) or 0)
     misses = int(semantic_stats.get("cache_misses", 0) or 0)
@@ -146,6 +148,8 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
     return {
         "parsed_files": int(summary.get("parsed_files", 0) or 0),
         "parse_failures": int(summary.get("parse_failures", 0) or 0),
+        "ast_parsed_files": int(summary.get("ast_parsed_files", 0) or 0),
+        "ast_node_count": int(summary.get("ast_node_count", 0) or 0),
         "route_count": int(summary.get("route_count", 0) or 0),
         "schema_count": int(summary.get("schema_count", 0) or 0),
         "test_anchors": int(summary.get("test_anchor_count", 0) or 0),
@@ -156,6 +160,10 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
         "embedding_cache_hits": hits,
         "embedding_cache_misses": misses,
         "openai_failures": int(semantic_stats.get("openai_failures", 0) or 0),
+        "llm_cache_items": len(llm_cache_items),
+        "llm_cache_hits": int(semantic_stats.get("llm_cache_hits", 0) or 0),
+        "llm_cache_misses": int(semantic_stats.get("llm_cache_misses", 0) or 0),
+        "llm_failures": int(semantic_stats.get("llm_failures", 0) or 0),
     }
 
 
@@ -257,6 +265,8 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
         lines.extend(["", "## Code Intelligence And Semantic Metrics", ""])
         lines.append(f"- Parsed files: `{inventory_metrics['parsed_files']}`")
         lines.append(f"- Parse failures: `{inventory_metrics['parse_failures']}`")
+        lines.append(f"- AST parsed files: `{inventory_metrics['ast_parsed_files']}`")
+        lines.append(f"- AST nodes: `{inventory_metrics['ast_node_count']}`")
         lines.append(f"- Routes: `{inventory_metrics['route_count']}`")
         lines.append(f"- Schemas/data contracts: `{inventory_metrics['schema_count']}`")
         lines.append(f"- Test anchors: `{inventory_metrics['test_anchors']}`")
@@ -265,6 +275,9 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
         lines.append(f"- Embedding cache items: `{inventory_metrics['embedding_cache_items']}`")
         lines.append(f"- Embedding cache hit rate: `{inventory_metrics['embedding_cache_hit_rate']}`")
         lines.append(f"- OpenAI failures: `{inventory_metrics['openai_failures']}`")
+        lines.append(f"- LLM synthesis cache items: `{inventory_metrics['llm_cache_items']}`")
+        lines.append(f"- LLM synthesis cache hits: `{inventory_metrics['llm_cache_hits']}`")
+        lines.append(f"- LLM synthesis failures: `{inventory_metrics['llm_failures']}`")
 
     lines.extend(["", "## Readiness Categories", ""])
     for category in categories:

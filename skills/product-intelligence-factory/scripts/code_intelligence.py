@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import ast
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,53 @@ CALL_STOPWORDS = {
     "it",
     "test",
 }
+TREE_SITTER_LANGUAGE_BY_SUFFIX = {
+    ".rb": "ruby",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".go": "go",
+    ".swift": "swift",
+    ".m": "objc",
+    ".mm": "objc",
+    ".h": "objc",
+}
+TREE_SITTER_SYMBOL_NODES = {
+    "class",
+    "class_declaration",
+    "class_definition",
+    "module",
+    "module_definition",
+    "struct_declaration",
+    "interface_declaration",
+    "function",
+    "function_declaration",
+    "function_definition",
+    "method",
+    "method_definition",
+    "method_declaration",
+    "arrow_function",
+    "lexical_declaration",
+    "type_alias_declaration",
+    "type_declaration",
+    "enum_declaration",
+}
+TREE_SITTER_IMPORT_NODES = {
+    "import_statement",
+    "import_declaration",
+    "import_from_statement",
+    "require",
+    "require_call",
+}
+TREE_SITTER_CALL_NODES = {
+    "call",
+    "call_expression",
+    "method_call",
+    "command_call",
+    "function_call",
+    "invocation",
+}
 
 
 def default_code_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -81,6 +129,7 @@ def default_code_config(profile: dict[str, Any] | None = None) -> dict[str, Any]
         "include_git_history": bool(configured.get("include_git_history", True)),
         "include_tests": bool(configured.get("include_tests", True)),
         "include_dependency_graph": bool(configured.get("include_dependency_graph", True)),
+        "parser_mode": str(configured.get("parser_mode", "ast-when-available")),
     }
 
 
@@ -181,6 +230,343 @@ def extract_calls(text: str) -> list[str]:
         if match.group(1).split(".", 1)[0] not in CALL_STOPWORDS
     ]
     return unique(calls, 100)
+
+
+def tree_sitter_language_for_path(path: Path) -> str:
+    return TREE_SITTER_LANGUAGE_BY_SUFFIX.get(path.suffix.lower(), "")
+
+
+def get_tree_sitter_parser(language_name: str) -> Any | None:
+    if not language_name:
+        return None
+    try:
+        from tree_sitter_languages import get_parser  # type: ignore
+    except Exception:
+        return None
+    try:
+        return get_parser(language_name)
+    except Exception:
+        return None
+
+
+def node_text(node: Any, text_bytes: bytes) -> str:
+    try:
+        return text_bytes[node.start_byte:node.end_byte].decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def walk_tree_sitter_nodes(root: Any) -> list[Any]:
+    nodes: list[Any] = []
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        try:
+            children = list(node.children)
+        except Exception:
+            children = []
+        stack.extend(reversed(children))
+    return nodes
+
+
+def first_named_child_text(node: Any, text_bytes: bytes) -> str:
+    try:
+        named = list(node.named_children)
+    except Exception:
+        named = []
+    for child in named:
+        if getattr(child, "type", "") in {"identifier", "constant", "type_identifier", "property_identifier", "field_identifier"}:
+            return node_text(child, text_bytes)
+    return ""
+
+
+def tree_sitter_node_name(node: Any, text_bytes: bytes) -> str:
+    try:
+        name_node = node.child_by_field_name("name")
+    except Exception:
+        name_node = None
+    if name_node is not None:
+        value = node_text(name_node, text_bytes)
+        if value:
+            return value
+    return first_named_child_text(node, text_bytes)
+
+
+def tree_sitter_call_name(node: Any, text_bytes: bytes) -> str:
+    try:
+        function_node = node.child_by_field_name("function")
+    except Exception:
+        function_node = None
+    if function_node is not None:
+        value = node_text(function_node, text_bytes)
+        if value:
+            return re.sub(r"\s+", " ", value)[:120]
+    return first_named_child_text(node, text_bytes) or re.sub(r"\s+", " ", node_text(node, text_bytes))[:120]
+
+
+def tree_sitter_symbol_kind(node_type: str) -> str:
+    if "class" in node_type or "module" in node_type or "struct" in node_type:
+        return "class"
+    if "type" in node_type or "enum" in node_type or "interface" in node_type:
+        return "type"
+    return "function"
+
+
+def extract_tree_sitter_ast(text: str, path: Path, relative_path: str) -> dict[str, Any]:
+    language_name = tree_sitter_language_for_path(path)
+    if not language_name:
+        return {
+            "parser_backend": "regex-fallback",
+            "ast_node_count": 0,
+            "symbols": {"classes": [], "functions": [], "types": []},
+            "imports": [],
+            "calls": [],
+            "symbol_edges": [],
+            "call_edges": [],
+            "routes": [],
+            "parser_limitations": ["No tree-sitter language mapping is configured for this file type."],
+        }
+    parser = get_tree_sitter_parser(language_name)
+    if parser is None:
+        return {
+            "parser_backend": "regex-fallback",
+            "ast_node_count": 0,
+            "symbols": {"classes": [], "functions": [], "types": []},
+            "imports": [],
+            "calls": [],
+            "symbol_edges": [],
+            "call_edges": [],
+            "routes": [],
+            "parser_limitations": [f"tree-sitter parser for `{language_name}` is not available; regex extraction was used."],
+        }
+    text_bytes = text.encode("utf-8", errors="ignore")
+    try:
+        tree = parser.parse(text_bytes)
+    except Exception as exc:
+        return {
+            "parser_backend": "regex-fallback",
+            "ast_node_count": 0,
+            "symbols": {"classes": [], "functions": [], "types": []},
+            "imports": [],
+            "calls": [],
+            "symbol_edges": [],
+            "call_edges": [],
+            "routes": [],
+            "parser_limitations": [f"tree-sitter parse failed for `{language_name}`: {exc}"],
+        }
+    classes: list[str] = []
+    functions: list[str] = []
+    types: list[str] = []
+    imports: list[str] = []
+    calls: list[str] = []
+    symbol_edges: list[dict[str, Any]] = []
+    call_edges: list[dict[str, Any]] = []
+    nodes = walk_tree_sitter_nodes(tree.root_node)
+    for node in nodes:
+        node_type = getattr(node, "type", "")
+        if node_type in TREE_SITTER_IMPORT_NODES:
+            imports.append(node_text(node, text_bytes))
+        if node_type in TREE_SITTER_SYMBOL_NODES:
+            name = tree_sitter_node_name(node, text_bytes)
+            if name:
+                kind = tree_sitter_symbol_kind(node_type)
+                if kind == "class":
+                    classes.append(name)
+                elif kind == "type":
+                    types.append(name)
+                else:
+                    functions.append(name)
+                symbol_edges.append(
+                    {
+                        "kind": kind,
+                        "name": name,
+                        "source": relative_path,
+                        "line_start": int(node.start_point[0]) + 1,
+                        "line_end": int(node.end_point[0]) + 1,
+                        "parser_backend": f"tree-sitter:{language_name}",
+                    }
+                )
+        if node_type in TREE_SITTER_CALL_NODES:
+            name = tree_sitter_call_name(node, text_bytes)
+            if name and name.split(".", 1)[0] not in CALL_STOPWORDS:
+                calls.append(name)
+                call_edges.append(
+                    {
+                        "from": relative_path,
+                        "to": name,
+                        "line_start": int(node.start_point[0]) + 1,
+                        "line_end": int(node.end_point[0]) + 1,
+                        "parser_backend": f"tree-sitter:{language_name}",
+                    }
+                )
+    return {
+        "parser_backend": f"tree-sitter:{language_name}",
+        "ast_node_count": len(nodes),
+        "symbols": {
+            "classes": unique(classes, 80),
+            "functions": unique(functions, 120),
+            "types": unique(types, 120),
+        },
+        "imports": unique(imports, 120),
+        "calls": unique(calls, 160),
+        "symbol_edges": symbol_edges[:300],
+        "call_edges": call_edges[:500],
+        "routes": [],
+        "parser_limitations": ["tree-sitter v1 captures syntax anchors and lightweight call edges, not full type-resolved references."],
+    }
+
+
+class PythonAstVisitor(ast.NodeVisitor):
+    def __init__(self, relative_path: str) -> None:
+        self.relative_path = relative_path
+        self.classes: list[str] = []
+        self.functions: list[str] = []
+        self.types: list[str] = []
+        self.imports: list[str] = []
+        self.calls: list[str] = []
+        self.routes: list[dict[str, str]] = []
+        self.symbol_edges: list[dict[str, Any]] = []
+        self.call_edges: list[dict[str, Any]] = []
+        self.scope: list[str] = []
+
+    def line_end(self, node: ast.AST) -> int:
+        return int(getattr(node, "end_lineno", getattr(node, "lineno", 1)) or 1)
+
+    def symbol_edge(self, kind: str, name: str, node: ast.AST) -> dict[str, Any]:
+        return {
+            "kind": kind,
+            "name": name,
+            "source": self.relative_path,
+            "line_start": int(getattr(node, "lineno", 1) or 1),
+            "line_end": self.line_end(node),
+            "parser_backend": "python-ast",
+        }
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.classes.append(node.name)
+        self.symbol_edges.append(self.symbol_edge("class", node.name, node))
+        self.scope.append(node.name)
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.functions.append(node.name)
+        self.symbol_edges.append(self.symbol_edge("function", node.name, node))
+        self.routes.extend(self.routes_from_decorators(node))
+        self.scope.append(node.name)
+        self.generic_visit(node)
+        self.scope.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.visit_FunctionDef(node)  # type: ignore[arg-type]
+
+    def visit_Import(self, node: ast.Import) -> None:
+        self.imports.extend(alias.name for alias in node.names)
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        prefix = "." * int(node.level or 0) + (node.module or "")
+        self.imports.extend(f"{prefix}.{alias.name}".strip(".") for alias in node.names)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        name = self.call_name(node.func)
+        if name and name.split(".", 1)[0] not in CALL_STOPWORDS:
+            self.calls.append(name)
+            self.call_edges.append(
+                {
+                    "from": ".".join(self.scope) if self.scope else self.relative_path,
+                    "to": name,
+                    "source": self.relative_path,
+                    "line_start": int(getattr(node, "lineno", 1) or 1),
+                    "line_end": self.line_end(node),
+                    "parser_backend": "python-ast",
+                }
+            )
+        self.generic_visit(node)
+
+    def call_name(self, node: ast.AST) -> str:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            parent = self.call_name(node.value)
+            return f"{parent}.{node.attr}" if parent else node.attr
+        return ""
+
+    def routes_from_decorators(self, node: ast.FunctionDef) -> list[dict[str, str]]:
+        routes: list[dict[str, str]] = []
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            name = self.call_name(decorator.func).lower()
+            method = name.rsplit(".", 1)[-1].upper()
+            if method not in {"GET", "POST", "PUT", "PATCH", "DELETE", "ROUTE"}:
+                continue
+            if not decorator.args or not isinstance(decorator.args[0], ast.Constant) or not isinstance(decorator.args[0].value, str):
+                continue
+            path_value = decorator.args[0].value
+            methods = ""
+            for keyword in decorator.keywords:
+                if keyword.arg == "methods" and isinstance(keyword.value, (ast.List, ast.Tuple)):
+                    values = [item.value for item in keyword.value.elts if isinstance(item, ast.Constant) and isinstance(item.value, str)]
+                    methods = ",".join(value.upper() for value in values)
+            routes.append({"method": methods or method, "path": path_value, "source": self.relative_path})
+        return routes
+
+
+def count_python_ast_nodes(root: ast.AST) -> int:
+    return sum(1 for _ in ast.walk(root))
+
+
+def extract_python_ast(text: str, relative_path: str) -> dict[str, Any]:
+    try:
+        root = ast.parse(text)
+    except SyntaxError as exc:
+        return {
+            "parser_backend": "regex-fallback",
+            "ast_node_count": 0,
+            "symbols": {"classes": [], "functions": [], "types": []},
+            "imports": [],
+            "calls": [],
+            "symbol_edges": [],
+            "call_edges": [],
+            "routes": [],
+            "parser_limitations": [f"python ast parse failed: {exc}"],
+        }
+    visitor = PythonAstVisitor(relative_path)
+    visitor.visit(root)
+    return {
+        "parser_backend": "python-ast",
+        "ast_node_count": count_python_ast_nodes(root),
+        "symbols": {
+            "classes": unique(visitor.classes, 80),
+            "functions": unique(visitor.functions, 120),
+            "types": unique(visitor.types, 120),
+        },
+        "imports": unique(visitor.imports, 120),
+        "calls": unique(visitor.calls, 160),
+        "symbol_edges": visitor.symbol_edges[:300],
+        "call_edges": visitor.call_edges[:500],
+        "routes": visitor.routes[:120],
+        "parser_limitations": ["python ast captures syntax anchors and lightweight call edges, not runtime type-resolved references."],
+    }
+
+
+def extract_ast_intelligence(text: str, path: Path, relative_path: str, parser_mode: str) -> dict[str, Any]:
+    if parser_mode == "regex-only":
+        return {
+            "parser_backend": "regex-fallback",
+            "ast_node_count": 0,
+            "symbols": {"classes": [], "functions": [], "types": []},
+            "imports": [],
+            "calls": [],
+            "symbol_edges": [],
+            "call_edges": [],
+            "routes": [],
+            "parser_limitations": ["Profile configured parser_mode=regex-only."],
+        }
+    if path.suffix.lower() == ".py":
+        return extract_python_ast(text, relative_path)
+    return extract_tree_sitter_ast(text, path, relative_path)
 
 
 def extract_routes(text: str, relative_path: str) -> list[dict[str, str]]:
@@ -290,7 +676,21 @@ def migration_signals(relative_path: str, text: str) -> list[str]:
     return unique(signals, 20)
 
 
-def analyze_file(repo_name: str, repo_path: Path, path: Path, git_metrics: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+def merge_symbols(regex_symbols: dict[str, list[str]], ast_symbols: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {
+        "classes": unique([*ast_symbols.get("classes", []), *regex_symbols.get("classes", [])], 80),
+        "functions": unique([*ast_symbols.get("functions", []), *regex_symbols.get("functions", [])], 120),
+        "types": unique([*ast_symbols.get("types", []), *regex_symbols.get("types", [])], 120),
+    }
+
+
+def analyze_file(
+    repo_name: str,
+    repo_path: Path,
+    path: Path,
+    git_metrics: dict[str, dict[str, Any]] | None = None,
+    parser_mode: str = "ast-when-available",
+) -> dict[str, Any]:
     relative_path = path.relative_to(repo_path).as_posix()
     try:
         text = path.read_text(errors="ignore")
@@ -305,26 +705,39 @@ def analyze_file(repo_name: str, repo_path: Path, path: Path, git_metrics: dict[
     if structured_error:
         parse_quality = "partial"
         parser_errors.append(structured_error)
-    symbols = extract_symbols(text)
-    imports = extract_imports(text, language)
-    calls = extract_calls(text)
-    routes = extract_routes(text, relative_path)
+    ast_intel = extract_ast_intelligence(text, path, relative_path, parser_mode)
+    symbols = merge_symbols(extract_symbols(text), ast_intel.get("symbols") or {})
+    imports = unique([*ast_intel.get("imports", []), *extract_imports(text, language)], 160)
+    calls = unique([*ast_intel.get("calls", []), *extract_calls(text)], 200)
+    routes = [
+        *ast_intel.get("routes", []),
+        *extract_routes(text, relative_path),
+    ]
     schemas = extract_schemas(text, path, relative_path)
     tests = extract_tests(text, relative_path)
     env_vars = extract_env_vars(text)
     dependencies = extract_dependencies(path, text, imports)
     migrations = migration_signals(relative_path, text)
     metrics = (git_metrics or {}).get(relative_path, {})
+    line_count = len(text.splitlines()) if text else 0
+    parser_limitations = list(ast_intel.get("parser_limitations") or [])
     return {
         "repo": repo_name,
         "relative_path": relative_path,
         "language": language,
         "parse_quality": parse_quality,
         "parser_errors": parser_errors,
+        "parser_backend": ast_intel.get("parser_backend", "regex-fallback"),
+        "ast_node_count": int(ast_intel.get("ast_node_count", 0) or 0),
+        "parser_limitations": parser_limitations,
+        "line_start": 1 if line_count else 0,
+        "line_end": line_count,
         "symbols": symbols,
         "symbol_count": sum(len(values) for values in symbols.values()),
+        "symbol_edges": list(ast_intel.get("symbol_edges") or []),
         "imports": imports,
         "calls": calls,
+        "call_edges": list(ast_intel.get("call_edges") or []),
         "routes": routes,
         "route_count": len(routes),
         "schemas": schemas,
@@ -394,8 +807,12 @@ def graph_from_files(files: list[dict[str, Any]]) -> dict[str, Any]:
         node = f"{item['repo']}/{item['relative_path']}"
         for dep in item["dependencies"][:80]:
             dependency_edges.append({"from": node, "to": dep})
-        for call in item["calls"][:80]:
-            call_edges.append({"from": node, "to": call})
+        if item.get("call_edges"):
+            for edge in item["call_edges"][:120]:
+                call_edges.append({"from": f"{item['repo']}/{edge.get('from', item['relative_path'])}", "to": str(edge.get("to", ""))})
+        else:
+            for call in item["calls"][:80]:
+                call_edges.append({"from": node, "to": call})
         for route in item["routes"]:
             route_edges.append({"from": node, "to": f"{route['method']} {route['path']}"})
         for schema in item["schemas"]:
@@ -419,7 +836,10 @@ def analyze_repositories(repo_roots: dict[str, Path], profile: dict[str, Any] | 
         code_files = collect_code_files(repo_path, config["max_files_per_repo"])
         relative_paths = {path.relative_to(repo_path).as_posix() for path in code_files}
         git_metrics = collect_git_metrics(repo_path, relative_paths) if config["include_git_history"] else {}
-        repo_files = [analyze_file(repo_name, repo_path, path, git_metrics=git_metrics) for path in code_files]
+        repo_files = [
+            analyze_file(repo_name, repo_path, path, git_metrics=git_metrics, parser_mode=config["parser_mode"])
+            for path in code_files
+        ]
         files.extend(repo_files)
         repo_summaries.append(
             {
@@ -427,6 +847,7 @@ def analyze_repositories(repo_roots: dict[str, Path], profile: dict[str, Any] | 
                 "path": str(repo_path),
                 "files_scanned": len(repo_files),
                 "parse_failures": sum(1 for item in repo_files if item["parse_quality"] != "complete"),
+                "ast_parsed_files": sum(1 for item in repo_files if item["parser_backend"] != "regex-fallback"),
                 "route_count": sum(item["route_count"] for item in repo_files),
                 "schema_count": sum(item["schema_count"] for item in repo_files),
                 "test_anchor_count": sum(item["test_anchor_count"] for item in repo_files),
@@ -442,6 +863,8 @@ def analyze_repositories(repo_roots: dict[str, Path], profile: dict[str, Any] | 
     summary = {
         "parsed_files": len(files),
         "parse_failures": sum(1 for item in files if item["parse_quality"] != "complete"),
+        "ast_parsed_files": sum(1 for item in files if item["parser_backend"] != "regex-fallback"),
+        "ast_node_count": sum(int(item.get("ast_node_count", 0)) for item in files),
         "route_count": len(graph["routes"]),
         "schema_count": len(graph["schemas"]),
         "test_anchor_count": len(graph["tests"]),

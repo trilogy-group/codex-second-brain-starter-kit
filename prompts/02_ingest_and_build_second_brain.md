@@ -20,7 +20,7 @@ Requirements:
 - create home notes, research hubs, and product-memory notes
 - connect documentation, external links, and repository context where relevant
 - create rich code-reference notes and code-intelligence maps for symbols, routes, schemas, calls, dependencies, tests, ownership/churn, parser limitations, implementation intent, static risk signals, and conflicts
-- generate semantic intermediate packets from OpenAI embeddings over compact evidence cards, preserving links back to source evidence and related code surfaces
+- generate semantic intermediate packets from OpenAI embeddings and LLM synthesis over compact evidence cards, preserving links back to source evidence, related code surfaces, and exact generated output candidates
 - add conflicts whenever documentation and code disagree
 - show exact uncaptured or blocked URLs instead of only reporting counts
 - record access requirements and use approved credential/session storage for authenticated sources; never store raw credentials in the vault

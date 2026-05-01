@@ -103,8 +103,9 @@ The rebuild should produce:
 - intermediate packets that turn reusable support, wiki, and code clusters into future work building blocks
 - generated output candidates in the vault, capped to high-value packets so they do not become a flat task dump
 - weekly review and stale-source archive records that close the CODE loop without moving user-authored notes
-- code-reference notes with symbols, routes, schemas, calls, dependencies, tests, ownership/churn, parser limitations, intent, relevance, and risk/conflict summaries
-- semantic intermediate packets generated from OpenAI embeddings over compact evidence cards
+- code-reference notes with symbols, routes, schemas, calls, dependencies, tests, ownership/churn, AST/parser metadata, parser limitations, intent, relevance, and risk/conflict summaries
+- semantic intermediate packets generated from OpenAI embeddings over compact evidence cards, with LLM synthesis for theme naming and cluster explanations
+- exact output-candidate backlinks in generated packet notes after output drafts are selected
 - explicit blocker and uncaptured-evidence sections instead of silent omissions
 - a privacy pass that redacts obvious PII from generated vault markdown
 

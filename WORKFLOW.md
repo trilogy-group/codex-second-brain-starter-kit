@@ -86,7 +86,8 @@ Expected outputs:
 - a weekly review note in `70 Journal/Reviews/`
 - stale-source archive records in `90 Archive/Stale Sources/`
 - code-intelligence maps in `40 Research/Code Intelligence/Maps/` and `40 Research/Code Intelligence/Graphs/`
-- semantic intermediate packets in `40 Research/Intermediate Packets/`
+- semantic intermediate packets with LLM synthesis in `40 Research/Intermediate Packets/`
+- AST/parser metadata in code-reference notes when optional tree-sitter parsers are available
 - full support and wiki content preserved in-note
 - problem and initiative notes
 - code-reference notes with summaries, intent, relevance, risks, and conflicts

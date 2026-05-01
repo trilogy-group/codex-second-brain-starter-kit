@@ -75,6 +75,8 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                     errors.append("profile semantic_clustering.provider must be `openai`.")
                 if semantic and not semantic.get("embedding_model"):
                     errors.append("profile semantic_clustering.embedding_model is required when semantic clustering is configured.")
+                if semantic and semantic.get("llm_cluster_synthesis", True) and not semantic.get("llm_model"):
+                    errors.append("profile semantic_clustering.llm_model is required when LLM cluster synthesis is enabled.")
                 code = profile_data.get("code_intelligence") or {}
                 try:
                     max_files = int(code.get("max_files_per_repo", 1))
@@ -82,6 +84,8 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                     max_files = 0
                 if code and max_files <= 0:
                     errors.append("profile code_intelligence.max_files_per_repo must be positive.")
+                if code and code.get("parser_mode", "ast-when-available") not in {"ast-when-available", "regex-only"}:
+                    errors.append("profile code_intelligence.parser_mode must be `ast-when-available` or `regex-only`.")
 
     repos = data.get("repositories")
     if not isinstance(repos, dict):

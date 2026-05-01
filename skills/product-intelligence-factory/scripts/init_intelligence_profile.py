@@ -104,12 +104,16 @@ def build_profile() -> dict[str, object]:
             "min_cluster_size": 3,
             "similarity_threshold": 0.78,
             "max_clusters": 40,
+            "llm_model": "gpt-4.1-mini",
+            "llm_cluster_synthesis": True,
+            "max_llm_clusters": 40,
         },
         "code_intelligence": {
             "max_files_per_repo": 1200,
             "include_git_history": True,
             "include_tests": True,
             "include_dependency_graph": True,
+            "parser_mode": "ast-when-available",
         },
         "capabilities": default_capabilities(),
     }

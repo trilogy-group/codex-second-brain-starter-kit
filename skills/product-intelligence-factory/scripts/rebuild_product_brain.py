@@ -913,6 +913,12 @@ def write_note(path: Path, body: str) -> None:
     path.write_text(body.rstrip() + "\n")
 
 
+def write_generated_note(path: Path, body: str) -> None:
+    if path.exists() and not is_generated_note(path):
+        raise SystemExit(f"Refusing to overwrite user-authored note: {path}")
+    write_note(path, body)
+
+
 def clear_markdown_dir(path: Path) -> None:
     if not path.exists():
         ensure_dir(path)
@@ -973,8 +979,14 @@ class CodeReferenceAnalysis:
     churn_score: int = 0
     owner_candidates: list[str] = field(default_factory=list)
     parse_quality: str = "heuristic"
+    parser_backend: str = "regex-fallback"
+    ast_node_count: int = 0
+    line_start: int = 0
+    line_end: int = 0
     imports: list[str] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    symbol_edges: list[dict[str, Any]] = field(default_factory=list)
+    call_edges: list[dict[str, Any]] = field(default_factory=list)
     routes: list[dict[str, Any]] = field(default_factory=list)
     schemas: list[dict[str, Any]] = field(default_factory=list)
     tests: list[dict[str, Any]] = field(default_factory=list)
@@ -982,6 +994,7 @@ class CodeReferenceAnalysis:
     env_vars: list[str] = field(default_factory=list)
     migrations: list[str] = field(default_factory=list)
     parser_errors: list[str] = field(default_factory=list)
+    parser_limitations: list[str] = field(default_factory=list)
 
 
 def infer_code_language(relative_path: str) -> str:
@@ -1246,8 +1259,14 @@ def analyze_code_reference(hit: dict[str, Any], code_file: dict[str, Any] | None
         churn_score=int((code_file or {}).get("churn_score") or 0),
         owner_candidates=list((code_file or {}).get("owner_candidates") or []),
         parse_quality=str((code_file or {}).get("parse_quality") or "heuristic"),
+        parser_backend=str((code_file or {}).get("parser_backend") or "regex-fallback"),
+        ast_node_count=int((code_file or {}).get("ast_node_count") or 0),
+        line_start=int((code_file or {}).get("line_start") or 0),
+        line_end=int((code_file or {}).get("line_end") or 0),
         imports=list((code_file or {}).get("imports") or []),
         calls=list((code_file or {}).get("calls") or []),
+        symbol_edges=list((code_file or {}).get("symbol_edges") or []),
+        call_edges=list((code_file or {}).get("call_edges") or []),
         routes=list((code_file or {}).get("routes") or []),
         schemas=list((code_file or {}).get("schemas") or []),
         tests=list((code_file or {}).get("tests") or []),
@@ -1255,6 +1274,7 @@ def analyze_code_reference(hit: dict[str, Any], code_file: dict[str, Any] | None
         env_vars=list((code_file or {}).get("env_vars") or []),
         migrations=list((code_file or {}).get("migrations") or []),
         parser_errors=list((code_file or {}).get("parser_errors") or []),
+        parser_limitations=list((code_file or {}).get("parser_limitations") or []),
     )
 
 
@@ -1646,6 +1666,10 @@ def build_code_reference_note(
                 "churn_score": analysis.churn_score,
                 "owner_candidates": analysis.owner_candidates,
                 "parse_quality": analysis.parse_quality,
+                "parser_backend": analysis.parser_backend,
+                "ast_node_count": analysis.ast_node_count,
+                "line_start": analysis.line_start,
+                "line_end": analysis.line_end,
                 **basb_frontmatter(
                     stage="distill",
                     para="resource",
@@ -1722,6 +1746,11 @@ def build_code_reference_note(
         lines.append(f"- Imports/requires: {', '.join(f'`{name}`' for name in analysis.imports[:30])}")
     if analysis.calls:
         lines.append(f"- Calls detected: {', '.join(f'`{name}`' for name in analysis.calls[:40])}")
+    if analysis.call_edges:
+        lines.extend(
+            f"- Call edge: `{edge.get('from', hit['relative_path'])}` -> `{edge.get('to', '')}`"
+            for edge in analysis.call_edges[:20]
+        )
     if not analysis.imports and not analysis.calls:
         lines.append("- No imports or call anchors were extracted from this file.")
 
@@ -1747,8 +1776,18 @@ def build_code_reference_note(
 
     lines.extend(["", "## Parser limitations", ""])
     lines.append(f"- Parse quality: `{analysis.parse_quality}`")
+    lines.append(f"- Parser backend: `{analysis.parser_backend}`")
+    lines.append(f"- AST nodes: `{analysis.ast_node_count}`")
+    if analysis.line_start and analysis.line_end:
+        lines.append(f"- File line range: `{analysis.line_start}-{analysis.line_end}`")
+    if analysis.symbol_edges:
+        lines.append(f"- AST symbol anchors: `{len(analysis.symbol_edges)}`")
+    if analysis.call_edges:
+        lines.append(f"- AST call anchors: `{len(analysis.call_edges)}`")
     if analysis.parser_errors:
         lines.extend(f"- {error}" for error in analysis.parser_errors[:5])
+    if analysis.parser_limitations:
+        lines.extend(f"- {limitation}" for limitation in analysis.parser_limitations[:5])
     else:
         lines.append("- This is a broad static scan, not compiler-grade whole-program analysis.")
 
@@ -1945,6 +1984,7 @@ def build_intermediate_packet_note(
                 "source": "generated",
                 "packet_kind": packet_kind,
                 "evidence_score": score,
+                "generated_output_candidates": output_candidate_links,
                 **basb_frontmatter(
                     stage="distill",
                     para="resource",
@@ -2187,6 +2227,23 @@ def build_output_candidate_note(packet: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def build_packet_note_from_spec(spec: dict[str, Any], output_candidate_links: list[str]) -> str:
+    if spec["kind"] == "semantic":
+        return build_semantic_packet_note(spec["cluster"], output_candidate_links=output_candidate_links)
+    return build_intermediate_packet_note(
+        capability=spec["capability"],
+        support_links=spec["support_links"],
+        wiki_links=spec["wiki_links"],
+        repo_note_links=spec["repo_note_links"],
+        code_reference_links=spec["code_reference_links"],
+        packet_kind=spec["packet_kind"],
+        conflict_links=spec["conflict_links"],
+        stale_doc_count=spec["stale_doc_count"],
+        evidence_score=spec["evidence_score"],
+        output_candidate_links=output_candidate_links,
+    )
 
 
 def build_weekly_review_note(
@@ -2652,6 +2709,9 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
                 "packet_kind": "semantic-cluster",
                 "semantic_cluster_score": cluster.get("similarity_score", 0),
                 "evidence_score": cluster.get("evidence_score", 0),
+                "llm_synthesis_status": cluster.get("llm_synthesis_status", "unknown"),
+                "llm_model": cluster.get("llm_model", ""),
+                "generated_output_candidates": output_candidate_links,
                 **basb_frontmatter(
                     stage="distill",
                     para="resource",
@@ -2672,12 +2732,30 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
         "",
         "## Why this cluster exists",
         "",
-        "- These sources were grouped by OpenAI embeddings over compact evidence cards drawn from support, wiki, code-reference, and generated-note context.",
+        f"- {cluster.get('why_this_cluster_exists') or 'These sources were grouped by OpenAI embeddings over compact evidence cards drawn from support, wiki, code-reference, and generated-note context.'}",
         "- The cluster is meant to reveal reusable work themes across sources that may not use the same wording.",
         "",
-        "## Cross-source evidence",
-        "",
     ]
+    if cluster.get("llm_summary"):
+        lines.extend(["", "## LLM synthesis", "", f"- {cluster['llm_summary']}"])
+    if cluster.get("merge_split_recommendation") or cluster.get("output_candidate_rationale"):
+        lines.extend(["", "## Synthesis guidance", ""])
+        if cluster.get("merge_split_recommendation"):
+            lines.append(f"- Merge/split: {cluster['merge_split_recommendation']}")
+        if cluster.get("output_candidate_rationale"):
+            lines.append(f"- Output rationale: {cluster['output_candidate_rationale']}")
+    lines.extend(
+        [
+            "",
+            "## Synthesis status",
+            "",
+            f"- LLM synthesis status: `{cluster.get('llm_synthesis_status', 'unknown')}`",
+            f"- LLM model: `{cluster.get('llm_model', '')}`",
+            "",
+            "## Cross-source evidence",
+            "",
+        ]
+    )
     if evidence_links:
         lines.extend(f"- {link}" for link in evidence_links[:60])
     else:
@@ -3392,6 +3470,7 @@ def main() -> None:
     capability_rows: list[dict[str, Any]] = []
     packet_records: list[dict[str, Any]] = []
     packet_links: list[str] = []
+    packet_write_specs: dict[str, dict[str, Any]] = {}
     support_grouped_for_hub: dict[str, list[str]] = defaultdict(list)
     for key, links in support_links_by_cap.items():
         support_grouped_for_hub[key] = sorted(links)
@@ -3451,7 +3530,19 @@ def main() -> None:
             "stale_doc_count": stale_doc_count,
             "evidence_score": evidence_score,
         }
-        write_note(
+        packet_write_specs[packet_stem] = {
+            "kind": "standard",
+            "capability": capability,
+            "support_links": support_links,
+            "wiki_links": wiki_links,
+            "repo_note_links": repo_note_links,
+            "code_reference_links": code_reference_links,
+            "packet_kind": "capability",
+            "conflict_links": conflict_links,
+            "stale_doc_count": stale_doc_count,
+            "evidence_score": evidence_score,
+        }
+        write_generated_note(
             intermediate_packet_dir / f"{packet_stem}.md",
             build_intermediate_packet_note(
                 capability=capability,
@@ -3509,7 +3600,19 @@ def main() -> None:
             "stale_doc_count": len(entries) if kind == "documentation-drift" else 0,
             "evidence_score": evidence_score,
         }
-        write_note(
+        packet_write_specs[packet_stem] = {
+            "kind": "standard",
+            "capability": capability,
+            "support_links": [],
+            "wiki_links": [],
+            "repo_note_links": [],
+            "code_reference_links": [],
+            "packet_kind": "conflict-cluster",
+            "conflict_links": packet_record["conflict_links"],
+            "stale_doc_count": packet_record["stale_doc_count"],
+            "evidence_score": evidence_score,
+        }
+        write_generated_note(
             intermediate_packet_dir / f"{packet_stem}.md",
             build_intermediate_packet_note(
                 capability=capability,
@@ -3566,7 +3669,19 @@ def main() -> None:
             "stale_doc_count": 0,
             "evidence_score": score,
         }
-        write_note(
+        packet_write_specs[packet_stem] = {
+            "kind": "standard",
+            "capability": capability,
+            "support_links": support_links,
+            "wiki_links": wiki_links,
+            "repo_note_links": repo_note_links,
+            "code_reference_links": code_reference_links,
+            "packet_kind": "code-path-cluster",
+            "conflict_links": [],
+            "stale_doc_count": 0,
+            "evidence_score": score,
+        }
+        write_generated_note(
             intermediate_packet_dir / f"{packet_stem}.md",
             build_intermediate_packet_note(
                 capability=capability,
@@ -3614,7 +3729,11 @@ def main() -> None:
             "semantic_cluster_score": cluster.get("similarity_score", 0),
             "evidence_score": evidence_score,
         }
-        write_note(
+        packet_write_specs[packet_stem] = {
+            "kind": "semantic",
+            "cluster": cluster,
+        }
+        write_generated_note(
             intermediate_packet_dir / f"{packet_stem}.md",
             build_semantic_packet_note(cluster),
         )
@@ -3622,11 +3741,13 @@ def main() -> None:
         packet_links.append(packet_link)
 
     output_candidate_records: list[dict[str, Any]] = []
+    output_links_by_packet: dict[str, list[str]] = defaultdict(list)
     for packet in select_output_candidates(packet_records):
         output_kind = infer_output_kind(packet)
         output_stem = stem_for_output_candidate(packet["title"])
         output_link = note_link(output_stem)
-        write_note(output_candidate_dir / f"{output_stem}.md", build_output_candidate_note(packet))
+        write_generated_note(output_candidate_dir / f"{output_stem}.md", build_output_candidate_note(packet))
+        output_links_by_packet[packet["link"]].append(output_link)
         output_candidate_records.append(
             {
                 "title": packet["title"],
@@ -3636,6 +3757,15 @@ def main() -> None:
                 "source_packet": packet["link"],
                 "evidence_score": packet.get("evidence_score", 0),
             }
+        )
+
+    for packet in packet_records:
+        spec = packet_write_specs.get(packet["stem"])
+        if not spec:
+            continue
+        write_generated_note(
+            intermediate_packet_dir / f"{packet['stem']}.md",
+            build_packet_note_from_spec(spec, unique_lines(output_links_by_packet.get(packet["link"], []), 12)),
         )
 
     stale_doc_refs = [entry for entry in external_links if entry.get("status") == "stale-doc-reference"]

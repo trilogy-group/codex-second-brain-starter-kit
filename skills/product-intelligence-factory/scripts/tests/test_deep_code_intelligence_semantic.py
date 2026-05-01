@@ -53,6 +53,12 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertIn("User", by_path["web.ts"]["symbols"]["types"])
         self.assertIn({"method": "POST", "path": "/login", "source": "service.py"}, by_path["service.py"]["routes"])
         self.assertIn("LOGIN_TOKEN", by_path["service.py"]["env_vars"])
+        self.assertEqual(by_path["service.py"]["parser_backend"], "python-ast")
+        self.assertGreater(by_path["service.py"]["ast_node_count"], 0)
+        self.assertTrue(by_path["service.py"]["symbol_edges"])
+        self.assertTrue(by_path["service.py"]["call_edges"])
+        self.assertEqual(by_path["service.py"]["line_start"], 1)
+        self.assertGreaterEqual(by_path["service.py"]["line_end"], 3)
         self.assertIn("User", by_path["main.go"]["symbols"]["classes"])
         self.assertIn("LoginController", by_path["ViewController.swift"]["symbols"]["classes"])
         self.assertIn("LoginWidget", by_path["Widget.m"]["symbols"]["classes"])
@@ -60,6 +66,8 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertGreaterEqual(by_path["openapi.yaml"]["schema_count"], 2)
         self.assertIn("react", by_path["package.json"]["dependencies"])
         self.assertGreaterEqual(result["summary"]["dependency_edges"], 1)
+        self.assertGreaterEqual(result["summary"]["ast_parsed_files"], 1)
+        self.assertGreater(result["summary"]["ast_node_count"], 0)
 
     def test_git_history_metrics_extract_churn_and_owner_candidates(self) -> None:
         module = load_module(CODE_INTELLIGENCE_SCRIPT, "code_intelligence_git_test")
@@ -101,6 +109,24 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertGreaterEqual(result["summary"]["parse_failures"], 1)
         self.assertTrue(broken["parser_errors"])
 
+    def test_regex_only_parser_mode_keeps_fallback_inventory_fields(self) -> None:
+        module = load_module(CODE_INTELLIGENCE_SCRIPT, "code_intelligence_regex_only_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            (repo / "app.js").write_text("function login() { return fetch('/login'); }\n")
+            result = module.analyze_repositories(
+                {"sample-repo": repo},
+                {"code_intelligence": {"max_files_per_repo": 20, "include_git_history": False, "parser_mode": "regex-only"}},
+            )
+            item = result["files"][0]
+
+        self.assertEqual(item["parser_backend"], "regex-fallback")
+        self.assertEqual(item["ast_node_count"], 0)
+        self.assertEqual(item["line_start"], 1)
+        self.assertEqual(item["line_end"], 1)
+        self.assertIn("login", item["symbols"]["functions"])
+
     def test_openai_key_missing_fails_semantic_clustering(self) -> None:
         module = load_module(SEMANTIC_SCRIPT, "semantic_missing_key_test")
         original_key = os.environ.pop("OPENAI_API_KEY", None)
@@ -122,7 +148,9 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
     def test_fixture_semantic_clustering_groups_related_cards_and_reuses_cache(self) -> None:
         module = load_module(SEMANTIC_SCRIPT, "semantic_fixture_cache_test")
         original_fixture = os.environ.get("PRODUCT_BASB_EMBEDDING_FIXTURE")
+        original_llm_fixture = os.environ.get("PRODUCT_BASB_LLM_FIXTURE")
         os.environ["PRODUCT_BASB_EMBEDDING_FIXTURE"] = "1"
+        os.environ["PRODUCT_BASB_LLM_FIXTURE"] = "1"
         try:
             cards = [
                 {"id": "support-1", "kind": "support", "title": "Login failure", "summary": "Session token expires", "capabilities": ["Identity"], "evidence_terms": ["auth"], "code_terms": ["session"]},
@@ -139,10 +167,46 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
                 os.environ.pop("PRODUCT_BASB_EMBEDDING_FIXTURE", None)
             else:
                 os.environ["PRODUCT_BASB_EMBEDDING_FIXTURE"] = original_fixture
+            if original_llm_fixture is None:
+                os.environ.pop("PRODUCT_BASB_LLM_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_LLM_FIXTURE"] = original_llm_fixture
 
         self.assertEqual(len(first["clusters"]), 1)
         self.assertEqual(first["stats"]["cache_misses"], 3)
+        self.assertEqual(first["stats"]["llm_cache_misses"], 1)
+        self.assertEqual(first["clusters"][0]["llm_synthesis_status"], "succeeded")
+        self.assertIn("Synthesized", first["clusters"][0]["theme"])
         self.assertEqual(second["stats"]["cache_hits"], 3)
+        self.assertEqual(second["stats"]["llm_cache_hits"], 1)
+
+    def test_llm_synthesis_failure_preserves_embedding_cluster(self) -> None:
+        module = load_module(SEMANTIC_SCRIPT, "semantic_llm_failure_test")
+
+        class FailingLLMClient:
+            def synthesize_cluster(self, cluster, model):
+                raise RuntimeError("planned failure")
+
+        original_fixture = os.environ.get("PRODUCT_BASB_EMBEDDING_FIXTURE")
+        os.environ["PRODUCT_BASB_EMBEDDING_FIXTURE"] = "1"
+        try:
+            cards = [
+                {"id": "support-1", "kind": "support", "title": "Login failure", "summary": "Session token expires", "capabilities": ["Identity"], "evidence_terms": ["auth"], "code_terms": ["session"]},
+                {"id": "wiki-1", "kind": "wiki", "title": "SSO setup", "summary": "Identity provider access", "capabilities": ["Identity"], "evidence_terms": ["sso"], "code_terms": ["permission"]},
+                {"id": "code-1", "kind": "code", "title": "AuthController", "summary": "Login session permissions", "capabilities": ["Identity"], "evidence_terms": ["login"], "code_terms": ["auth"]},
+            ]
+            config = module.default_semantic_config({"semantic_clustering": {"min_cluster_size": 3, "similarity_threshold": 0.4}})
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                result = module.cluster_cards(cards, config, Path(tmp_dir) / "embedding_cache.json", llm_client=FailingLLMClient())
+        finally:
+            if original_fixture is None:
+                os.environ.pop("PRODUCT_BASB_EMBEDDING_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_EMBEDDING_FIXTURE"] = original_fixture
+
+        self.assertEqual(len(result["clusters"]), 1)
+        self.assertEqual(result["clusters"][0]["llm_synthesis_status"], "failed")
+        self.assertEqual(result["stats"]["llm_failures"], 1)
 
     def test_semantic_packet_note_contains_required_progressive_sections(self) -> None:
         module = load_module(REBUILD_SCRIPT, "rebuild_semantic_packet_note_test")
@@ -155,6 +219,12 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
                 "theme": "Identity Access",
                 "similarity_score": 0.91,
                 "evidence_score": 8,
+                "llm_summary": "Identity access evidence should be reviewed together.",
+                "why_this_cluster_exists": "The cards point to the same login path.",
+                "merge_split_recommendation": "Keep together.",
+                "output_candidate_rationale": "Strong delivery candidate.",
+                "llm_synthesis_status": "succeeded",
+                "llm_model": "gpt-4.1-mini",
                 "cards": [
                     {
                         "link": "[[Support - Login]]",
@@ -171,6 +241,11 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertIn("## Theme", body)
         self.assertIn("## Why this cluster exists", body)
         self.assertIn("## Cross-source evidence", body)
+        self.assertIn("generated_output_candidates:", body)
+        self.assertIn("## LLM synthesis", body)
+        self.assertIn("Identity access evidence", body)
+        self.assertIn("## Synthesis guidance", body)
+        self.assertIn("## Synthesis status", body)
         self.assertIn("## Related code surfaces", body)
         self.assertIn("## Output candidates", body)
         self.assertIn("## Cluster limitations", body)

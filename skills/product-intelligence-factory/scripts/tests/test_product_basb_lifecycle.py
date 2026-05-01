@@ -87,6 +87,25 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         self.assertIn("archive_reason: \"stale-documentation\"", archive)
         self.assertIn("https://legacy.example.com/page", archive)
 
+    def test_packet_notes_include_generated_output_candidate_backlinks(self) -> None:
+        module = load_module(REBUILD_SCRIPT, "rebuild_product_brain_packet_backlink_test")
+        body = module.build_intermediate_packet_note(
+            capability={
+                "key": "platform-core",
+                "title": "Platform Core",
+                "description": "Core product behavior.",
+            },
+            support_links=["[[Support 1]]"],
+            wiki_links=[],
+            repo_note_links=[],
+            code_reference_links=["[[Code Ref 1]]"],
+            output_candidate_links=["[[Output Candidate - Platform Core]]"],
+        )
+
+        self.assertIn("generated_output_candidates:", body)
+        self.assertIn("[[Output Candidate - Platform Core]]", body)
+        self.assertIn("## Can feed", body)
+
     def test_audit_flags_lifecycle_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             vault = Path(tmp_dir) / "vault"
@@ -185,12 +204,13 @@ class ProductBasbLifecycleTests(unittest.TestCase):
             inventory_dir = root / "mirror" / "inventories"
             inventory_dir.mkdir(parents=True)
             (inventory_dir / "code_intelligence.json").write_text(
-                '{"summary":{"parsed_files":12,"parse_failures":1,"route_count":2,"schema_count":3,"test_anchor_count":4,"dependency_edges":5},"graph":{"dependencies":[{"from":"a","to":"b"}]}}\n'
+                '{"summary":{"parsed_files":12,"parse_failures":1,"ast_parsed_files":9,"ast_node_count":120,"route_count":2,"schema_count":3,"test_anchor_count":4,"dependency_edges":5},"graph":{"dependencies":[{"from":"a","to":"b"}]}}\n'
             )
             (inventory_dir / "semantic_clusters.json").write_text(
-                '{"clusters":[{"id":"semantic-cluster-1"}],"stats":{"cache_hits":8,"cache_misses":2,"openai_failures":0}}\n'
+                '{"clusters":[{"id":"semantic-cluster-1"}],"stats":{"cache_hits":8,"cache_misses":2,"openai_failures":0,"llm_cache_hits":3,"llm_cache_misses":1,"llm_failures":0}}\n'
             )
             (inventory_dir / "embedding_cache.json").write_text('{"items":{"a":{},"b":{}}}\n')
+            (inventory_dir / "llm_cluster_cache.json").write_text('{"items":{"cluster":{}}}\n')
             manifest = {
                 "product": {"name": "Acme", "slug": "acme", "mode": "product", "vault_path": str(vault), "workspace_path": str(root)},
                 "sources": {"corpus_path": str(root / "corpus"), "mirror_path": str(root / "mirror")},
@@ -208,8 +228,11 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         self.assertIn("- Weekly reviews: `1`", report)
         self.assertIn("## Code Intelligence And Semantic Metrics", report)
         self.assertIn("- Parsed files: `12`", report)
+        self.assertIn("- AST parsed files: `9`", report)
+        self.assertIn("- AST nodes: `120`", report)
         self.assertIn("- Semantic clusters: `1`", report)
         self.assertIn("- Embedding cache hit rate: `80%`", report)
+        self.assertIn("- LLM synthesis cache hits: `3`", report)
 
     def test_migration_dry_run_and_write_create_surfaces_without_overwriting_user_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
