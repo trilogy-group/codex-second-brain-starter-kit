@@ -221,11 +221,51 @@ class NoteEnrichmentTests(unittest.TestCase):
                 support_links=["[[Support - 100 - Marketo Lead Sync]]"],
                 wiki_links=["[[Wiki - How-to - Marketo Setup]]"],
                 capability_links=["[[Capability - Marketo Integration]]"],
+                code_file={
+                    "language": "JavaScript",
+                    "parse_quality": "complete",
+                    "symbols": {"classes": ["MarketoClient"], "functions": ["pushLead"], "types": []},
+                    "symbol_count": 2,
+                    "routes": [{"method": "POST", "path": "/marketo/leads", "source": "connectors/marketo.js"}],
+                    "route_count": 1,
+                    "schemas": [{"kind": "type", "name": "LeadPayload", "source": "connectors/marketo.js"}],
+                    "schema_count": 1,
+                    "tests": [{"kind": "js-test", "name": "pushes leads", "source": "connectors/marketo.test.js"}],
+                    "test_anchor_count": 1,
+                    "dependencies": ["axios"],
+                    "dependency_count": 1,
+                    "imports": ["axios"],
+                    "calls": ["syncLead"],
+                    "env_vars": ["MARKETO_TOKEN"],
+                    "migrations": [],
+                    "churn_score": 3,
+                    "owner_candidates": ["Ada"],
+                    "parser_errors": [],
+                },
             )
 
         self.assertIn("## Class and module summary", body)
+        self.assertIn("symbol_count: 2", body)
+        self.assertIn("route_count: 1", body)
+        self.assertIn("schema_count: 1", body)
+        self.assertIn("test_anchor_count: 1", body)
+        self.assertIn("dependency_count: 1", body)
+        self.assertIn("churn_score: 3", body)
+        self.assertIn("owner_candidates:", body)
+        self.assertIn("parse_quality: \"complete\"", body)
         self.assertIn("MarketoClient", body)
         self.assertIn("pushLead", body)
+        self.assertIn("## Route and API surfaces", body)
+        self.assertIn("POST /marketo/leads", body)
+        self.assertIn("## Schema and data contracts", body)
+        self.assertIn("LeadPayload", body)
+        self.assertIn("## Test anchors", body)
+        self.assertIn("pushes leads", body)
+        self.assertIn("## Dependencies", body)
+        self.assertIn("axios", body)
+        self.assertIn("## Ownership and churn", body)
+        self.assertIn("Ada", body)
+        self.assertIn("## Parser limitations", body)
         self.assertIn("## Intentions and behavior", body)
         self.assertIn("Push referral leads to Marketo", body)
         self.assertIn("## Relevance", body)

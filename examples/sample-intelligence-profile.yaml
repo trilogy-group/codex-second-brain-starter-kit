@@ -1,3 +1,14 @@
+semantic_clustering:
+  provider: openai
+  embedding_model: text-embedding-3-small
+  min_cluster_size: 3
+  similarity_threshold: 0.78
+  max_clusters: 40
+code_intelligence:
+  max_files_per_repo: 1200
+  include_git_history: true
+  include_tests: true
+  include_dependency_graph: true
 capabilities:
   - key: platform-core
     title: Platform Core

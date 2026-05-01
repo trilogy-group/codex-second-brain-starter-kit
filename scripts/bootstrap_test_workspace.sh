@@ -106,6 +106,6 @@ Next:
 3. Add real source files to ${WORKSPACE}/_source_corpus/${SLUG}
 4. Run the source-index and rebuild flow after adding real material:
    python3 ${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/build_source_indices.py --manifest ${MANIFEST}
-   python3 ${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/rebuild_product_brain.py --manifest ${MANIFEST}
+   OPENAI_API_KEY="..." python3 ${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/rebuild_product_brain.py --manifest ${MANIFEST}
 5. Use the prompts in ${PACKAGE_ROOT}/prompts
 EOF

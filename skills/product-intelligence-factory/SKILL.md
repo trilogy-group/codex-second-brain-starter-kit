@@ -90,6 +90,7 @@ This stage should:
 Then rebuild the vault with:
 
 ```bash
+OPENAI_API_KEY="..." \
 python3 scripts/rebuild_product_brain.py \
   --manifest "/absolute/path/to/product.yaml"
 ```
@@ -102,7 +103,8 @@ The rebuild should produce:
 - intermediate packets that turn reusable support, wiki, and code clusters into future work building blocks
 - generated output candidates in the vault, capped to high-value packets so they do not become a flat task dump
 - weekly review and stale-source archive records that close the CODE loop without moving user-authored notes
-- code-reference notes with intent, relevance, implementation signals, and risk/conflict summaries
+- code-reference notes with symbols, routes, schemas, calls, dependencies, tests, ownership/churn, parser limitations, intent, relevance, and risk/conflict summaries
+- semantic intermediate packets generated from OpenAI embeddings over compact evidence cards
 - explicit blocker and uncaptured-evidence sections instead of silent omissions
 - a privacy pass that redacts obvious PII from generated vault markdown
 

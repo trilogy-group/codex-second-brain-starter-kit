@@ -65,6 +65,23 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
 
     if not profile.get("intelligence_path"):
         errors.append("Missing profile.intelligence_path")
+    else:
+        profile_path = normalize_path(profile.get("intelligence_path"))
+        if profile_path and profile_path.exists():
+            profile_data = yaml.safe_load(profile_path.read_text()) or {}
+            if isinstance(profile_data, dict):
+                semantic = profile_data.get("semantic_clustering") or {}
+                if semantic and semantic.get("provider", "openai") != "openai":
+                    errors.append("profile semantic_clustering.provider must be `openai`.")
+                if semantic and not semantic.get("embedding_model"):
+                    errors.append("profile semantic_clustering.embedding_model is required when semantic clustering is configured.")
+                code = profile_data.get("code_intelligence") or {}
+                try:
+                    max_files = int(code.get("max_files_per_repo", 1))
+                except (TypeError, ValueError):
+                    max_files = 0
+                if code and max_files <= 0:
+                    errors.append("profile code_intelligence.max_files_per_repo must be positive.")
 
     repos = data.get("repositories")
     if not isinstance(repos, dict):

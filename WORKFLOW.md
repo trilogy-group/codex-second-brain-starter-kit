@@ -74,7 +74,7 @@ Use Codex with:
 
 When the packaged helpers are available, run the source-index and rebuild flow before asking Codex to do the final synthesis pass:
 - `python3 skills/product-intelligence-factory/scripts/build_source_indices.py --manifest "/absolute/path/to/product.yaml"`
-- `python3 skills/product-intelligence-factory/scripts/rebuild_product_brain.py --manifest "/absolute/path/to/product.yaml"`
+- `OPENAI_API_KEY="..." python3 skills/product-intelligence-factory/scripts/rebuild_product_brain.py --manifest "/absolute/path/to/product.yaml"`
 
 Expected outputs:
 - linked notes
@@ -85,7 +85,8 @@ Expected outputs:
 - generated output candidates in `30 Initiatives/Output Candidates/`
 - a weekly review note in `70 Journal/Reviews/`
 - stale-source archive records in `90 Archive/Stale Sources/`
-- code-intelligence layer
+- code-intelligence maps in `40 Research/Code Intelligence/Maps/` and `40 Research/Code Intelligence/Graphs/`
+- semantic intermediate packets in `40 Research/Intermediate Packets/`
 - full support and wiki content preserved in-note
 - problem and initiative notes
 - code-reference notes with summaries, intent, relevance, risks, and conflicts

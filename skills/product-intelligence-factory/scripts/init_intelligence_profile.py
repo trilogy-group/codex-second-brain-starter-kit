@@ -98,6 +98,19 @@ def default_capabilities() -> list[dict[str, object]]:
 
 def build_profile() -> dict[str, object]:
     return {
+        "semantic_clustering": {
+            "provider": "openai",
+            "embedding_model": "text-embedding-3-small",
+            "min_cluster_size": 3,
+            "similarity_threshold": 0.78,
+            "max_clusters": 40,
+        },
+        "code_intelligence": {
+            "max_files_per_repo": 1200,
+            "include_git_history": True,
+            "include_tests": True,
+            "include_dependency_graph": True,
+        },
         "capabilities": default_capabilities(),
     }
 

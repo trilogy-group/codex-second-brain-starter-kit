@@ -32,6 +32,19 @@ sources:
 profile:
   intelligence_path: /absolute/path/to/workspace/config/intelligence-profile.yaml
 
+# The profile file should include:
+# semantic_clustering:
+#   provider: openai
+#   embedding_model: text-embedding-3-small
+#   min_cluster_size: 3
+#   similarity_threshold: 0.78
+#   max_clusters: 40
+# code_intelligence:
+#   max_files_per_repo: 1200
+#   include_git_history: true
+#   include_tests: true
+#   include_dependency_graph: true
+
 repositories:
   local_clone_root: /absolute/path/to/workspace/_repos
   safe_mirror_root: /absolute/path/to/workspace/_repo_mirrors
@@ -84,4 +97,5 @@ engineering_readiness:
 - `ask: 2` and later can be used to break readiness into distinct operational categories such as linked-page capture, code intelligence, Product BASB alignment, progressive summarization, runtime understanding, traceability, runbooks, blockers, output conversion, archive hygiene, and automation opportunities.
 - Keep evidence entries as absolute paths or URLs when possible.
 - `profile.intelligence_path` should point to a capability profile that stays generic at the tooling layer but is allowed to carry product-specific keywords and repo mappings.
+- Semantic intermediate packets require OpenAI embeddings during rebuild. Set `OPENAI_API_KEY` in the runtime environment before running `rebuild_product_brain.py`; the generated cache is stored under `sources.mirror_path/inventories/embedding_cache.json`.
 - Leave `sources.support_article_url_template` empty if the source system does not have a stable article URL pattern.

@@ -182,6 +182,15 @@ class ProductBasbLifecycleTests(unittest.TestCase):
             (vault / "70 Journal" / "Reviews" / "Weekly Review - 2026-05-01.md").write_text(
                 "---\ntype: review\narea: acme\nstatus: active\ndate: 2026-05-01\nreview_period: weekly\nbasb_stage: distill\npara_category: resource\ndistillation_level: executive\nactionability: now\ntags:\n  - weekly-review\n---\n# Review\n- [[Output]]\n"
             )
+            inventory_dir = root / "mirror" / "inventories"
+            inventory_dir.mkdir(parents=True)
+            (inventory_dir / "code_intelligence.json").write_text(
+                '{"summary":{"parsed_files":12,"parse_failures":1,"route_count":2,"schema_count":3,"test_anchor_count":4,"dependency_edges":5},"graph":{"dependencies":[{"from":"a","to":"b"}]}}\n'
+            )
+            (inventory_dir / "semantic_clusters.json").write_text(
+                '{"clusters":[{"id":"semantic-cluster-1"}],"stats":{"cache_hits":8,"cache_misses":2,"openai_failures":0}}\n'
+            )
+            (inventory_dir / "embedding_cache.json").write_text('{"items":{"a":{},"b":{}}}\n')
             manifest = {
                 "product": {"name": "Acme", "slug": "acme", "mode": "product", "vault_path": str(vault), "workspace_path": str(root)},
                 "sources": {"corpus_path": str(root / "corpus"), "mirror_path": str(root / "mirror")},
@@ -197,6 +206,10 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         self.assertIn("- Output candidates: `1`", report)
         self.assertIn("- Output conversion rate: `100%`", report)
         self.assertIn("- Weekly reviews: `1`", report)
+        self.assertIn("## Code Intelligence And Semantic Metrics", report)
+        self.assertIn("- Parsed files: `12`", report)
+        self.assertIn("- Semantic clusters: `1`", report)
+        self.assertIn("- Embedding cache hit rate: `80%`", report)
 
     def test_migration_dry_run_and_write_create_surfaces_without_overwriting_user_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

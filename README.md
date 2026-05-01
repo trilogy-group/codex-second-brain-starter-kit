@@ -17,6 +17,8 @@ It packages:
 - packaged source-index, vault-rebuild, and privacy-sanitizing scripts for richer second-brain generation
 - a Product BASB workflow that maps CODE, PARA, progressive summarization, intermediate packets, archives, and shippable outputs into Obsidian
 - lifecycle automation that drafts output candidates, weekly reviews, and stale-source archive records inside the vault
+- deep code-intelligence inventories for routes, schemas, calls, dependencies, tests, ownership, churn, and parser limitations
+- required OpenAI embedding-based semantic clustering for reusable intermediate packets across support, wiki, code, and generated notes
 - starter prompts you can paste into Codex to run the workflow end to end
 - templates and examples so you can test the approach without any product-specific customization
 
@@ -42,6 +44,7 @@ Typical use cases:
 - Python 3
 - Git
 - Obsidian
+- `OPENAI_API_KEY` for semantic intermediate-packet clustering during vault rebuilds
 - optional: GitHub CLI (`gh`) if you want repo-mirror sync to resolve default branches automatically
 
 ## Package layout

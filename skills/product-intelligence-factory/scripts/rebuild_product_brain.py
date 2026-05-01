@@ -8,13 +8,22 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import code_intelligence
+import semantic_clustering
 
 
 DATE = date.today().isoformat()
@@ -158,12 +167,16 @@ def load_product_profile(manifest: dict[str, Any]) -> dict[str, Any]:
         raise SystemExit("Manifest must define profile.intelligence_path")
     path = Path(str(profile_path)).expanduser()
     data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise SystemExit(f"Profile root must be a mapping: {path}")
     capabilities = data.get("capabilities") or []
     if not isinstance(capabilities, list):
         raise SystemExit(f"Profile capabilities must be a list: {path}")
     return {
         "path": path,
         "capabilities": capabilities,
+        "semantic_clustering": semantic_clustering.default_semantic_config(data),
+        "code_intelligence": code_intelligence.default_code_config(data),
     }
 
 
@@ -226,6 +239,11 @@ def ensure_dir(path: Path) -> None:
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text())
+
+
+def write_json(path: Path, payload: Any) -> None:
+    ensure_dir(path.parent)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def slugify(value: str) -> str:
@@ -947,6 +965,23 @@ class CodeReferenceAnalysis:
     intentions: list[str]
     risks: list[str]
     conflicts: list[str]
+    symbol_count: int = 0
+    route_count: int = 0
+    schema_count: int = 0
+    test_anchor_count: int = 0
+    dependency_count: int = 0
+    churn_score: int = 0
+    owner_candidates: list[str] = field(default_factory=list)
+    parse_quality: str = "heuristic"
+    imports: list[str] = field(default_factory=list)
+    calls: list[str] = field(default_factory=list)
+    routes: list[dict[str, Any]] = field(default_factory=list)
+    schemas: list[dict[str, Any]] = field(default_factory=list)
+    tests: list[dict[str, Any]] = field(default_factory=list)
+    dependencies: list[str] = field(default_factory=list)
+    env_vars: list[str] = field(default_factory=list)
+    migrations: list[str] = field(default_factory=list)
+    parser_errors: list[str] = field(default_factory=list)
 
 
 def infer_code_language(relative_path: str) -> str:
@@ -1179,15 +1214,22 @@ def infer_intentions(hit: dict[str, Any], artifact_kind: str, text: str, symbols
     return unique_lines(intentions, 6)
 
 
-def analyze_code_reference(hit: dict[str, Any]) -> CodeReferenceAnalysis:
+def analyze_code_reference(hit: dict[str, Any], code_file: dict[str, Any] | None = None) -> CodeReferenceAnalysis:
     path = Path(str(hit["absolute_path"]))
     text = read_code_reference_text(path)
     artifact_kind = infer_artifact_kind(hit["relative_path"], text)
-    symbols = extract_code_symbols(text)
+    heuristic_symbols = extract_code_symbols(text)
+    deep_symbols = (code_file or {}).get("symbols") or {}
+    symbols = {
+        "classes": unique_lines([*deep_symbols.get("classes", []), *heuristic_symbols["classes"]], 40),
+        "functions": unique_lines([*deep_symbols.get("functions", []), *heuristic_symbols["functions"]], 60),
+        "types": unique_lines([*deep_symbols.get("types", []), *heuristic_symbols["types"]], 60),
+    }
     comments = extract_top_comment_lines(text)
+    symbol_count = int((code_file or {}).get("symbol_count") or sum(len(values) for values in symbols.values()))
     return CodeReferenceAnalysis(
         artifact_kind=artifact_kind,
-        language=infer_code_language(hit["relative_path"]),
+        language=str((code_file or {}).get("language") or infer_code_language(hit["relative_path"])),
         classes=symbols["classes"],
         functions=symbols["functions"],
         types=symbols["types"],
@@ -1196,6 +1238,23 @@ def analyze_code_reference(hit: dict[str, Any]) -> CodeReferenceAnalysis:
         intentions=infer_intentions(hit, artifact_kind, text, symbols, comments),
         risks=detect_code_risks(text, hit["relative_path"]),
         conflicts=detect_code_conflicts(text, hit["relative_path"], artifact_kind),
+        symbol_count=symbol_count,
+        route_count=int((code_file or {}).get("route_count") or 0),
+        schema_count=int((code_file or {}).get("schema_count") or 0),
+        test_anchor_count=int((code_file or {}).get("test_anchor_count") or 0),
+        dependency_count=int((code_file or {}).get("dependency_count") or 0),
+        churn_score=int((code_file or {}).get("churn_score") or 0),
+        owner_candidates=list((code_file or {}).get("owner_candidates") or []),
+        parse_quality=str((code_file or {}).get("parse_quality") or "heuristic"),
+        imports=list((code_file or {}).get("imports") or []),
+        calls=list((code_file or {}).get("calls") or []),
+        routes=list((code_file or {}).get("routes") or []),
+        schemas=list((code_file or {}).get("schemas") or []),
+        tests=list((code_file or {}).get("tests") or []),
+        dependencies=list((code_file or {}).get("dependencies") or []),
+        env_vars=list((code_file or {}).get("env_vars") or []),
+        migrations=list((code_file or {}).get("migrations") or []),
+        parser_errors=list((code_file or {}).get("parser_errors") or []),
     )
 
 
@@ -1562,8 +1621,9 @@ def build_code_reference_note(
     support_links: list[str],
     wiki_links: list[str],
     capability_links: list[str],
+    code_file: dict[str, Any] | None = None,
 ) -> str:
-    analysis = analyze_code_reference(hit)
+    analysis = analyze_code_reference(hit, code_file=code_file)
     risk_count = len(analysis.risks)
     conflict_count = len(analysis.conflicts)
     lines = [
@@ -1578,6 +1638,14 @@ def build_code_reference_note(
                 "artifact_kind": analysis.artifact_kind,
                 "risk_count": risk_count,
                 "conflict_count": conflict_count,
+                "symbol_count": analysis.symbol_count,
+                "route_count": analysis.route_count,
+                "schema_count": analysis.schema_count,
+                "test_anchor_count": analysis.test_anchor_count,
+                "dependency_count": analysis.dependency_count,
+                "churn_score": analysis.churn_score,
+                "owner_candidates": analysis.owner_candidates,
+                "parse_quality": analysis.parse_quality,
                 **basb_frontmatter(
                     stage="distill",
                     para="resource",
@@ -1620,6 +1688,69 @@ def build_code_reference_note(
         lines.append(f"- Types, interfaces, or schema objects: {', '.join(f'`{name}`' for name in analysis.types)}")
     if not any((analysis.classes, analysis.functions, analysis.types)):
         lines.append("- No named classes, functions, or schema objects were detected from the static scan.")
+
+    lines.extend(["", "## Symbols", ""])
+    if analysis.classes:
+        lines.append(f"- Classes/modules/structs: {', '.join(f'`{name}`' for name in analysis.classes[:20])}")
+    if analysis.functions:
+        lines.append(f"- Functions/methods/entrypoints: {', '.join(f'`{name}`' for name in analysis.functions[:30])}")
+    if analysis.types:
+        lines.append(f"- Types/schema objects: {', '.join(f'`{name}`' for name in analysis.types[:30])}")
+    if not any((analysis.classes, analysis.functions, analysis.types)):
+        lines.append("- No symbols were extracted from this file.")
+
+    lines.extend(["", "## Route and API surfaces", ""])
+    if analysis.routes:
+        for route in analysis.routes[:40]:
+            lines.append(f"- `{route.get('method', 'HTTP')} {route.get('path', '')}`")
+    else:
+        lines.append("- No route or API surface was extracted from this file.")
+
+    lines.extend(["", "## Schema and data contracts", ""])
+    if analysis.schemas:
+        for schema in analysis.schemas[:40]:
+            lines.append(f"- `{schema.get('kind', 'schema')}`: `{schema.get('name', '')}`")
+    if analysis.env_vars:
+        lines.append(f"- Environment variables: {', '.join(f'`{name}`' for name in analysis.env_vars[:30])}")
+    if analysis.migrations:
+        lines.extend(f"- Migration signal: {signal}" for signal in analysis.migrations[:10])
+    if not any((analysis.schemas, analysis.env_vars, analysis.migrations)):
+        lines.append("- No schema, data-contract, env-var, or migration surface was extracted from this file.")
+
+    lines.extend(["", "## Inbound and outbound calls", ""])
+    if analysis.imports:
+        lines.append(f"- Imports/requires: {', '.join(f'`{name}`' for name in analysis.imports[:30])}")
+    if analysis.calls:
+        lines.append(f"- Calls detected: {', '.join(f'`{name}`' for name in analysis.calls[:40])}")
+    if not analysis.imports and not analysis.calls:
+        lines.append("- No imports or call anchors were extracted from this file.")
+
+    lines.extend(["", "## Test anchors", ""])
+    if analysis.tests:
+        for test in analysis.tests[:30]:
+            lines.append(f"- `{test.get('kind', 'test')}`: `{test.get('name', '')}`")
+    else:
+        lines.append("- No direct test anchors were extracted for this file.")
+
+    lines.extend(["", "## Dependencies", ""])
+    if analysis.dependencies:
+        lines.extend(f"- `{dependency}`" for dependency in analysis.dependencies[:40])
+    else:
+        lines.append("- No dependency edges were extracted for this file.")
+
+    lines.extend(["", "## Ownership and churn", ""])
+    lines.append(f"- Churn score: `{analysis.churn_score}/10`")
+    if analysis.owner_candidates:
+        lines.append(f"- Likely owners from git history: {', '.join(f'`{owner}`' for owner in analysis.owner_candidates[:5])}")
+    else:
+        lines.append("- No likely owner candidates were available from local git history.")
+
+    lines.extend(["", "## Parser limitations", ""])
+    lines.append(f"- Parse quality: `{analysis.parse_quality}`")
+    if analysis.parser_errors:
+        lines.extend(f"- {error}" for error in analysis.parser_errors[:5])
+    else:
+        lines.append("- This is a broad static scan, not compiler-grade whole-program analysis.")
 
     lines.extend(["", "## Intentions and behavior", ""])
     lines.extend(f"- {item}" for item in analysis.intentions)
@@ -1965,6 +2096,8 @@ def select_output_candidates(packet_records: list[dict[str, Any]], limit: int = 
         packet
         for packet in packet_records
         if packet.get("evidence_score", 0) >= 5
+        or packet.get("packet_kind") == "semantic-cluster"
+        or float(packet.get("semantic_cluster_score", 0) or 0) >= 0.78
         or packet.get("code_reference_links")
         or packet.get("conflict_count", 0)
         or packet.get("stale_doc_count", 0)
@@ -1973,6 +2106,7 @@ def select_output_candidates(packet_records: list[dict[str, Any]], limit: int = 
         promotable,
         key=lambda packet: (
             -int(packet.get("evidence_score", 0)),
+            -float(packet.get("semantic_cluster_score", 0) or 0),
             -len(packet.get("code_reference_links", [])),
             -int(packet.get("conflict_count", 0)),
             packet.get("title", ""),
@@ -2240,6 +2374,15 @@ def build_code_intelligence_hub(repo_links: list[str], capability_links: list[st
         "",
         "This hub connects repository scans and capability-level code evidence.",
         "",
+        "## Deep maps",
+        "",
+        "- [[Route Map]]",
+        "- [[Schema And Data Model Map]]",
+        "- [[Call Graph Map]]",
+        "- [[Dependency Graph Map]]",
+        "- [[Test Coverage Map]]",
+        "- [[Ownership And Churn Map]]",
+        "",
         "## Repository notes",
         "",
     ]
@@ -2247,6 +2390,331 @@ def build_code_intelligence_hub(repo_links: list[str], capability_links: list[st
     lines.extend(["", "## Capability notes", ""])
     lines.extend(f"- {link}" for link in capability_links)
     lines.extend(["", "## Related notes", "", "- [[Code Reference Index]]", "- [[Repo Catalog]]", "- [[GitHub Source Of Truth]]", "- [[Support-to-Code Map]]", "- [[Conflict Log]]", "- [[Intelligence Home]]"])
+    return "\n".join(lines)
+
+
+def build_code_map_note(title: str, description: str, lines_body: list[str], tags: list[str]) -> str:
+    lines = [
+        frontmatter(
+            {
+                "type": "hub",
+                "area": PRODUCT_CONTEXT["slug"],
+                "source": "generated",
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="executive",
+                    actionability="soon",
+                    output_target="Code Intelligence Hub",
+                ),
+                "tags": ["code-intelligence", *tags],
+            }
+        ),
+        f"# {title}",
+        "",
+        description,
+        "",
+        *lines_body,
+        "",
+        "## Related notes",
+        "",
+        "- [[Code Intelligence Hub]]",
+        "- [[Code Reference Index]]",
+        "- [[Repo Catalog]]",
+        "- [[Engineering Readiness]]",
+    ]
+    return "\n".join(lines)
+
+
+def build_route_map(code_intel: dict[str, Any]) -> str:
+    route_rows = [
+        (item["repo"], item["relative_path"], route.get("method", "HTTP"), route.get("path", ""))
+        for item in code_intel.get("files", [])
+        for route in item.get("routes", [])
+    ]
+    body = [
+        f"- Routes extracted: `{len(route_rows)}`",
+        "",
+        "## Route surfaces",
+        "",
+    ]
+    if route_rows:
+        for repo, relative_path, method, route_path in route_rows[:250]:
+            body.append(f"- `{method} {route_path}` -> `{repo}/{relative_path}`")
+    else:
+        body.append("- No route surfaces were extracted from the scanned code.")
+    return build_code_map_note("Route Map", "Generated route/API surfaces extracted from local repository scans.", body, ["routes"])
+
+
+def build_schema_map(code_intel: dict[str, Any]) -> str:
+    schema_rows = [
+        (item["repo"], item["relative_path"], schema.get("kind", "schema"), schema.get("name", ""))
+        for item in code_intel.get("files", [])
+        for schema in item.get("schemas", [])
+    ]
+    body = [
+        f"- Schema/data contract entries: `{len(schema_rows)}`",
+        "",
+        "## Schema and data model surfaces",
+        "",
+    ]
+    if schema_rows:
+        for repo, relative_path, kind, name in schema_rows[:300]:
+            body.append(f"- `{kind}` `{name}` -> `{repo}/{relative_path}`")
+    else:
+        body.append("- No schema or data-contract surfaces were extracted from the scanned code.")
+    return build_code_map_note("Schema And Data Model Map", "Generated schema, data-contract, and migration surfaces extracted from local repository scans.", body, ["schemas"])
+
+
+def build_call_graph_map(code_intel: dict[str, Any]) -> str:
+    edges = code_intel.get("graph", {}).get("calls", [])
+    body = [
+        f"- Call edges extracted: `{len(edges)}`",
+        "",
+        "## Representative call edges",
+        "",
+    ]
+    if edges:
+        for edge in edges[:300]:
+            body.append(f"- `{edge.get('from', '')}` -> `{edge.get('to', '')}`")
+    else:
+        body.append("- No call edges were extracted from the scanned code.")
+    return build_code_map_note("Call Graph Map", "Generated lightweight call anchors from broad static scans. This is not compiler-grade whole-program call resolution.", body, ["calls", "graph"])
+
+
+def build_dependency_graph_map(code_intel: dict[str, Any]) -> str:
+    edges = code_intel.get("graph", {}).get("dependencies", [])
+    body = [
+        f"- Dependency edges extracted: `{len(edges)}`",
+        "",
+        "## Representative dependency edges",
+        "",
+    ]
+    if edges:
+        for edge in edges[:300]:
+            body.append(f"- `{edge.get('from', '')}` -> `{edge.get('to', '')}`")
+    else:
+        body.append("- No dependency edges were extracted from manifests or imports.")
+    return build_code_map_note("Dependency Graph Map", "Generated dependency edges from imports, package manifests, and dependency declarations.", body, ["dependencies", "graph"])
+
+
+def build_test_coverage_map(code_intel: dict[str, Any]) -> str:
+    test_rows = [
+        (item["repo"], item["relative_path"], test.get("kind", "test"), test.get("name", ""))
+        for item in code_intel.get("files", [])
+        for test in item.get("tests", [])
+    ]
+    files_with_tests = {f"{repo}/{relative_path}" for repo, relative_path, _, _ in test_rows}
+    body = [
+        f"- Test anchors extracted: `{len(test_rows)}`",
+        f"- Files with direct test anchors: `{len(files_with_tests)}`",
+        "",
+        "## Test anchors",
+        "",
+    ]
+    if test_rows:
+        for repo, relative_path, kind, name in test_rows[:250]:
+            body.append(f"- `{kind}` `{name}` -> `{repo}/{relative_path}`")
+    else:
+        body.append("- No direct test anchors were extracted from the scanned code.")
+    return build_code_map_note("Test Coverage Map", "Generated test anchors and coverage clues. Treat gaps as prompts for review, not proof that behavior is untested.", body, ["tests"])
+
+
+def build_ownership_churn_map(code_intel: dict[str, Any]) -> str:
+    ranked = sorted(
+        code_intel.get("files", []),
+        key=lambda item: (-int(item.get("churn_score", 0)), item.get("repo", ""), item.get("relative_path", "")),
+    )
+    owners = Counter(
+        owner
+        for item in code_intel.get("files", [])
+        for owner in item.get("owner_candidates", [])
+    )
+    body = [
+        f"- Files with git churn: `{sum(1 for item in ranked if int(item.get('churn_score', 0)) > 0)}`",
+        "",
+        "## Likely owners",
+        "",
+    ]
+    if owners:
+        body.extend(f"- `{owner}`: `{count}` file touch signal(s)" for owner, count in owners.most_common(30))
+    else:
+        body.append("- No likely owners were available from local git history.")
+    body.extend(["", "## Highest churn files", ""])
+    high_churn = [item for item in ranked if int(item.get("churn_score", 0)) > 0][:80]
+    if high_churn:
+        for item in high_churn:
+            owners_text = ", ".join(f"`{owner}`" for owner in item.get("owner_candidates", [])[:3]) or "`unknown`"
+            body.append(f"- `{item['repo']}/{item['relative_path']}`: churn `{item.get('churn_score', 0)}/10`, owners {owners_text}")
+    else:
+        body.append("- No high-churn files were detected from local git history.")
+    return build_code_map_note("Ownership And Churn Map", "Generated ownership and churn clues from local git history.", body, ["ownership", "churn"])
+
+
+def code_terms_for_file(code_file: dict[str, Any] | None) -> list[str]:
+    if not code_file:
+        return []
+    terms: list[str] = []
+    symbols = code_file.get("symbols") or {}
+    for values in symbols.values():
+        terms.extend(values[:20])
+    terms.extend(route.get("path", "") for route in code_file.get("routes", [])[:20])
+    terms.extend(schema.get("name", "") for schema in code_file.get("schemas", [])[:20])
+    terms.extend(code_file.get("dependencies", [])[:20])
+    return unique_lines([term for term in terms if term], 60)
+
+
+def semantic_terms_from_record(record: dict[str, Any]) -> list[str]:
+    signals = record.get("signals") or {}
+    terms: list[str] = [signals.get("title", "")]
+    terms.extend(signals.get("headings", [])[:8])
+    terms.extend(signals.get("bullets", [])[:6])
+    terms.extend(Path(record.get("source_ref", "")).parts[:4])
+    return unique_lines([term for term in terms if term], 30)
+
+
+def build_semantic_evidence_cards(
+    support_records: list[dict[str, Any]],
+    wiki_records: list[dict[str, Any]],
+    code_reference_registry: dict[tuple[str, str], dict[str, Any]],
+    code_reference_stems: dict[tuple[str, str], str],
+    code_intel_by_path: dict[tuple[str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for kind, records in (("support", support_records), ("wiki", wiki_records)):
+        for record in records:
+            code_terms: list[str] = []
+            for hit in record.get("code_hits", [])[:8]:
+                code_terms.extend([hit.get("repo", ""), hit.get("relative_path", "")])
+                code_terms.extend(code_terms_for_file(code_intel_by_path.get((hit.get("repo", ""), hit.get("relative_path", ""))))[:20])
+            cards.append(
+                {
+                    "id": f"{kind}:{record['source_ref']}",
+                    "kind": kind,
+                    "title": record.get("signals", {}).get("title") or record["item"].get("title", record["source_ref"]),
+                    "summary": " ".join(essence_from_signals(record.get("signals", {}), record.get("source_ref", ""))),
+                    "link": note_link(record["stem"]),
+                    "capabilities": [CAPABILITY_BY_KEY[key]["title"] for key in record.get("capabilities", []) if key in CAPABILITY_BY_KEY],
+                    "evidence_terms": semantic_terms_from_record(record),
+                    "code_terms": unique_lines(code_terms, 60),
+                    "code_reference_links": record.get("code_reference_links", []),
+                    "source_links": [note_link(record["stem"])],
+                }
+            )
+    for key, entry in code_reference_registry.items():
+        hit = entry["hit"]
+        code_file = code_intel_by_path.get(key)
+        analysis = analyze_code_reference(hit, code_file=code_file)
+        cards.append(
+            {
+                "id": f"code:{hit['repo']}:{hit['relative_path']}",
+                "kind": "code",
+                "title": f"{hit['repo']}/{hit['relative_path']}",
+                "summary": " ".join(analysis.intentions[:3]),
+                "link": note_link(code_reference_stems[key]),
+                "capabilities": unique_lines(
+                    [link.replace("[[Capability - ", "").replace("]]", "") for link in entry.get("capability_links", [])],
+                    20,
+                ),
+                "evidence_terms": unique_lines([analysis.artifact_kind, analysis.language, *analysis.implementation_signals], 40),
+                "code_terms": code_terms_for_file(code_file),
+                "code_reference_links": [note_link(code_reference_stems[key])],
+                "source_links": [note_link(code_reference_stems[key])],
+            }
+        )
+    return cards
+
+
+def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: list[str] | None = None) -> str:
+    cards = cluster.get("cards", [])
+    evidence_links = unique_lines(
+        [link for card in cards for link in card.get("source_links", [])] +
+        [card.get("link", "") for card in cards],
+        60,
+    )
+    code_reference_links = unique_lines(
+        [link for card in cards for link in card.get("code_reference_links", [])],
+        60,
+    )
+    code_terms = unique_lines(
+        [term for card in cards for term in card.get("code_terms", [])],
+        80,
+    )
+    output_candidate_links = output_candidate_links or []
+    lines = [
+        frontmatter(
+            {
+                "type": "intermediate-packet",
+                "area": PRODUCT_CONTEXT["slug"],
+                "status": "reusable",
+                "date": DATE,
+                "source": "generated",
+                "packet_kind": "semantic-cluster",
+                "semantic_cluster_score": cluster.get("similarity_score", 0),
+                "evidence_score": cluster.get("evidence_score", 0),
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="executive",
+                    actionability="soon",
+                    output_target="Output Pipeline",
+                ),
+                "tags": ["intermediate-packet", "semantic-cluster"],
+            }
+        ),
+        f"# {cluster.get('theme', 'Semantic Evidence Cluster')} Semantic Packet",
+        "",
+        "## Theme",
+        "",
+        f"- {cluster.get('theme', 'Semantic Evidence Cluster')}",
+        f"- Semantic similarity score: `{cluster.get('similarity_score', 0)}`",
+        f"- Evidence score: `{cluster.get('evidence_score', 0)}/10`",
+        "",
+        "## Why this cluster exists",
+        "",
+        "- These sources were grouped by OpenAI embeddings over compact evidence cards drawn from support, wiki, code-reference, and generated-note context.",
+        "- The cluster is meant to reveal reusable work themes across sources that may not use the same wording.",
+        "",
+        "## Cross-source evidence",
+        "",
+    ]
+    if evidence_links:
+        lines.extend(f"- {link}" for link in evidence_links[:60])
+    else:
+        lines.append("- No source links were attached to this semantic cluster.")
+    lines.extend(["", "## Related code surfaces", ""])
+    if code_reference_links:
+        lines.extend(f"- {link}" for link in code_reference_links[:40])
+    if code_terms:
+        lines.append(f"- Extracted code terms: {', '.join(f'`{term}`' for term in code_terms[:30])}")
+    if not code_reference_links and not code_terms:
+        lines.append("- No code surfaces were attached to this semantic cluster.")
+    lines.extend(["", "## Output candidates", ""])
+    if output_candidate_links:
+        lines.extend(f"- {link}" for link in output_candidate_links[:12])
+    else:
+        lines.append("- [[Output Pipeline]]")
+    lines.extend(["", "## Cluster limitations", ""])
+    limitations = cluster.get("limitations") or []
+    if limitations:
+        lines.extend(f"- {limitation}" for limitation in limitations)
+    else:
+        lines.append("- Review linked evidence before using this semantic packet for delivery work.")
+    lines.extend(
+        [
+            "",
+            "## Can feed",
+            "",
+            "- [[Output Pipeline]]",
+            "- [[Intermediate Packet Index]]",
+            "- [[Code Intelligence Hub]]",
+            "",
+            "## Related notes",
+            "",
+            "- [[Intermediate Packet Index]]",
+            "- [[CODE Dashboard]]",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -2571,6 +3039,15 @@ def main() -> None:
     configure_runtime(manifest, profile)
     paths = manifest_paths(manifest)
     repo_roots = repo_lookup(manifest)
+    semantic_config = profile["semantic_clustering"]
+    semantic_clustering.require_openai_or_fixture()
+    code_intel = code_intelligence.analyze_repositories(repo_roots, profile)
+    write_json(paths.json_dir / "code_intelligence.json", code_intel)
+    write_json(paths.json_dir / "code_graph.json", code_intel.get("graph", {}))
+    code_intel_by_path = {
+        (item["repo"], item["relative_path"]): item
+        for item in code_intel.get("files", [])
+    }
     support_inventory = read_json(paths.json_dir / "support_articles.json")
     wiki_inventory = read_json(paths.json_dir / "wiki_pages.json")
     external_links = read_json(paths.json_dir / "external_links.json")
@@ -2583,6 +3060,8 @@ def main() -> None:
     code_dir = paths.vault / "40 Research" / "Code Intelligence"
     repo_notes_dir = code_dir / "Repos"
     code_reference_dir = code_dir / "References"
+    code_maps_dir = code_dir / "Maps"
+    code_graphs_dir = code_dir / "Graphs"
     intermediate_packet_dir = paths.vault / "40 Research" / "Intermediate Packets"
     output_candidate_dir = paths.vault / "30 Initiatives" / "Output Candidates"
     review_dir = paths.vault / "70 Journal" / "Reviews"
@@ -2593,6 +3072,8 @@ def main() -> None:
     clear_markdown_dir(wiki_dir)
     clear_markdown_dir(repo_notes_dir)
     clear_markdown_dir(code_reference_dir)
+    clear_generated_markdown_dir(code_maps_dir)
+    clear_generated_markdown_dir(code_graphs_dir)
     clear_generated_markdown_dir(intermediate_packet_dir)
     clear_generated_markdown_dir(output_candidate_dir)
     clear_generated_markdown_dir(review_dir)
@@ -2603,6 +3084,8 @@ def main() -> None:
     ensure_dir(wiki_dir)
     ensure_dir(repo_notes_dir)
     ensure_dir(code_reference_dir)
+    ensure_dir(code_maps_dir)
+    ensure_dir(code_graphs_dir)
     ensure_dir(intermediate_packet_dir)
     ensure_dir(output_candidate_dir)
     ensure_dir(review_dir)
@@ -2783,6 +3266,7 @@ def main() -> None:
                 unique_lines(entry["support_links"], 60),
                 unique_lines(entry["wiki_links"], 60),
                 unique_lines(entry["capability_links"], 40),
+                code_file=code_intel_by_path.get(key),
             ),
         )
         code_reference_index[entry["hit"]["repo"]].append(note_link(stem))
@@ -2890,6 +3374,20 @@ def main() -> None:
         )
         section = Path(record["item"]["relative_path"]).parts[0] if len(Path(record["item"]["relative_path"]).parts) > 1 else "root"
         write_note(wiki_dir / section / f"{record['stem']}.md", body)
+
+    semantic_cards = build_semantic_evidence_cards(
+        support_records=support_records,
+        wiki_records=wiki_records,
+        code_reference_registry=code_reference_registry,
+        code_reference_stems=code_reference_stems,
+        code_intel_by_path=code_intel_by_path,
+    )
+    semantic_result = semantic_clustering.cluster_cards(
+        semantic_cards,
+        semantic_config,
+        paths.json_dir / "embedding_cache.json",
+    )
+    write_json(paths.json_dir / "semantic_clusters.json", semantic_result)
 
     capability_rows: list[dict[str, Any]] = []
     packet_records: list[dict[str, Any]] = []
@@ -3083,6 +3581,46 @@ def main() -> None:
         packet_records.append(packet_record)
         packet_links.append(packet_link)
 
+    for cluster in semantic_result.get("clusters", []):
+        title = str(cluster.get("theme") or "Semantic Evidence Cluster")
+        packet_stem = safe_filename(f"Packet - Semantic - {title}", limit=180)
+        packet_link = note_link(packet_stem)
+        cards = cluster.get("cards", [])
+        support_links = unique_lines(
+            [card.get("link", "") for card in cards if card.get("kind") == "support"],
+            40,
+        )
+        wiki_links = unique_lines(
+            [card.get("link", "") for card in cards if card.get("kind") == "wiki"],
+            40,
+        )
+        code_reference_links = unique_lines(
+            [link for card in cards for link in card.get("code_reference_links", [])],
+            60,
+        )
+        evidence_score = int(cluster.get("evidence_score", 0) or 0)
+        packet_record = {
+            "title": title,
+            "stem": packet_stem,
+            "link": packet_link,
+            "packet_kind": "semantic-cluster",
+            "support_links": support_links,
+            "wiki_links": wiki_links,
+            "repo_note_links": [],
+            "code_reference_links": code_reference_links,
+            "conflict_links": [],
+            "conflict_count": 0,
+            "stale_doc_count": 0,
+            "semantic_cluster_score": cluster.get("similarity_score", 0),
+            "evidence_score": evidence_score,
+        }
+        write_note(
+            intermediate_packet_dir / f"{packet_stem}.md",
+            build_semantic_packet_note(cluster),
+        )
+        packet_records.append(packet_record)
+        packet_links.append(packet_link)
+
     output_candidate_records: list[dict[str, Any]] = []
     for packet in select_output_candidates(packet_records):
         output_kind = infer_output_kind(packet)
@@ -3114,6 +3652,12 @@ def main() -> None:
     write_note(wiki_dir / "Wiki Pages Hub.md", build_wiki_pages_hub({key: sorted(value) for key, value in section_grouped.items()}))
     write_note(code_dir / "Code Intelligence Hub.md", build_code_intelligence_hub(repo_links, [row["link"] for row in capability_rows]))
     write_note(code_dir / "Code Reference Index.md", build_code_reference_index({key: sorted(value) for key, value in code_reference_index.items()}))
+    write_note(code_maps_dir / "Route Map.md", build_route_map(code_intel))
+    write_note(code_maps_dir / "Schema And Data Model Map.md", build_schema_map(code_intel))
+    write_note(code_graphs_dir / "Call Graph Map.md", build_call_graph_map(code_intel))
+    write_note(code_graphs_dir / "Dependency Graph Map.md", build_dependency_graph_map(code_intel))
+    write_note(code_maps_dir / "Test Coverage Map.md", build_test_coverage_map(code_intel))
+    write_note(code_maps_dir / "Ownership And Churn Map.md", build_ownership_churn_map(code_intel))
     write_note(intermediate_packet_dir / "Intermediate Packet Index.md", build_intermediate_packet_index(packet_links))
     write_note(paths.vault / "20 Product" / "Product Capability Map.md", build_product_capability_map(capability_rows))
     total_support_articles = sum(1 for item in support_inventory if item["category"] == "support-article")
@@ -3143,6 +3687,9 @@ def main() -> None:
                 "output_candidates": len(output_candidate_records),
                 "archive_records": archive_records_written,
                 "repo_notes": len(repo_snapshots),
+                "code_intelligence": code_intel.get("summary", {}),
+                "semantic_clusters": len(semantic_result.get("clusters", [])),
+                "semantic_stats": semantic_result.get("stats", {}),
                 "vault": str(paths.vault),
                 "vault_sanitizer": sanitize_summary,
             },

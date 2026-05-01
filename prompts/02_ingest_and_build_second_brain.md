@@ -7,6 +7,7 @@ Build the product second brain from the sources defined in this manifest:
 
 Requirements:
 - run the packaged source-index build and rebuild scripts when they are available for this manifest
+- ensure `OPENAI_API_KEY` is available before rebuild so semantic clustering can run; fail clearly if it is missing
 - preserve raw sources before summarizing them
 - run CODE in order: capture source evidence, organize it into the manifest/PARA structure, distill it into durable notes, and express high-value findings into output candidates
 - build linked notes instead of a dump
@@ -18,7 +19,8 @@ Requirements:
 - generate weekly review and stale-source archive candidate notes after rebuild; do not create live delivery-system tickets unless explicitly asked
 - create home notes, research hubs, and product-memory notes
 - connect documentation, external links, and repository context where relevant
-- create rich code-reference notes that explain class or module summaries, implementation intent, relevance, static risk signals, and conflicts
+- create rich code-reference notes and code-intelligence maps for symbols, routes, schemas, calls, dependencies, tests, ownership/churn, parser limitations, implementation intent, static risk signals, and conflicts
+- generate semantic intermediate packets from OpenAI embeddings over compact evidence cards, preserving links back to source evidence and related code surfaces
 - add conflicts whenever documentation and code disagree
 - show exact uncaptured or blocked URLs instead of only reporting counts
 - record access requirements and use approved credential/session storage for authenticated sources; never store raw credentials in the vault

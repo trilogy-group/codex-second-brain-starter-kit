@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 from collections import Counter
@@ -112,6 +113,52 @@ def vault_basb_metrics(vault_path: Path | None) -> dict[str, int | str]:
     }
 
 
+def load_json_if_exists(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
+    if not mirror_path:
+        return {}
+    inventory_dir = mirror_path / "inventories"
+    if not inventory_dir.exists():
+        return {}
+    code_intel = load_json_if_exists(inventory_dir / "code_intelligence.json")
+    semantic = load_json_if_exists(inventory_dir / "semantic_clusters.json")
+    embedding_cache = load_json_if_exists(inventory_dir / "embedding_cache.json")
+    if not code_intel and not semantic and not embedding_cache:
+        return {}
+    summary = code_intel.get("summary") if isinstance(code_intel.get("summary"), dict) else {}
+    graph = code_intel.get("graph") if isinstance(code_intel.get("graph"), dict) else {}
+    semantic_stats = semantic.get("stats") if isinstance(semantic.get("stats"), dict) else {}
+    clusters = semantic.get("clusters") if isinstance(semantic.get("clusters"), list) else []
+    cache_items = embedding_cache.get("items") if isinstance(embedding_cache.get("items"), dict) else {}
+    dependency_graph = graph.get("dependencies") if isinstance(graph.get("dependencies"), list) else []
+    hits = int(semantic_stats.get("cache_hits", 0) or 0)
+    misses = int(semantic_stats.get("cache_misses", 0) or 0)
+    total_cache_events = hits + misses
+    return {
+        "parsed_files": int(summary.get("parsed_files", 0) or 0),
+        "parse_failures": int(summary.get("parse_failures", 0) or 0),
+        "route_count": int(summary.get("route_count", 0) or 0),
+        "schema_count": int(summary.get("schema_count", 0) or 0),
+        "test_anchors": int(summary.get("test_anchor_count", 0) or 0),
+        "dependency_edges": int(summary.get("dependency_edges", len(dependency_graph)) or 0),
+        "semantic_clusters": len(clusters),
+        "embedding_cache_items": len(cache_items),
+        "embedding_cache_hit_rate": f"{round((hits / total_cache_events) * 100)}%" if total_cache_events else "0%",
+        "embedding_cache_hits": hits,
+        "embedding_cache_misses": misses,
+        "openai_failures": int(semantic_stats.get("openai_failures", 0) or 0),
+    }
+
+
 def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
     product = manifest.get("product") or {}
     sources = manifest.get("sources") or {}
@@ -134,7 +181,9 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
         ("Safe mirror root exists", exists(repositories.get("safe_mirror_root"))),
     ]
     vault_path = Path(str(product.get("vault_path", ""))).expanduser() if product.get("vault_path") else None
+    mirror_path = Path(str(sources.get("mirror_path", ""))).expanduser() if sources.get("mirror_path") else None
     basb_metrics = vault_basb_metrics(vault_path)
+    inventory_metrics = inventory_quality_metrics(mirror_path)
     if vault_path:
         runtime_checks.extend(
             [
@@ -203,6 +252,19 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
         lines.append(f"- Output issues: `{basb_metrics['output_issues']}`")
         lines.append(f"- Packet issues: `{basb_metrics['packet_issues']}`")
         lines.append(f"- BASB issue count: `{basb_metrics['basb_issue_count']}`")
+
+    if inventory_metrics:
+        lines.extend(["", "## Code Intelligence And Semantic Metrics", ""])
+        lines.append(f"- Parsed files: `{inventory_metrics['parsed_files']}`")
+        lines.append(f"- Parse failures: `{inventory_metrics['parse_failures']}`")
+        lines.append(f"- Routes: `{inventory_metrics['route_count']}`")
+        lines.append(f"- Schemas/data contracts: `{inventory_metrics['schema_count']}`")
+        lines.append(f"- Test anchors: `{inventory_metrics['test_anchors']}`")
+        lines.append(f"- Dependency edges: `{inventory_metrics['dependency_edges']}`")
+        lines.append(f"- Semantic clusters: `{inventory_metrics['semantic_clusters']}`")
+        lines.append(f"- Embedding cache items: `{inventory_metrics['embedding_cache_items']}`")
+        lines.append(f"- Embedding cache hit rate: `{inventory_metrics['embedding_cache_hit_rate']}`")
+        lines.append(f"- OpenAI failures: `{inventory_metrics['openai_failures']}`")
 
     lines.extend(["", "## Readiness Categories", ""])
     for category in categories:

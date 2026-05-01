@@ -79,6 +79,7 @@ If you want the packaged helpers to do the heavy lifting before the prompt pass,
 python3 ./skills/product-intelligence-factory/scripts/build_source_indices.py \
   --manifest "/absolute/path/to/second-brain-portfolio/manifests/acme-platform.yaml"
 
+OPENAI_API_KEY="..." \
 python3 ./skills/product-intelligence-factory/scripts/rebuild_product_brain.py \
   --manifest "/absolute/path/to/second-brain-portfolio/manifests/acme-platform.yaml"
 ```
