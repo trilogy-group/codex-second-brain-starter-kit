@@ -30,6 +30,8 @@ python3 $CODEX_HOME/skills/product-intelligence-factory/scripts/validate_product
 Every product should be scored across at least these areas:
 - reusable import factory readiness
 - source ingestion and authenticated capture
+- Product BASB alignment across CODE, PARA, progressive summarization, archives, and output conversion
+- Product BASB quality metrics such as packet count, output-candidate count, conversion rate, weekly reviews, archive records, and BASB issue counts
 - code and repo intelligence
 - safe repo sync
 - local runtime and feature work support

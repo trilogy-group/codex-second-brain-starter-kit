@@ -10,6 +10,7 @@ Use this manifest:
 Goals:
 - validate the manifest
 - validate the intelligence profile path and capability coverage
+- confirm the Product BASB operating model: CODE stages, PARA mapping, progressive summarization, output conversion, and archive hygiene
 - inspect the workspace and vault
 - confirm the mode and source boundaries
 - tell me what is missing before ingestion starts

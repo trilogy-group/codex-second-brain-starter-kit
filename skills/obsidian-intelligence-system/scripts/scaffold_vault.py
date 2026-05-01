@@ -208,7 +208,17 @@ def intelligence_canvas(mode: str) -> str:
 def home_links(mode: str) -> list[str]:
     links = ["[[00 Journal Hub]]", "[[TRAVERSAL-INDEX]]", "[[Intelligence Map.canvas]]"]
     if mode in {"product", "hybrid"}:
-        links.extend(["[[Product OS]]", "[[00 Research Hub]]"])
+        links.extend(
+            [
+                "[[Product OS]]",
+                "[[CODE Dashboard]]",
+                "[[PARA Map]]",
+                "[[Output Pipeline]]",
+                "[[00 Research Hub]]",
+                "[[Intermediate Packet Index]]",
+                "[[Archive Index]]",
+            ]
+        )
     if mode in {"operations", "hybrid"}:
         links.append("[[Operations/INDEX]]")
     return links
@@ -219,8 +229,10 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         vault / ".obsidian",
         vault / "00 Home",
         vault / "70 Journal" / "Daily",
+        vault / "70 Journal" / "Reviews",
         vault / "80 Assets" / "Bases",
         vault / "80 Assets" / "Canvas",
+        vault / "90 Archive",
         vault / "90 Templates",
     ]
     for directory in common_dirs:
@@ -247,6 +259,11 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         "status: active",
         "source: scaffold",
         "confidence: high",
+        "basb_stage: organize",
+        "para_category: resource",
+        "distillation_level: executive",
+        "actionability: now",
+        "output_target: \"\"",
         "tags:",
         "  - intelligence-home",
         "---",
@@ -269,6 +286,11 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
             status: active
             source: scaffold
             confidence: high
+            basb_stage: capture
+            para_category: resource
+            distillation_level: highlighted
+            actionability: now
+            output_target: ""
             tags:
               - journal
             ---
@@ -299,6 +321,11 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
             date: {{date}}
             source: daily note
             confidence:
+            basb_stage: capture
+            para_category: resource
+            distillation_level: raw
+            actionability: now
+            output_target:
             tags:
               - journal
               - inbox
@@ -336,6 +363,11 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
             date: {{date}}
             source:
             confidence:
+            basb_stage: capture
+            para_category: resource
+            distillation_level: raw
+            actionability:
+            output_target:
             tags:
               - inbox
               - capture
@@ -369,6 +401,12 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
             date: {{date}}
             source: weekly synthesis
             confidence: high
+            basb_stage: distill
+            para_category: resource
+            distillation_level: executive
+            actionability: now
+            output_target:
+            review_period: weekly
             tags:
               - weekly-review
             ---
@@ -399,17 +437,31 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         "- `00 Home/`: primary dashboards and navigation",
         "- `70 Journal/`: capture and weekly synthesis",
         "- `80 Assets/`: Bases and Canvas artifacts",
+        "- `90 Archive/`: completed initiatives, retired decisions, stale sources, and reusable closeout records",
         "- `90 Templates/`: reusable note templates",
     ]
     start_lines = ["- [[00 Home/Intelligence Home]]", "- [[70 Journal/00 Journal Hub]]"]
     if mode in {"product", "hybrid"}:
-        start_lines.extend(["- [[00 Home/Product OS]]", "- [[40 Research/00 Research Hub]]"])
+        start_lines.extend(
+            [
+                "- [[00 Home/Product OS]]",
+                "- [[00 Home/CODE Dashboard]]",
+                "- [[00 Home/PARA Map]]",
+                "- [[00 Home/Output Pipeline]]",
+                "- [[40 Research/00 Research Hub]]",
+                "- [[40 Research/Intermediate Packets/Intermediate Packet Index]]",
+                "- [[90 Archive/Archive Index]]",
+            ]
+        )
         folder_roles.extend(
             [
                 "- `10 Areas/`: durable domains or surfaces",
                 "- `20 Problems/`: user or system problems",
                 "- `30 Initiatives/`: active bets and efforts",
+                "- `30 Initiatives/Output Candidates/`: generated vault-native drafts for shippable work",
+                "- `30 Initiatives/Completed/`: completed project work that still has reusable learnings",
                 "- `40 Research/`: raw and synthesized source material",
+                "- `40 Research/Intermediate Packets/`: reusable research, support, code, and planning building blocks",
                 "- `50 Decisions/`: explicit product or operating choices",
                 "- `60 Experiments/`: tests, rollouts, and outcomes",
             ]
@@ -430,6 +482,11 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         "status: active",
         "source: scaffold",
         "confidence: high",
+        "basb_stage: organize",
+        "para_category: resource",
+        "distillation_level: executive",
+        "actionability: now",
+        "output_target: \"\"",
         "tags:",
         "  - traversal-index",
         "---",
@@ -487,6 +544,10 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         "3. Hub nodes aggregate; leaf notes contain.",
         "4. Preserve raw material in `40 Research/` or `Knowledge/`.",
         "5. Never overwrite playbooks; create timestamped versions.",
+        "6. Run CODE in order: capture, organize, distill, then express.",
+        "7. Map product work to PARA: initiatives are Projects, areas are Areas, research is Resources, and archive notes are Archives.",
+        "8. Use progressive summarization before asking future readers to inspect full raw evidence.",
+        "9. Convert high-value intelligence into shippable output candidates.",
         "",
         "## Navigation protocol",
     ]
@@ -512,13 +573,19 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
         vault / "10 Areas" / "Metrics",
         vault / "20 Problems",
         vault / "30 Initiatives",
+        vault / "30 Initiatives" / "Output Candidates",
+        vault / "30 Initiatives" / "Completed",
         vault / "40 Research" / "Sources",
         vault / "40 Research" / "Insights",
         vault / "40 Research" / "Maps",
         vault / "40 Research" / "External Links",
         vault / "40 Research" / "Engineering Intelligence",
+        vault / "40 Research" / "Intermediate Packets",
         vault / "50 Decisions",
         vault / "60 Experiments",
+        vault / "90 Archive" / "Completed Initiatives",
+        vault / "90 Archive" / "Retired Decisions",
+        vault / "90 Archive" / "Stale Sources",
     ]
     for directory in product_dirs:
         directory.mkdir(parents=True, exist_ok=True)
@@ -533,6 +600,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: active
             source: scaffold
             confidence: high
+            basb_stage: organize
+            para_category: project
+            distillation_level: executive
+            actionability: now
+            output_target: ""
             tags:
               - product-os
             ---
@@ -542,9 +614,14 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
 
             Core notes:
             - [[Areas]]
+            - [[CODE Dashboard]]
+            - [[PARA Map]]
+            - [[Output Pipeline]]
             - [[Decision Log]]
             - [[Active Bets]]
             - [[Weekly Synthesis]]
+            - [[Archive Index]]
+            - [[Intermediate Packet Index]]
             - [[Workspace Guide]]
             - [[00 Research Hub]]
             - [[00 Journal Hub]]
@@ -559,6 +636,12 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             - [[Web Capture Template]]
             - [[Daily Note]]
             - [[Weekly Synthesis Template]]
+            - [[Capture Triage Template]]
+            - [[Progressive Summary Template]]
+            - [[Intermediate Packet Template]]
+            - [[Project Closeout Template]]
+            - [[Shippable Output Template]]
+            - [[Post Launch Learning Template]]
 
             ## Focus Stack
             ![[80 Assets/Bases/Initiatives.base#Active Bets]]
@@ -566,6 +649,133 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             ![[80 Assets/Bases/Problems.base#Open Problems]]
 
             ![[80 Assets/Bases/Inbox.base#Inbox]]
+
+            ![[80 Assets/Bases/Outputs.base#Output Pipeline]]
+            """
+        ),
+        overwrite,
+    )
+
+    write_file(
+        vault / "00 Home" / "CODE Dashboard.md",
+        textwrap.dedent(
+            """
+            ---
+            type: hub
+            area: product
+            status: active
+            source: scaffold
+            confidence: high
+            basb_stage: organize
+            para_category: resource
+            distillation_level: executive
+            actionability: now
+            output_target: ""
+            tags:
+              - basb
+              - code
+            ---
+            # CODE Dashboard
+
+            Use this dashboard to move evidence through the Product BASB loop.
+
+            ## Capture
+            - [[00 Journal Hub]]
+            - [[Web Capture Template]]
+            - [[Capture Triage Template]]
+
+            ## Organize
+            - [[PARA Map]]
+            - [[Product Capability Map]]
+            - [[Repo Catalog]]
+
+            ## Distill
+            - [[Progressive Summary Template]]
+            - [[Intermediate Packet Index]]
+            - [[Support-to-Code Map]]
+
+            ## Express
+            - [[Output Pipeline]]
+            - [[Shippable Output Template]]
+            - [[Archive Index]]
+            """
+        ),
+        overwrite,
+    )
+
+    write_file(
+        vault / "00 Home" / "PARA Map.md",
+        textwrap.dedent(
+            """
+            ---
+            type: hub
+            area: product
+            status: active
+            source: scaffold
+            confidence: high
+            basb_stage: organize
+            para_category: resource
+            distillation_level: executive
+            actionability: now
+            output_target: ""
+            tags:
+              - basb
+              - para
+            ---
+            # PARA Map
+
+            Product BASB uses PARA as the organizing layer:
+
+            - Projects: [[Active Bets]] and `30 Initiatives/`
+            - Areas: [[Areas]] and `10 Areas/`
+            - Resources: [[00 Research Hub]] and `40 Research/`
+            - Archives: [[Archive Index]] and `90 Archive/`
+
+            Related notes:
+            - [[CODE Dashboard]]
+            - [[Output Pipeline]]
+            - [[Intermediate Packet Index]]
+            """
+        ),
+        overwrite,
+    )
+
+    write_file(
+        vault / "00 Home" / "Output Pipeline.md",
+        textwrap.dedent(
+            """
+            ---
+            type: hub
+            area: product
+            status: active
+            source: scaffold
+            confidence: high
+            basb_stage: express
+            para_category: project
+            distillation_level: executive
+            actionability: now
+            output_target: ""
+            tags:
+              - output
+              - express
+            ---
+            # Output Pipeline
+
+            Use this hub to convert distilled intelligence into shippable work.
+
+            ## Output candidates
+            ![[80 Assets/Bases/Outputs.base#Output Pipeline]]
+
+            ## Common outputs
+            - PRDs and product specs
+            - implementation tickets and pull request plans
+            - runbooks and operational decisions
+            - launch notes and post-launch learnings
+
+            Related notes:
+            - [[CODE Dashboard]]
+            - [[Intermediate Packet Index]]
+            - [[Project Closeout Template]]
             """
         ),
         overwrite,
@@ -581,6 +791,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: active
             source: scaffold
             confidence: high
+            basb_stage: organize
+            para_category: area
+            distillation_level: executive
+            actionability: soon
+            output_target: ""
             tags:
               - areas
             ---
@@ -604,6 +819,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: active
             source: scaffold
             confidence: high
+            basb_stage: express
+            para_category: project
+            distillation_level: executive
+            actionability: now
+            output_target: ""
             tags:
               - decisions
             ---
@@ -627,6 +847,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: active
             source: scaffold
             confidence: high
+            basb_stage: organize
+            para_category: project
+            distillation_level: executive
+            actionability: now
+            output_target: ""
             tags:
               - initiatives
             ---
@@ -651,6 +876,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: active
             source: scaffold
             confidence: high
+            basb_stage: distill
+            para_category: resource
+            distillation_level: executive
+            actionability: now
+            output_target: ""
             tags:
               - weekly-review
             ---
@@ -662,10 +892,14 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             - update initiative pages
             - record new decisions
             - link outcomes back to metrics and problems
+            - turn high-value intelligence into output candidates
+            - archive completed work with reusable learnings
 
             Related notes:
             - [[Decision Log]]
             - [[Weekly Synthesis Template]]
+            - [[Output Pipeline]]
+            - [[Archive Index]]
             """
         ),
         overwrite,
@@ -681,6 +915,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: active
             source: scaffold
             confidence: high
+            basb_stage: organize
+            para_category: resource
+            distillation_level: executive
+            actionability: soon
+            output_target: ""
             tags:
               - workspace
             ---
@@ -710,6 +949,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: active
             source: scaffold
             confidence: high
+            basb_stage: organize
+            para_category: resource
+            distillation_level: executive
+            actionability: now
+            output_target: ""
             tags:
               - research
             ---
@@ -729,6 +973,75 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             ```query
             path:"40 Research/Engineering Intelligence"
             ```
+
+            ## Intermediate packets
+            - [[Intermediate Packet Index]]
+            """
+        ),
+        overwrite,
+    )
+
+    write_file(
+        vault / "40 Research" / "Intermediate Packets" / "Intermediate Packet Index.md",
+        textwrap.dedent(
+            """
+            ---
+            type: hub
+            area: research
+            status: active
+            source: scaffold
+            confidence: high
+            basb_stage: distill
+            para_category: resource
+            distillation_level: executive
+            actionability: soon
+            output_target: ""
+            tags:
+              - intermediate-packet
+            ---
+            # Intermediate Packet Index
+
+            Intermediate packets are reusable building blocks created from support, wiki, code, research, and planning evidence.
+
+            ![[80 Assets/Bases/Intermediate Packets.base#Intermediate Packets]]
+
+            Related notes:
+            - [[CODE Dashboard]]
+            - [[Output Pipeline]]
+            - [[00 Research Hub]]
+            """
+        ),
+        overwrite,
+    )
+
+    write_file(
+        vault / "90 Archive" / "Archive Index.md",
+        textwrap.dedent(
+            """
+            ---
+            type: hub
+            area: archive
+            status: active
+            source: scaffold
+            confidence: high
+            basb_stage: archive
+            para_category: archive
+            distillation_level: executive
+            actionability: reference
+            output_target: ""
+            tags:
+              - archive
+            ---
+            # Archive Index
+
+            Use this hub for completed initiatives, retired decisions, stale source snapshots, and reusable closeout records.
+
+            ![[80 Assets/Bases/Archive Records.base#Archive Records]]
+
+            Related notes:
+            - [[PARA Map]]
+            - [[Project Closeout Template]]
+            - [[Post Launch Learning Template]]
             """
         ),
         overwrite,
@@ -743,6 +1056,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: proposed
             date: {{date}}
             metric:
+            basb_stage: express
+            para_category: project
+            distillation_level: executive
+            actionability: now
+            output_target:
             tags:
               - decision
             ---
@@ -774,6 +1092,12 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             status: active
             date: {{date}}
             metric:
+            basb_stage: organize
+            para_category: project
+            distillation_level: executive
+            actionability: now
+            output_target:
+            next_review:
             tags:
               - initiative
             ---
@@ -808,6 +1132,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             metric:
             source:
             confidence:
+            basb_stage: organize
+            para_category: project
+            distillation_level: distilled
+            actionability: soon
+            output_target:
             tags:
               - problem
             ---
@@ -837,6 +1166,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             metric:
             source:
             confidence:
+            basb_stage: distill
+            para_category: resource
+            distillation_level: distilled
+            actionability: soon
+            output_target:
             tags:
               - insight
             ---
@@ -866,6 +1200,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             metric:
             source:
             confidence:
+            basb_stage: express
+            para_category: project
+            distillation_level: executive
+            actionability: now
+            output_target:
             tags:
               - experiment
             ---
@@ -894,6 +1233,11 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             date: {{date}}
             source:
             confidence:
+            basb_stage: organize
+            para_category: area
+            distillation_level: distilled
+            actionability: soon
+            output_target:
             tags:
               - metric
             ---
@@ -909,6 +1253,212 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
             ## Related notes
             - [[Problem - ]]
             - [[Initiative - ]]
+            """
+        ),
+        "Capture Triage Template.md": textwrap.dedent(
+            """
+            ---
+            type: capture
+            area:
+            status: inbox
+            date: {{date}}
+            source:
+            confidence:
+            basb_stage: capture
+            para_category: resource
+            distillation_level: highlighted
+            actionability:
+            output_target:
+            tags:
+              - capture
+              - triage
+            ---
+
+            # {{title}}
+
+            ## Why this was captured
+
+            ## Capture quality
+            - Relevance:
+            - Freshness:
+            - Confidence:
+            - Product impact:
+            - Actionability:
+
+            ## PARA destination
+            - Project:
+            - Area:
+            - Resource:
+            - Archive:
+
+            ## Next step
+            - [[Progressive Summary Template]]
+            """
+        ),
+        "Progressive Summary Template.md": textwrap.dedent(
+            """
+            ---
+            type: insight
+            area:
+            status: distilled
+            date: {{date}}
+            source:
+            confidence:
+            basb_stage: distill
+            para_category: resource
+            distillation_level: executive
+            actionability: soon
+            output_target:
+            tags:
+              - progressive-summary
+            ---
+
+            # {{title}}
+
+            ## Raw source
+
+            ## Highlights
+
+            ## Essence
+
+            ## Use in current project
+
+            ## Output candidate
+            - [[Shippable Output Template]]
+            """
+        ),
+        "Intermediate Packet Template.md": textwrap.dedent(
+            """
+            ---
+            type: intermediate-packet
+            area:
+            status: reusable
+            date: {{date}}
+            source:
+            confidence:
+            basb_stage: distill
+            para_category: resource
+            distillation_level: executive
+            actionability: soon
+            output_target:
+            tags:
+              - intermediate-packet
+            ---
+
+            # {{title}}
+
+            ## Essence
+
+            ## Reusable building block
+
+            ## Source evidence
+            - [[00 Research Hub]]
+
+            ## Can feed
+            - [[Initiative - ]]
+            - [[Shippable Output Template]]
+            """
+        ),
+        "Shippable Output Template.md": textwrap.dedent(
+            """
+            ---
+            type: output
+            area:
+            status: proposed
+            date: {{date}}
+            basb_stage: express
+            para_category: project
+            distillation_level: executive
+            actionability: now
+            output_target:
+            output_kind:
+            source_packet:
+            evidence_score:
+            shipping_path:
+            tags:
+              - output
+            ---
+
+            # {{title}}
+
+            ## Output type
+            PRD / spec / ticket / pull request / runbook / decision / launch note / post-launch learning
+
+            ## Decision or ask
+
+            ## Evidence
+            - [[Intermediate Packet Index]]
+
+            ## Shipping path
+
+            ## Related initiative
+            - [[Initiative - ]]
+            """
+        ),
+        "Project Closeout Template.md": textwrap.dedent(
+            """
+            ---
+            type: archive-record
+            area:
+            status: archived
+            date: {{date}}
+            basb_stage: archive
+            para_category: archive
+            distillation_level: executive
+            actionability: reference
+            output_target:
+            archive_reason: completed-initiative
+            tags:
+              - archive
+              - closeout
+            ---
+
+            # {{title}}
+
+            ## What shipped
+
+            ## What changed
+
+            ## Reusable intermediate packets
+            - [[Intermediate Packet Index]]
+
+            ## Retired or stale sources
+
+            ## Follow-up candidates
+            - [[Output Pipeline]]
+            """
+        ),
+        "Post Launch Learning Template.md": textwrap.dedent(
+            """
+            ---
+            type: archive-record
+            area:
+            status: archived
+            date: {{date}}
+            basb_stage: archive
+            para_category: archive
+            distillation_level: executive
+            actionability: reference
+            output_target:
+            archive_reason: post-launch-learning
+            tags:
+              - post-launch
+              - learning
+            ---
+
+            # {{title}}
+
+            ## Outcome
+
+            ## Evidence
+            - [[Metric - ]]
+
+            ## What to repeat
+
+            ## What to avoid
+
+            ## Reusable packet
+            - [[Intermediate Packet Template]]
             """
         ),
     }
@@ -970,6 +1520,21 @@ def scaffold_product(vault: Path, project: str, overwrite: bool) -> None:
         "Experiments.base": base_text("experiment", "Experiments", ["file.name", "area", "status", "metric"]),
         "Metrics.base": base_text("metric", "Metrics", ["file.name", "area", "status"]),
         "Insights.base": base_text("insight", "Research Signals", ["file.name", "area", "confidence"]),
+        "Intermediate Packets.base": base_text(
+            "intermediate-packet",
+            "Intermediate Packets",
+            ["file.name", "area", "status", "actionability", "output_target"],
+        ),
+        "Outputs.base": base_text(
+            "output",
+            "Output Pipeline",
+            ["file.name", "area", "status", "output_kind", "evidence_score", "actionability", "output_target"],
+        ),
+        "Archive Records.base": base_text(
+            "archive-record",
+            "Archive Records",
+            ["file.name", "area", "status", "archive_reason", "date", "output_target"],
+        ),
         "Inbox.base": inbox_base_text(),
     }
     for name, content in base_files.items():

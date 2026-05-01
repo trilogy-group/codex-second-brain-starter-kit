@@ -85,9 +85,32 @@ engineering_readiness:
         - architecture notes
       next_steps:
         - Build the engineering layer
+    - key: product-basb-alignment
+      title: Product BASB alignment
+      ask: 4
+      status: missing
+      summary: Product BASB dashboards, metadata, and archive/output loops have not been verified yet.
+      evidence: []
+      missing:
+        - CODE dashboard
+        - PARA map
+        - output pipeline
+      next_steps:
+        - Scaffold the Product BASB surfaces and run the vault audit.
+    - key: progressive-summarization-coverage
+      title: Progressive summarization coverage
+      ask: 5
+      status: missing
+      summary: Raw evidence has not yet been distilled into essence/action sections or reusable packets.
+      evidence: []
+      missing:
+        - Essence sections
+        - Intermediate packets
+      next_steps:
+        - Rebuild the vault and review generated distillation coverage.
     - key: architecture-and-runtime-understanding
       title: Architecture and runtime understanding
-      ask: 4
+      ask: 6
       status: missing
       summary: Architecture notes and runtime maps have not been created yet.
       evidence: []
@@ -98,7 +121,7 @@ engineering_readiness:
         - Build architecture and service notes from repo and documentation evidence.
     - key: support-to-code-traceability
       title: Support-to-code traceability
-      ask: 5
+      ask: 7
       status: missing
       summary: Documentation and support content are not yet connected to implementation anchors.
       evidence: []
@@ -109,7 +132,7 @@ engineering_readiness:
         - Build linked support, wiki, and code-reference notes.
     - key: runbook-and-setup-coverage
       title: Runbook and setup coverage
-      ask: 6
+      ask: 8
       status: missing
       summary: Operational setup and runbook coverage has not been captured yet.
       evidence: []
@@ -120,7 +143,7 @@ engineering_readiness:
         - Promote setup and runbook sources into the vault.
     - key: blocked-dependencies-and-manual-work
       title: Blocked dependencies and manual work
-      ask: 7
+      ask: 9
       status: missing
       summary: Manual access gaps and restricted sources have not been logged yet.
       evidence: []
@@ -128,9 +151,20 @@ engineering_readiness:
         - blocked-access registry
       next_steps:
         - Record restricted and unresolved sources explicitly.
+    - key: output-conversion-and-archive-hygiene
+      title: Output conversion and archive hygiene
+      ask: 10
+      status: missing
+      summary: No output candidates or archive closeout records have been created yet.
+      evidence: []
+      missing:
+        - output candidates
+        - archive records
+      next_steps:
+        - Convert high-value findings into shippable output candidates.
     - key: future-automation-opportunities
       title: Future automation opportunities
-      ask: 8
+      ask: 11
       status: missing
       summary: No automation opportunities have been captured yet.
       evidence: []

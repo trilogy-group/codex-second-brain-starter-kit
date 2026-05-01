@@ -82,6 +82,7 @@ python3 scripts/build_source_indices.py \
 
 This stage should:
 - preserve raw-source provenance
+- score capture quality using relevance, freshness, confidence, product impact, and actionability
 - extract DOCX text when available
 - classify linked pages into mirrored, local evidence, restricted, or stale-documentation buckets
 - generate source inventories and repo snapshots that the vault rebuild can consume
@@ -96,6 +97,11 @@ python3 scripts/rebuild_product_brain.py \
 The rebuild should produce:
 - full support and wiki note content, not thin summaries
 - Obsidian wikilinks across support, wiki, repo, capability, and code-reference notes
+- Product BASB metadata on durable notes: `basb_stage`, `para_category`, `distillation_level`, `actionability`, and optional `output_target`
+- concise Essence and Use in current project sections before full raw evidence
+- intermediate packets that turn reusable support, wiki, and code clusters into future work building blocks
+- generated output candidates in the vault, capped to high-value packets so they do not become a flat task dump
+- weekly review and stale-source archive records that close the CODE loop without moving user-authored notes
 - code-reference notes with intent, relevance, implementation signals, and risk/conflict summaries
 - explicit blocker and uncaptured-evidence sections instead of silent omissions
 - a privacy pass that redacts obvious PII from generated vault markdown

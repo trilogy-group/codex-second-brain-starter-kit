@@ -9,6 +9,8 @@ Focus on:
 - code and repo intelligence
 - service and architecture notes
 - support-to-code mapping
+- intermediate packets that package reusable code investigations and support-to-code traces
+- output candidates that can become PRDs, specs, tickets, PRs, runbooks, decisions, launch notes, or post-launch learnings
 - local runtime context
 - code-reference summaries with intent, relevance, risk, and mismatch detail
 - blocked-access and uncaptured-evidence transparency

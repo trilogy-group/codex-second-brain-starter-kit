@@ -27,6 +27,32 @@ REQUIRED_FIELDS = {
     "experiment": ["type", "area", "status"],
     "metric": ["type", "area", "status"],
     "insight": ["type", "area", "status"],
+    "intermediate-packet": ["type", "area", "status", "date"],
+    "output": ["type", "area", "status", "date", "output_kind", "source_packet", "evidence_score", "shipping_path"],
+    "archive-record": ["type", "area", "status", "date", "archive_reason"],
+    "review": ["type", "area", "status", "date"],
+}
+
+BASB_REQUIRED_FIELDS = [
+    "basb_stage",
+    "para_category",
+    "distillation_level",
+    "actionability",
+]
+BASB_NOTE_TYPES = {
+    "area",
+    "problem",
+    "initiative",
+    "decision",
+    "experiment",
+    "metric",
+    "insight",
+    "capture",
+    "review",
+    "concept",
+    "intermediate-packet",
+    "output",
+    "archive-record",
 }
 
 
@@ -65,6 +91,11 @@ def collect_notes(vault: Path, ignored: set[Path] | None = None) -> list[Path]:
         path
         for path in vault.rglob("*.md")
         if ".obsidian" not in path.parts and path.resolve() not in ignored
+        and not (
+            len(path.parts) >= 2
+            and path.parent.name == "80 Assets"
+            and path.name.startswith("vault-audit")
+        )
     )
 
 
@@ -85,6 +116,14 @@ def render_report(
     missing_frontmatter: list[Path],
     missing_links: list[Path],
     missing_fields: dict[Path, list[str]],
+    missing_basb_fields: dict[Path, list[str]],
+    raw_without_distillation: list[Path],
+    active_projects_without_review: list[Path],
+    orphan_resources: list[Path],
+    outputs_without_evidence: list[Path],
+    outputs_without_source_packet: list[Path],
+    packets_without_forward_use: list[Path],
+    missing_weekly_reviews: list[str],
     duplicate_stems: dict[str, list[Path]],
     orphan_candidates: list[Path],
 ) -> str:
@@ -114,6 +153,40 @@ def render_report(
             field_list = ", ".join(f"`{field}`" for field in fields)
             lines.append(f"- `{path.relative_to(vault)}`: {field_list}")
 
+    if missing_basb_fields:
+        lines.extend(["", "## Missing Product BASB Fields"])
+        for path, fields in sorted(missing_basb_fields.items(), key=lambda item: str(item[0])):
+            field_list = ", ".join(f"`{field}`" for field in fields)
+            lines.append(f"- `{path.relative_to(vault)}`: {field_list}")
+
+    if raw_without_distillation:
+        lines.extend(["", "## Raw Notes Without Distillation"])
+        lines.extend(f"- `{path.relative_to(vault)}`" for path in raw_without_distillation)
+
+    if active_projects_without_review:
+        lines.extend(["", "## Active Projects Missing Next Review"])
+        lines.extend(f"- `{path.relative_to(vault)}`" for path in active_projects_without_review)
+
+    if orphan_resources:
+        lines.extend(["", "## Orphan Resources"])
+        lines.extend(f"- `{path.relative_to(vault)}`" for path in orphan_resources)
+
+    if outputs_without_evidence:
+        lines.extend(["", "## Outputs Missing Evidence Links"])
+        lines.extend(f"- `{path.relative_to(vault)}`" for path in outputs_without_evidence)
+
+    if outputs_without_source_packet:
+        lines.extend(["", "## Outputs Missing Source Packet"])
+        lines.extend(f"- `{path.relative_to(vault)}`" for path in outputs_without_source_packet)
+
+    if packets_without_forward_use:
+        lines.extend(["", "## Packets Without Forward Use"])
+        lines.extend(f"- `{path.relative_to(vault)}`" for path in packets_without_forward_use)
+
+    if missing_weekly_reviews:
+        lines.extend(["", "## Missing Weekly Reviews"])
+        lines.extend(f"- {item}" for item in missing_weekly_reviews)
+
     if duplicate_stems:
         lines.extend(["", "## Duplicate Stems"])
         for stem, paths in sorted(duplicate_stems.items()):
@@ -124,7 +197,23 @@ def render_report(
         lines.extend(["", "## Orphan Candidates"])
         lines.extend(f"- `{path.relative_to(vault)}`" for path in orphan_candidates)
 
-    if not any([missing_frontmatter, missing_links, missing_fields, duplicate_stems, orphan_candidates]):
+    if not any(
+        [
+            missing_frontmatter,
+            missing_links,
+            missing_fields,
+            missing_basb_fields,
+            raw_without_distillation,
+            active_projects_without_review,
+            orphan_resources,
+            outputs_without_evidence,
+            outputs_without_source_packet,
+            packets_without_forward_use,
+            missing_weekly_reviews,
+            duplicate_stems,
+            orphan_candidates,
+        ]
+    ):
         lines.extend(["", "## Result", "", "No structural issues found by this audit."])
 
     return "\n".join(lines) + "\n"
@@ -154,10 +243,19 @@ def main() -> None:
     missing_frontmatter: list[Path] = []
     missing_links: list[Path] = []
     missing_fields: dict[Path, list[str]] = {}
+    missing_basb_fields: dict[Path, list[str]] = {}
+    raw_without_distillation: list[Path] = []
+    active_projects_without_review: list[Path] = []
+    outputs_without_evidence: list[Path] = []
+    outputs_without_source_packet: list[Path] = []
+    packets_without_forward_use: list[Path] = []
+    weekly_review_notes: list[Path] = []
+    frontmatter_by_path: dict[Path, dict[str, object]] = {}
 
     for path in notes:
         text = path.read_text()
         frontmatter = parse_frontmatter(text)
+        frontmatter_by_path[path] = frontmatter
         if not frontmatter:
             missing_frontmatter.append(path)
         note_type = str(frontmatter.get("type", "")).strip()
@@ -182,6 +280,33 @@ def main() -> None:
             missing = [field for field in REQUIRED_FIELDS[note_type] if not frontmatter.get(field)]
             if missing:
                 missing_fields[path] = missing
+        if "90 Templates" not in path.parts and note_type in BASB_NOTE_TYPES:
+            missing_basb = [field for field in BASB_REQUIRED_FIELDS if not frontmatter.get(field)]
+            if missing_basb:
+                missing_basb_fields[path] = missing_basb
+        if "90 Templates" not in path.parts and str(frontmatter.get("distillation_level", "")).strip() == "raw":
+            if "## Essence" not in text and "## Use in current project" not in text:
+                raw_without_distillation.append(path)
+        if "90 Templates" not in path.parts and note_type == "initiative":
+            status = str(frontmatter.get("status", "")).strip()
+            if status in {"active", "proposed"} and not frontmatter.get("next_review"):
+                active_projects_without_review.append(path)
+        if "90 Templates" not in path.parts and note_type == "output":
+            evidence_section = text.split("## Evidence", 1)[1] if "## Evidence" in text else ""
+            if "[[" not in evidence_section:
+                outputs_without_evidence.append(path)
+            if not frontmatter.get("source_packet"):
+                outputs_without_source_packet.append(path)
+        if "90 Templates" not in path.parts and note_type == "intermediate-packet":
+            forward_targets = ("[[Output Pipeline]]", "[[Initiative", "[[Decision", "[[Weekly Review", "[[Weekly Synthesis")
+            if not any(target in text for target in forward_targets):
+                packets_without_forward_use.append(path)
+        if "90 Templates" not in path.parts and note_type == "review":
+            tags = frontmatter.get("tags", [])
+            if isinstance(tags, str):
+                tags = [tags]
+            if "weekly-review" in tags or path.name.startswith("Weekly Review"):
+                weekly_review_notes.append(path)
 
     duplicate_stems = {
         stem: paths
@@ -193,6 +318,23 @@ def main() -> None:
         path for path in notes
         if inbound[path] == 0 and outbound[path] == 0
     ]
+    orphan_resources = [
+        path for path in notes
+        if "90 Templates" not in path.parts
+        and str(frontmatter_by_path.get(path, {}).get("para_category", "")).strip() == "resource"
+        and inbound[path] == 0
+        and outbound[path] == 0
+    ]
+    generated_lifecycle_notes = [
+        path
+        for path, frontmatter in frontmatter_by_path.items()
+        if "90 Templates" not in path.parts
+        and str(frontmatter.get("source", "")).strip() == "generated"
+        and str(frontmatter.get("type", "")).strip() in {"intermediate-packet", "output", "archive-record"}
+    ]
+    missing_weekly_reviews = []
+    if generated_lifecycle_notes and not weekly_review_notes:
+        missing_weekly_reviews.append("Generated Product BASB lifecycle notes exist, but no weekly review note was found.")
 
     report = render_report(
         vault=vault,
@@ -201,6 +343,14 @@ def main() -> None:
         missing_frontmatter=missing_frontmatter,
         missing_links=missing_links,
         missing_fields=missing_fields,
+        missing_basb_fields=missing_basb_fields,
+        raw_without_distillation=raw_without_distillation,
+        active_projects_without_review=active_projects_without_review,
+        orphan_resources=orphan_resources,
+        outputs_without_evidence=outputs_without_evidence,
+        outputs_without_source_packet=outputs_without_source_packet,
+        packets_without_forward_use=packets_without_forward_use,
+        missing_weekly_reviews=missing_weekly_reviews,
         duplicate_stems=duplicate_stems,
         orphan_candidates=orphan_candidates,
     )

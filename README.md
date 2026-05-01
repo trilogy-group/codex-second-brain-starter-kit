@@ -15,6 +15,8 @@ It packages:
 - a portfolio wizard that can initialize and manage multiple second brains
 - bootstrap scripts to create a manifest, scaffold an Obsidian vault, and generate the first audit and readiness report
 - packaged source-index, vault-rebuild, and privacy-sanitizing scripts for richer second-brain generation
+- a Product BASB workflow that maps CODE, PARA, progressive summarization, intermediate packets, archives, and shippable outputs into Obsidian
+- lifecycle automation that drafts output candidates, weekly reviews, and stale-source archive records inside the vault
 - starter prompts you can paste into Codex to run the workflow end to end
 - templates and examples so you can test the approach without any product-specific customization
 
@@ -61,9 +63,20 @@ Typical use cases:
 2. Initialize a portfolio root for one or many second brains.
 3. Add a new second brain into that portfolio.
 4. Add source material and repositories.
-5. Use Codex to ingest, synthesize, and connect the information.
+5. Use Codex to run the Product BASB loop: capture, organize, distill, and express.
 6. Generate or refresh the engineering-readiness report.
-7. Optionally add recurring automations after the first manual pass is proven.
+7. Convert high-value intelligence into shippable outputs and archive completed work.
+8. Optionally add recurring automations after the first manual pass is proven.
+
+Existing vaults can be upgraded conservatively with a dry-run migration first:
+
+```bash
+python3 skills/obsidian-intelligence-system/scripts/migrate_to_product_basb.py \
+  --vault "/absolute/path/to/vault" \
+  --product-slug "product-slug"
+```
+
+Add `--write` to create missing BASB folders, hubs, templates, Bases, and safe frontmatter patches.
 
 ## Next reads
 
@@ -211,12 +224,17 @@ Additional source material:
 
 I want the result to be a real Obsidian second brain, not a flat summary dump. Please:
 - preserve raw-source provenance before summarizing anything
+- apply Product BASB: CODE stages, PARA categories, progressive summarization, intermediate packets, archives, and output conversion
 - run the packaged source-index build and vault rebuild scripts when they are available
 - extract useful content from support articles, repo documentation, wiki pages, and reachable external references
-- if any page requires authentication, open a new browser session and ask me to authenticate with my data, store the authentication details for next iterations
+- if any page requires authentication, open a new browser session and ask me to authenticate with my data; record access requirements and use approved credential or session storage, never raw credentials in the vault
 - create notes using Obsidian wikilinks throughout
 - create the references in Obsidian syntax
 - keep raw extracts separate from synthesized notes
+- create concise Essence and Use in current project sections before full raw evidence
+- create intermediate packets when a research/code/support cluster can be reused in future work
+- turn high-value intelligence into vault-native output candidates such as PRDs, specs, tickets, pull request plans, runbooks, decisions, launch notes, or post-launch learnings
+- generate weekly review and stale-source archive candidates without creating live tickets or rewriting user-authored initiative notes
 - build or update the key index notes, source maps, repo catalog notes, architecture notes, support-to-code traceability notes, and blocked-access notes that are needed
 - connect documentation claims to the relevant repos, services, apps, and files
 - make code-reference notes rich enough to include class or module summaries, implementation intent, relevance, static risk signals, and conflict notes
@@ -226,5 +244,5 @@ I want the result to be a real Obsidian second brain, not a flat summary dump. P
 Finish with:
 - a concise summary of what was ingested, what was blocked, and what still needs manual access
 - a vault audit written into the vault
-- the next highest-leverage follow-ups to improve completeness, traceability, and automation
+- the next highest-leverage follow-ups to improve completeness, traceability, output conversion, archive hygiene, and automation
 ```

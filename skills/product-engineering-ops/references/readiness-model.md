@@ -22,11 +22,18 @@ Use this model to decide whether a product second brain is merely informative or
 ### Ask 2: Engineering-Ready Product System
 
 - Code and repo intelligence
+- Product BASB alignment: CODE, PARA, progressive summarization, intermediate packets, output conversion, and archive hygiene
 - Safe repo mirror sync
 - Local runtime / feature development support
 - Support and bug flow into code
 - CI/CD intelligence
 - Deployment and release intelligence
+
+### Ask 3: Express Into Shippable Work
+
+- Distilled evidence feeds PRDs, specs, tickets, PRs, runbooks, decisions, launch notes, or post-launch learnings
+- Outputs link back to source evidence and implementation anchors
+- Completed initiatives have closeout or archive records
 
 ## Evidence Guidance
 

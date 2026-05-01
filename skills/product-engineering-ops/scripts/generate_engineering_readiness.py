@@ -3,10 +3,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from collections import Counter
 from pathlib import Path
 
 import yaml
+
+
+FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 
 
 def load_manifest(path: Path) -> dict[str, object]:
@@ -27,6 +31,85 @@ def automation_file(automation_id: str | None) -> Path | None:
         return None
     codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
     return codex_home / "automations" / automation_id / "automation.toml"
+
+
+def parse_frontmatter(path: Path) -> dict[str, object]:
+    match = FRONTMATTER_RE.match(path.read_text(errors="ignore"))
+    if not match:
+        return {}
+    try:
+        loaded = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def vault_basb_metrics(vault_path: Path | None) -> dict[str, int | str]:
+    if not vault_path or not vault_path.exists():
+        return {}
+    counts: Counter[str] = Counter()
+    missing_basb = 0
+    raw_only = 0
+    output_issues = 0
+    packet_issues = 0
+    weekly_reviews = 0
+    basb_required = {"basb_stage", "para_category", "distillation_level", "actionability"}
+    durable_types = {
+        "area",
+        "problem",
+        "initiative",
+        "decision",
+        "experiment",
+        "metric",
+        "insight",
+        "capture",
+        "review",
+        "concept",
+        "intermediate-packet",
+        "output",
+        "archive-record",
+    }
+    for path in vault_path.rglob("*.md"):
+        if ".obsidian" in path.parts or "90 Templates" in path.parts:
+            continue
+        text = path.read_text(errors="ignore")
+        frontmatter = parse_frontmatter(path)
+        note_type = str(frontmatter.get("type", "")).strip()
+        if note_type:
+            counts[note_type] += 1
+        if note_type in durable_types and any(not frontmatter.get(field) for field in basb_required):
+            missing_basb += 1
+        if str(frontmatter.get("distillation_level", "")).strip() == "raw":
+            if "## Essence" not in text and "## Use in current project" not in text:
+                raw_only += 1
+        if note_type == "output":
+            evidence_section = text.split("## Evidence", 1)[1] if "## Evidence" in text else ""
+            if "[[" not in evidence_section or not frontmatter.get("source_packet"):
+                output_issues += 1
+        if note_type == "intermediate-packet":
+            if not any(target in text for target in ("[[Output Pipeline]]", "[[Initiative", "[[Decision", "[[Weekly Review", "[[Weekly Synthesis")):
+                packet_issues += 1
+        if note_type == "review":
+            tags = frontmatter.get("tags") or []
+            if isinstance(tags, str):
+                tags = [tags]
+            if "weekly-review" in tags or path.name.startswith("Weekly Review"):
+                weekly_reviews += 1
+    packet_count = counts.get("intermediate-packet", 0)
+    output_count = counts.get("output", 0)
+    conversion_rate = f"{round((output_count / packet_count) * 100)}%" if packet_count else "0%"
+    return {
+        "intermediate_packets": packet_count,
+        "output_candidates": output_count,
+        "archive_records": counts.get("archive-record", 0),
+        "weekly_reviews": weekly_reviews,
+        "raw_only_notes": raw_only,
+        "missing_basb_notes": missing_basb,
+        "output_issues": output_issues,
+        "packet_issues": packet_issues,
+        "basb_issue_count": missing_basb + raw_only + output_issues + packet_issues,
+        "output_conversion_rate": conversion_rate,
+    }
 
 
 def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
@@ -50,6 +133,20 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
         ("Local clone root exists", exists(repositories.get("local_clone_root"))),
         ("Safe mirror root exists", exists(repositories.get("safe_mirror_root"))),
     ]
+    vault_path = Path(str(product.get("vault_path", ""))).expanduser() if product.get("vault_path") else None
+    basb_metrics = vault_basb_metrics(vault_path)
+    if vault_path:
+        runtime_checks.extend(
+            [
+                ("CODE dashboard exists", (vault_path / "00 Home" / "CODE Dashboard.md").exists()),
+                ("PARA map exists", (vault_path / "00 Home" / "PARA Map.md").exists()),
+                ("Output pipeline exists", (vault_path / "00 Home" / "Output Pipeline.md").exists()),
+                ("Output candidates folder exists", (vault_path / "30 Initiatives" / "Output Candidates").exists()),
+                ("Intermediate packet index exists", (vault_path / "40 Research" / "Intermediate Packets" / "Intermediate Packet Index.md").exists()),
+                ("Weekly review folder exists", (vault_path / "70 Journal" / "Reviews").exists()),
+                ("Archive index exists", (vault_path / "90 Archive" / "Archive Index.md").exists()),
+            ]
+        )
 
     automation_checks = []
     for key, item in automation_pack.items():
@@ -93,6 +190,19 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
             f"- {key}: id `{automation_id or 'missing'}`, manifest status `{status}`, "
             f"installed `{'yes' if exists_on_disk else 'no'}`"
         )
+
+    if basb_metrics:
+        lines.extend(["", "## Product BASB Quality Metrics", ""])
+        lines.append(f"- Intermediate packets: `{basb_metrics['intermediate_packets']}`")
+        lines.append(f"- Output candidates: `{basb_metrics['output_candidates']}`")
+        lines.append(f"- Output conversion rate: `{basb_metrics['output_conversion_rate']}`")
+        lines.append(f"- Archive records: `{basb_metrics['archive_records']}`")
+        lines.append(f"- Weekly reviews: `{basb_metrics['weekly_reviews']}`")
+        lines.append(f"- Raw-only notes: `{basb_metrics['raw_only_notes']}`")
+        lines.append(f"- Missing BASB metadata notes: `{basb_metrics['missing_basb_notes']}`")
+        lines.append(f"- Output issues: `{basb_metrics['output_issues']}`")
+        lines.append(f"- Packet issues: `{basb_metrics['packet_issues']}`")
+        lines.append(f"- BASB issue count: `{basb_metrics['basb_issue_count']}`")
 
     lines.extend(["", "## Readiness Categories", ""])
     for category in categories:

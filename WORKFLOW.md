@@ -38,6 +38,10 @@ Do not skip this. The manifest is what makes the approach reusable instead of ad
 
 Use the bootstrap script or the packaged scaffold script to create:
 - home dashboards
+- CODE dashboard
+- PARA map
+- output pipeline
+- intermediate packet and archive hubs
 - research layer
 - journal
 - templates
@@ -61,7 +65,7 @@ Typical source material:
 
 Preserve raw material first. Synthesize after capture.
 
-## Phase 6. Use Codex to build the second brain
+## Phase 6. Run the Product BASB loop
 
 Use Codex with:
 - `product-intelligence-factory` for the scale boundary
@@ -74,6 +78,13 @@ When the packaged helpers are available, run the source-index and rebuild flow b
 
 Expected outputs:
 - linked notes
+- Product BASB metadata across durable generated notes
+- capture-quality scores
+- Essence and Use in current project sections before full source content
+- intermediate packets for reusable support, wiki, code, and planning clusters
+- generated output candidates in `30 Initiatives/Output Candidates/`
+- a weekly review note in `70 Journal/Reviews/`
+- stale-source archive records in `90 Archive/Stale Sources/`
 - code-intelligence layer
 - full support and wiki content preserved in-note
 - problem and initiative notes
@@ -82,15 +93,34 @@ Expected outputs:
 - conflicts when docs and code disagree
 - audit and readiness reports
 
-## Phase 7. Prove engineering value
+## Phase 7. Express into shippable work
 
 A good proof run should show at least one of these:
 - a doc-to-code trace
 - a bug candidate with supporting context
 - a local runtime or repo map
 - an explicit readiness gap report
+- a shippable output candidate such as a PRD, spec, ticket, PR plan, runbook, decision, launch note, or post-launch learning record
 
-## Phase 8. Add recurring automations
+Version 1 creates Obsidian output drafts only. GitHub, Jira, Linear, and support tools remain the systems of record.
+
+## Phase 8. Archive and reuse
+
+After an initiative or investigation is complete:
+- move completed project work into `30 Initiatives/Completed/` or `90 Archive/`
+- preserve reusable intermediate packets in `40 Research/Intermediate Packets/`
+- record what shipped, what was learned, and which sources are now stale
+- keep delivery systems such as GitHub, Jira, or Linear as the system of record
+
+For existing vaults, run the migration CLI in dry-run mode before applying changes:
+
+```bash
+python3 skills/obsidian-intelligence-system/scripts/migrate_to_product_basb.py \
+  --vault "/absolute/path/to/vault" \
+  --product-slug "product-slug"
+```
+
+## Phase 9. Add recurring automations
 
 Only after the manual flow works, add the standard automation pack:
 - source-truth sync
@@ -98,7 +128,7 @@ Only after the manual flow works, add the standard automation pack:
 - repo mirror sync
 - readiness audit
 
-## Phase 9. Scale to product 2
+## Phase 10. Scale to product 2
 
 Once the first product works:
 - keep the skills generic

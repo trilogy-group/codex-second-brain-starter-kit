@@ -8,12 +8,19 @@ Build the product second brain from the sources defined in this manifest:
 Requirements:
 - run the packaged source-index build and rebuild scripts when they are available for this manifest
 - preserve raw sources before summarizing them
+- run CODE in order: capture source evidence, organize it into the manifest/PARA structure, distill it into durable notes, and express high-value findings into output candidates
 - build linked notes instead of a dump
 - preserve full support and wiki content inside the generated notes, not just summaries
+- add Product BASB frontmatter to durable generated notes: `basb_stage`, `para_category`, `distillation_level`, `actionability`, and optional `output_target`
+- include Essence and Use in current project sections before raw source content
+- create intermediate packets when a reusable support, wiki, code, or planning cluster can feed more than one future initiative
+- create or update vault-native output candidates for PRDs, specs, tickets, PR plans, runbooks, decisions, launch notes, and post-launch learnings when the evidence supports them
+- generate weekly review and stale-source archive candidate notes after rebuild; do not create live delivery-system tickets unless explicitly asked
 - create home notes, research hubs, and product-memory notes
 - connect documentation, external links, and repository context where relevant
 - create rich code-reference notes that explain class or module summaries, implementation intent, relevance, static risk signals, and conflicts
 - add conflicts whenever documentation and code disagree
 - show exact uncaptured or blocked URLs instead of only reporting counts
+- record access requirements and use approved credential/session storage for authenticated sources; never store raw credentials in the vault
 - sanitize generated vault notes for obvious PII and credential leakage
 - finish with a vault audit written into the vault

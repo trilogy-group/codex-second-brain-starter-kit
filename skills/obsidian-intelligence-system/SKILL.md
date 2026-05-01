@@ -18,7 +18,7 @@ This skill supports three patterns:
 - `operations`: a Jay Khalife style intelligence system with `Knowledge/`, `Operations/`, hub nodes, entity intelligence summaries, and timestamped playbooks.
 - `hybrid`: both layers together, with research and frameworks feeding operational or product decisions.
 
-Read [references/runbook.md](references/runbook.md) when you need the operational topology from the PDF. Read [references/schemas.md](references/schemas.md) when you need the note types, required properties, and template shapes.
+Read [references/basb-methodology-map.md](references/basb-methodology-map.md) when building a Tiago Forte-style product second brain. Read [references/runbook.md](references/runbook.md) when you need the operational topology from the PDF. Read [references/schemas.md](references/schemas.md) when you need the note types, required properties, and template shapes.
 
 ## Workflow
 
@@ -47,17 +47,29 @@ python3 scripts/scaffold_vault.py \
 The scaffold creates:
 - Official/core Obsidian settings for Properties, Daily Notes, Templates, Backlinks, Search, Canvas, Workspaces, and Bases.
 - Product-memory zones such as `00 Home`, `10 Areas`, `20 Problems`, `30 Initiatives`, `40 Research`, `50 Decisions`, `60 Experiments`, `70 Journal`, `80 Assets`, and `90 Templates`.
+- Product BASB zones and hubs for CODE, PARA, intermediate packets, output conversion, reviews, and archives.
 - Operations zones such as `Knowledge/`, `Operations/`, and `Operations/_nodes/`.
 - `CLAUDE.md` and `TRAVERSAL-INDEX.md` seeds so agents and humans have a navigation contract.
 - Valid `.base` files, templates, and a starter canvas.
 
 When the user already has a vault, preserve useful material and move raw or imported content into the research or knowledge layer instead of deleting it.
 
+For existing vaults that only need the Product BASB surfaces and metadata, use the migration script in dry-run mode first:
+
+```bash
+python3 scripts/migrate_to_product_basb.py \
+  --vault "/absolute/path/to/vault" \
+  --product-slug "product-slug"
+```
+
+Add `--write` only after reviewing the report. Use `--overwrite-generated` only for scaffolded or generated hubs/templates.
+
 ### 3. Ingest sources without losing provenance
 
 - Preserve raw material in `40 Research` or `Knowledge/Books|Frameworks|Concepts|...`.
 - If a source is authenticated or externally linked, capture enough context to make the note usable offline.
 - Prefer one note per durable concept, entity, problem, decision, or experiment.
+- Tag durable product notes with CODE/PARA metadata: `basb_stage`, `para_category`, `distillation_level`, `actionability`, and optional `output_target`.
 - When importing from an existing vault, patch stale queries and legacy home notes after any folder moves.
 
 ### 4. Build the graph deliberately
@@ -72,7 +84,8 @@ These rules are non-negotiable:
 For `product` and `hybrid` mode:
 - Create area, problem, initiative, metric, decision, experiment, and insight notes.
 - Keep raw research in `40 Research`.
-- Use `Product OS`, `Areas`, `Decision Log`, and `Active Bets` as the main dashboards.
+- Use `Product OS`, `CODE Dashboard`, `PARA Map`, `Output Pipeline`, `Areas`, `Decision Log`, and `Active Bets` as the main dashboards.
+- Treat `30 Initiatives` as Projects, `10 Areas` as Areas, `40 Research` as Resources, and `90 Archive` as Archives.
 
 For `operations` and `hybrid` mode:
 - Create one `_intelligence_summary.md` per real-world entity.
@@ -93,7 +106,11 @@ This layer belongs in research, not as a replacement for product or operational 
 ### 6. Maintain the vault as a synthesis layer
 
 - Use Daily Notes as the capture inbox.
-- Distill raw capture into durable notes at least weekly.
+- Distill raw capture into durable notes at least weekly using progressive summarization.
+- Move reusable research, code, support, and planning fragments into intermediate packets that can feed future initiatives.
+- Convert high-value intelligence into shippable outputs such as PRDs, specs, tickets, pull requests, runbooks, decisions, launch notes, and post-launch learnings.
+- Keep generated output candidates as vault drafts unless an approved delivery-system adapter is explicitly configured.
+- Use weekly review and archive records to close the CODE loop without rewriting user-authored initiative notes.
 - Keep delivery in the system of record such as GitHub, Jira, or Linear; Obsidian should store the reasoning, evidence, and intelligence around the work.
 - Revisit `CLAUDE.md`, `TRAVERSAL-INDEX.md`, dashboards, and hub nodes as the vault evolves.
 

@@ -10,13 +10,14 @@ import shutil
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 
-DATE = "2026-04-19"
+DATE = date.today().isoformat()
 HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
 ARTICLE_REF_RE = re.compile(r"\bArticle\s+(\d{4,6})\b", re.IGNORECASE)
@@ -546,6 +547,92 @@ def source_link_summary(link_records: list[dict[str, Any]]) -> tuple[dict[str, i
     return dict(counts), domains.most_common(8)
 
 
+def capture_quality_score(
+    *,
+    signals: dict[str, Any],
+    link_records: list[dict[str, Any]],
+    code_reference_links: list[str],
+    capabilities: list[str],
+    conflicts: list[str],
+) -> dict[str, Any]:
+    score = 0
+    factors: list[str] = []
+    if capabilities:
+        score += 2
+        factors.append("relevance: mapped to product capabilities")
+    if signals.get("headings") or signals.get("bullets"):
+        score += 2
+        factors.append("structure: source has sections or explicit evidence")
+    if link_records:
+        status_counts = Counter(record.get("status") for record in link_records)
+        if status_counts.get("mirrored") or status_counts.get("local-support-evidence"):
+            score += 2
+            factors.append("confidence: linked evidence was captured locally")
+        elif status_counts.get("blocked") or status_counts.get("auth-gated"):
+            score += 1
+            factors.append("confidence: some linked evidence is blocked and logged")
+    if code_reference_links:
+        score += 2
+        factors.append("product impact: connected to implementation anchors")
+    if conflicts or code_reference_links:
+        score += 2
+        factors.append("actionability: supports follow-up, review, or delivery work")
+    rating = "high" if score >= 8 else "medium" if score >= 4 else "low"
+    return {"score": min(score, 10), "rating": rating, "factors": factors or ["needs more evidence"]}
+
+
+def essence_from_signals(signals: dict[str, Any], fallback: str) -> list[str]:
+    lines: list[str] = []
+    if signals.get("paragraphs"):
+        lines.append(signals["paragraphs"][0])
+    elif signals.get("bullets"):
+        lines.append(signals["bullets"][0])
+    else:
+        lines.append(fallback)
+    if signals.get("headings"):
+        lines.append(f"Key sections: {', '.join(signals['headings'][:4])}.")
+    return unique_lines(lines, 3)
+
+
+def use_in_current_project_lines(
+    *,
+    capabilities: list[str],
+    code_reference_links: list[str],
+    conflicts: list[str],
+    uncaptured_links: list[dict[str, Any]],
+) -> list[str]:
+    lines: list[str] = []
+    if capabilities:
+        capability_titles = [CAPABILITY_BY_KEY[key]["title"] for key in capabilities if key in CAPABILITY_BY_KEY]
+        lines.append(f"Use this as evidence for {', '.join(capability_titles)} work.")
+    if code_reference_links:
+        lines.append("Use the linked code references to scope implementation, review, testing, or support follow-up.")
+    if conflicts:
+        lines.append("Resolve the documented conflicts before relying on this evidence for delivery decisions.")
+    if uncaptured_links:
+        lines.append("Follow up on uncaptured evidence before treating this as complete source coverage.")
+    if not lines:
+        lines.append("Use this as reference material until it is linked to an active initiative or output.")
+    return unique_lines(lines, 5)
+
+
+def basb_frontmatter(
+    *,
+    stage: str,
+    para: str,
+    distillation: str,
+    actionability: str,
+    output_target: str = "",
+) -> dict[str, str]:
+    return {
+        "basb_stage": stage,
+        "para_category": para,
+        "distillation_level": distillation,
+        "actionability": actionability,
+        "output_target": output_target,
+    }
+
+
 def uncaptured_link_records(link_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     blocked_statuses = {
         "blocked",
@@ -814,6 +901,26 @@ def clear_markdown_dir(path: Path) -> None:
         return
     for file_path in sorted(path.rglob("*.md"), reverse=True):
         file_path.unlink()
+    for directory in sorted((item for item in path.rglob("*") if item.is_dir()), reverse=True):
+        if not any(directory.iterdir()):
+            directory.rmdir()
+
+
+def is_generated_note(path: Path) -> bool:
+    text = path.read_text(errors="ignore")
+    if not text.startswith("---\n"):
+        return False
+    head = text.split("---", 2)[1]
+    return bool(re.search(r"(?m)^source:\s*[\"']?generated[\"']?\s*$", head))
+
+
+def clear_generated_markdown_dir(path: Path) -> None:
+    if not path.exists():
+        ensure_dir(path)
+        return
+    for file_path in sorted(path.rglob("*.md"), reverse=True):
+        if is_generated_note(file_path):
+            file_path.unlink()
     for directory in sorted((item for item in path.rglob("*") if item.is_dir()), reverse=True):
         if not any(directory.iterdir()):
             directory.rmdir()
@@ -1128,6 +1235,13 @@ def build_support_note(
         if record.get("url") and record.get("status") == "mirrored"
     ][:15]
     support_relationships = unique_lines([*related_articles, *related_support_links], 16)
+    quality = capture_quality_score(
+        signals=signals,
+        link_records=link_records,
+        code_reference_links=code_reference_links,
+        capabilities=capabilities,
+        conflicts=conflicts,
+    )
 
     lines = [
         frontmatter(
@@ -1138,6 +1252,13 @@ def build_support_note(
                 "source_path": str(raw_path),
                 "source_url": item.get("source_url") or "",
                 "article_id": item.get("article_id") or "",
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="distilled",
+                    actionability="soon" if code_reference_links else "reference",
+                ),
+                "capture_quality": quality["score"],
                 "tags": ["support", item["category"], *capabilities],
             }
         ),
@@ -1153,6 +1274,25 @@ def build_support_note(
     ]
     summary = signals["paragraphs"][0] if signals["paragraphs"] else f"This source was ingested from the {PRODUCT_CONTEXT['name']} support corpus."
     lines.append(summary)
+
+    lines.extend(["", "## Essence", ""])
+    lines.extend(f"- {item}" for item in essence_from_signals(signals, summary))
+
+    lines.extend(["", "## Use in current project", ""])
+    lines.extend(
+        f"- {item}"
+        for item in use_in_current_project_lines(
+            capabilities=capabilities,
+            code_reference_links=code_reference_links,
+            conflicts=conflicts,
+            uncaptured_links=uncaptured_links,
+        )
+    )
+
+    lines.extend(["", "## Capture quality", ""])
+    lines.append(f"- Score: `{quality['score']}/10`")
+    lines.append(f"- Rating: `{quality['rating']}`")
+    lines.extend(f"- {factor}" for factor in quality["factors"])
 
     if signals["headings"]:
         lines.extend(["", "## Key sections", ""])
@@ -1246,6 +1386,13 @@ def build_wiki_note(
         for record in link_records
         if record.get("url") and record.get("status") == "mirrored"
     ][:15]
+    quality = capture_quality_score(
+        signals=signals,
+        link_records=link_records,
+        code_reference_links=code_reference_links,
+        capabilities=capabilities,
+        conflicts=conflicts,
+    )
 
     lines = [
         frontmatter(
@@ -1255,6 +1402,13 @@ def build_wiki_note(
                 "source": "engineering-wiki",
                 "source_path": str(raw_path),
                 "section": Path(relative_path).parts[0] if len(Path(relative_path).parts) > 1 else "root",
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="distilled",
+                    actionability="soon" if code_reference_links else "reference",
+                ),
+                "capture_quality": quality["score"],
                 "tags": ["wiki", *capabilities],
             }
         ),
@@ -1269,6 +1423,25 @@ def build_wiki_note(
     ]
     summary = signals["paragraphs"][0] if signals["paragraphs"] else f"This page was ingested from the {PRODUCT_CONTEXT['name']} engineering wiki."
     lines.append(summary)
+
+    lines.extend(["", "## Essence", ""])
+    lines.extend(f"- {item}" for item in essence_from_signals(signals, summary))
+
+    lines.extend(["", "## Use in current project", ""])
+    lines.extend(
+        f"- {item}"
+        for item in use_in_current_project_lines(
+            capabilities=capabilities,
+            code_reference_links=code_reference_links,
+            conflicts=conflicts,
+            uncaptured_links=uncaptured_links,
+        )
+    )
+
+    lines.extend(["", "## Capture quality", ""])
+    lines.append(f"- Score: `{quality['score']}/10`")
+    lines.append(f"- Rating: `{quality['rating']}`")
+    lines.extend(f"- {factor}" for factor in quality["factors"])
 
     if signals["headings"]:
         lines.extend(["", "## Key sections", ""])
@@ -1345,6 +1518,12 @@ def build_repo_note(snapshot: dict[str, Any], repo_path: Path, capabilities: lis
                 "repo": snapshot["name"],
                 "role": snapshot["role"],
                 "branch": snapshot["branch"],
+                **basb_frontmatter(
+                    stage="organize",
+                    para="resource",
+                    distillation="highlighted",
+                    actionability="reference",
+                ),
                 "tags": ["repo", snapshot["role"]],
             }
         ),
@@ -1399,6 +1578,12 @@ def build_code_reference_note(
                 "artifact_kind": analysis.artifact_kind,
                 "risk_count": risk_count,
                 "conflict_count": conflict_count,
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="distilled",
+                    actionability="soon" if support_links or wiki_links else "reference",
+                ),
                 "tags": ["code-reference", hit["repo"]],
             }
         ),
@@ -1409,6 +1594,15 @@ def build_code_reference_note(
         f"- Local path: `{hit['absolute_path']}`",
         f"- First matched line: `{hit.get('line_number') or 'n/a'}`",
     ]
+    lines.extend(["", "## Essence", ""])
+    lines.extend(f"- {item}" for item in analysis.intentions[:3])
+    lines.extend(["", "## Use in current project", ""])
+    if support_links or wiki_links:
+        lines.append("- Use this implementation anchor to scope related support, wiki, review, or delivery work.")
+    else:
+        lines.append("- Use this as a reusable code reference until it is connected to an active output or initiative.")
+    if analysis.risks:
+        lines.append("- Review the detected risk signals before relying on this path for shipping work.")
     lines.extend(
         [
             "",
@@ -1502,6 +1696,12 @@ def build_capability_note(
                 "status": "active",
                 "date": DATE,
                 "source": "generated",
+                **basb_frontmatter(
+                    stage="organize",
+                    para="area",
+                    distillation="executive",
+                    actionability="soon",
+                ),
                 "tags": ["capability", capability["key"]],
             }
         ),
@@ -1517,6 +1717,14 @@ def build_capability_note(
         f"- Code hits: `{len(code_hits)}`",
         f"- Linked pages by status: `{dict(status_counts) if status_counts else {'none': 0}}`",
     ]
+    lines.extend(["", "## Essence", ""])
+    lines.append(f"- This capability groups evidence and implementation anchors for {capability['title']}.")
+    lines.extend(["", "## Use in current project", ""])
+    if code_reference_links:
+        lines.append("- Use the representative code paths to scope implementation, review, and testing work.")
+    else:
+        lines.append("- Use this as a capability map until direct code evidence is available.")
+    lines.append("- Convert strong evidence clusters into intermediate packets or shippable output candidates.")
     if domain_counts:
         lines.extend(["", "## Linked domains", ""])
         lines.extend(f"- {domain}: `{count}`" for domain, count in domain_counts.most_common(8))
@@ -1547,6 +1755,441 @@ def build_capability_note(
             "- [[Support Articles Hub]]",
             "- [[Wiki Pages Hub]]",
             "- [[Code Intelligence Hub]]",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def score_packet_evidence(
+    *,
+    support_links: list[str],
+    wiki_links: list[str],
+    code_reference_links: list[str],
+    conflict_count: int = 0,
+    stale_doc_count: int = 0,
+) -> int:
+    score = 0
+    if support_links:
+        score += min(3, len(support_links))
+    if wiki_links:
+        score += min(2, len(wiki_links))
+    if code_reference_links:
+        score += 3
+    if conflict_count:
+        score += min(2, conflict_count)
+    if stale_doc_count:
+        score += min(2, stale_doc_count)
+    return min(score, 10)
+
+
+def build_intermediate_packet_note(
+    capability: dict[str, Any],
+    support_links: list[str],
+    wiki_links: list[str],
+    repo_note_links: list[str],
+    code_reference_links: list[str],
+    *,
+    packet_kind: str = "capability",
+    conflict_links: list[str] | None = None,
+    stale_doc_count: int = 0,
+    evidence_score: int | None = None,
+    output_candidate_links: list[str] | None = None,
+) -> str:
+    conflict_links = conflict_links or []
+    output_candidate_links = output_candidate_links or []
+    score = evidence_score if evidence_score is not None else score_packet_evidence(
+        support_links=support_links,
+        wiki_links=wiki_links,
+        code_reference_links=code_reference_links,
+        conflict_count=len(conflict_links),
+        stale_doc_count=stale_doc_count,
+    )
+    lines = [
+        frontmatter(
+            {
+                "type": "intermediate-packet",
+                "area": PRODUCT_CONTEXT["slug"],
+                "status": "reusable",
+                "date": DATE,
+                "source": "generated",
+                "packet_kind": packet_kind,
+                "evidence_score": score,
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="executive",
+                    actionability="soon",
+                    output_target="Output Pipeline",
+                ),
+                "tags": ["intermediate-packet", capability["key"]],
+            }
+        ),
+        f"# {capability['title']} Intermediate Packet",
+        "",
+        "## Essence",
+        "",
+        f"- {capability['description']}",
+        f"- Evidence coverage: `{len(support_links)}` support notes, `{len(wiki_links)}` wiki notes, `{len(code_reference_links)}` code references.",
+        f"- Evidence score: `{score}/10`.",
+        "",
+        "## Highlights",
+        "",
+        f"- Support evidence: `{len(support_links)}` linked note(s).",
+        f"- Wiki evidence: `{len(wiki_links)}` linked note(s).",
+        f"- Code evidence: `{len(code_reference_links)}` implementation anchor(s).",
+        f"- Conflict or drift signals: `{len(conflict_links) + stale_doc_count}`.",
+        "",
+        "## Distilled takeaways",
+        "",
+        "- Treat this packet as a reusable synthesis layer before opening the full raw evidence.",
+        "- Use linked implementation anchors to verify whether the evidence is current before shipping work.",
+        "",
+        "## Executive use",
+        "",
+        "- Promote this packet into an output candidate when the evidence score, code links, or conflict signals justify delivery follow-up.",
+        "",
+        "## Reusable building block",
+        "",
+        "- Use this packet to brief product work, support follow-up, implementation planning, review, or runbook drafting.",
+        "- Keep delivery artifacts in the system of record and link them back here as `output_target` values.",
+        "",
+        "## Source evidence",
+        "",
+    ]
+    if support_links:
+        lines.extend(f"- {link}" for link in support_links[:20])
+    if wiki_links:
+        lines.extend(f"- {link}" for link in wiki_links[:20])
+    if code_reference_links:
+        lines.extend(f"- {link}" for link in code_reference_links[:20])
+    if conflict_links:
+        lines.extend(f"- {link}" for link in conflict_links[:20])
+    if not any((support_links, wiki_links, code_reference_links)):
+        lines.append("- No source evidence was generated for this capability yet.")
+    lines.extend(["", "## Implementation anchors", ""])
+    if repo_note_links:
+        lines.extend(f"- {link}" for link in repo_note_links)
+    else:
+        lines.append("- No repository notes are linked yet.")
+    lines.extend(
+        [
+            "",
+            "## Can feed",
+            "",
+            "- [[Output Pipeline]]",
+            "- [[Product Capability Map]]",
+            "- [[Support-to-Code Map]]",
+            *output_candidate_links[:12],
+            "",
+            "## Related notes",
+            "",
+            "- [[Intermediate Packet Index]]",
+            "- [[CODE Dashboard]]",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_intermediate_packet_index(packet_links: list[str]) -> str:
+    lines = [
+        frontmatter(
+            {
+                "type": "hub",
+                "area": PRODUCT_CONTEXT["slug"],
+                "source": "generated",
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="executive",
+                    actionability="soon",
+                    output_target="Output Pipeline",
+                ),
+                "tags": ["intermediate-packet", "hub"],
+            }
+        ),
+        "# Intermediate Packet Index",
+        "",
+        "Intermediate packets are reusable support, wiki, code, and planning clusters that can feed future product work.",
+        "",
+        f"- Packets generated: `{len(packet_links)}`",
+        "",
+        "## Packets",
+        "",
+    ]
+    lines.extend(f"- {link}" for link in sorted(packet_links))
+    lines.extend(
+        [
+            "",
+            "## Related notes",
+            "",
+            "- [[Output Pipeline]]",
+            "- [[Product Capability Map]]",
+            "- [[Support-to-Code Map]]",
+            "- [[Code Intelligence Hub]]",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def infer_output_kind(packet: dict[str, Any]) -> str:
+    if packet.get("conflict_kind") == "documentation-drift" or packet.get("stale_doc_count", 0):
+        return "runbook"
+    if packet.get("conflict_kind") in {"restricted-source", "code-traceability-gap"}:
+        return "ticket"
+    if packet.get("code_reference_links"):
+        return "pull-request-plan"
+    if packet.get("support_links") and packet.get("wiki_links"):
+        return "spec"
+    return "prd"
+
+
+def shipping_path_for_kind(output_kind: str) -> str:
+    return {
+        "prd": "Draft a PRD in the product planning system and link it back to this vault note.",
+        "spec": "Draft a product or engineering spec and link the approved artifact as the output target.",
+        "ticket": "Create an implementation or investigation ticket in the delivery system of record.",
+        "pull-request-plan": "Use this as the pull request plan or review checklist before opening code changes.",
+        "runbook": "Turn this into a support, operations, or documentation-maintenance runbook.",
+        "decision": "Convert the recommendation into a decision note and link the decision owner.",
+        "launch-note": "Use this evidence to draft launch notes once the work ships.",
+        "post-launch-learning": "Capture outcome evidence after release and archive reusable learnings.",
+    }.get(output_kind, "Turn this output draft into the appropriate delivery artifact and link the system-of-record item.")
+
+
+def stem_for_output_candidate(title: str) -> str:
+    return safe_filename(f"Output Candidate - {title}", limit=160)
+
+
+def select_output_candidates(packet_records: list[dict[str, Any]], limit: int = 12) -> list[dict[str, Any]]:
+    promotable = [
+        packet
+        for packet in packet_records
+        if packet.get("evidence_score", 0) >= 5
+        or packet.get("code_reference_links")
+        or packet.get("conflict_count", 0)
+        or packet.get("stale_doc_count", 0)
+    ]
+    ranked = sorted(
+        promotable,
+        key=lambda packet: (
+            -int(packet.get("evidence_score", 0)),
+            -len(packet.get("code_reference_links", [])),
+            -int(packet.get("conflict_count", 0)),
+            packet.get("title", ""),
+        ),
+    )
+    return ranked[:limit]
+
+
+def build_output_candidate_note(packet: dict[str, Any]) -> str:
+    output_kind = infer_output_kind(packet)
+    title = f"{packet['title']} Output Candidate"
+    evidence_links = unique_lines(
+        [
+            packet["link"],
+            *packet.get("support_links", []),
+            *packet.get("wiki_links", []),
+            *packet.get("code_reference_links", []),
+            *packet.get("conflict_links", []),
+        ],
+        40,
+    )
+    lines = [
+        frontmatter(
+            {
+                "type": "output",
+                "area": PRODUCT_CONTEXT["slug"],
+                "status": "proposed",
+                "date": DATE,
+                "source": "generated",
+                "output_kind": output_kind,
+                "source_packet": packet["link"],
+                "evidence_score": packet.get("evidence_score", 0),
+                "shipping_path": shipping_path_for_kind(output_kind),
+                **basb_frontmatter(
+                    stage="express",
+                    para="project",
+                    distillation="executive",
+                    actionability="now",
+                    output_target="vault-draft",
+                ),
+                "tags": ["output", output_kind, "generated"],
+            }
+        ),
+        f"# {title}",
+        "",
+        "## Output type",
+        output_kind,
+        "",
+        "## Decision or ask",
+        "",
+        f"- Convert {packet['link']} into a shippable `{output_kind}` if the linked evidence still reflects current product reality.",
+        "",
+        "## Evidence",
+        "",
+    ]
+    lines.extend(f"- {link}" for link in evidence_links)
+    lines.extend(
+        [
+            "",
+            "## Shipping path",
+            "",
+            f"- {shipping_path_for_kind(output_kind)}",
+            "- Keep GitHub, Jira, Linear, or the support system as the system of record; keep this note as the reasoning and evidence layer.",
+            "",
+            "## Related initiative",
+            "",
+            "- [[Active Bets]]",
+            "",
+            "## Source packet",
+            "",
+            f"- {packet['link']}",
+            "",
+            "## Related notes",
+            "",
+            "- [[Output Pipeline]]",
+            "- [[Intermediate Packet Index]]",
+            "- [[Weekly Synthesis]]",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_weekly_review_note(
+    packet_records: list[dict[str, Any]],
+    output_records: list[dict[str, Any]],
+    stale_doc_refs: list[dict[str, Any]],
+    conflicts_by_kind: dict[str, list[str]],
+) -> str:
+    top_packets = sorted(packet_records, key=lambda packet: (-int(packet.get("evidence_score", 0)), packet["title"]))[:12]
+    lines = [
+        frontmatter(
+            {
+                "type": "review",
+                "area": PRODUCT_CONTEXT["slug"],
+                "status": "active",
+                "date": DATE,
+                "source": "generated",
+                "review_period": "weekly",
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="executive",
+                    actionability="now",
+                    output_target="Output Pipeline",
+                ),
+                "tags": ["weekly-review", "generated"],
+            }
+        ),
+        f"# Weekly Review - {DATE}",
+        "",
+        "## CODE movement",
+        "",
+        f"- Reusable packets generated: `{len(packet_records)}`",
+        f"- Output candidates generated: `{len(output_records)}`",
+        f"- Stale source references found: `{len(stale_doc_refs)}`",
+        f"- Conflict groups: `{sum(1 for entries in conflicts_by_kind.values() if entries)}`",
+        "",
+        "## New or high-value packets",
+        "",
+    ]
+    if top_packets:
+        lines.extend(f"- {packet['link']} (score `{packet.get('evidence_score', 0)}/10`)" for packet in top_packets)
+    else:
+        lines.append("- No packets were generated in this rebuild.")
+    lines.extend(["", "## Output candidates", ""])
+    if output_records:
+        lines.extend(f"- {record['link']} ({record['output_kind']}, score `{record['evidence_score']}/10`)" for record in output_records)
+    else:
+        lines.append("- No output candidates were generated from the current evidence.")
+    lines.extend(["", "## Unresolved evidence gaps", ""])
+    for kind, entries in sorted(conflicts_by_kind.items()):
+        if entries:
+            lines.append(f"- {kind}: `{len(entries)}` finding(s)")
+    if not any(conflicts_by_kind.values()):
+        lines.append("- No conflict groups were generated from the current evidence.")
+    lines.extend(["", "## Stale sources", ""])
+    if stale_doc_refs:
+        for entry in stale_doc_refs[:12]:
+            refs = ", ".join(f"`{ref}`" for ref in entry.get("source_refs", [])[:3])
+            lines.append(f"- {entry.get('url', '(missing url)')} from {refs or '`unknown source`'}")
+    else:
+        lines.append("- No stale documentation references were detected.")
+    lines.extend(
+        [
+            "",
+            "## Next review actions",
+            "",
+            "- Promote the strongest output candidates into the delivery system of record.",
+            "- Resolve high-impact stale or restricted evidence before relying on it for delivery decisions.",
+            "- Archive completed work only after outcomes and reusable learnings are captured.",
+            "",
+            "## Related notes",
+            "",
+            "- [[Output Pipeline]]",
+            "- [[Intermediate Packet Index]]",
+            "- [[Archive Index]]",
+            "- [[CODE Dashboard]]",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_stale_sources_archive_note(stale_doc_refs: list[dict[str, Any]]) -> str:
+    source_counts = Counter(
+        source_ref
+        for entry in stale_doc_refs
+        for source_ref in entry.get("source_refs", [])
+    )
+    lines = [
+        frontmatter(
+            {
+                "type": "archive-record",
+                "area": PRODUCT_CONTEXT["slug"],
+                "status": "archived",
+                "date": DATE,
+                "source": "generated",
+                "archive_reason": "stale-documentation",
+                **basb_frontmatter(
+                    stage="archive",
+                    para="archive",
+                    distillation="executive",
+                    actionability="reference",
+                    output_target="GitHub Source Of Truth",
+                ),
+                "tags": ["archive", "stale-sources", "generated"],
+            }
+        ),
+        f"# Stale Sources - {DATE}",
+        "",
+        "## Archive reason",
+        "",
+        "- Imported evidence still references stale documentation hosts. Keep this record as drift evidence; do not treat stale links as active code source-of-truth.",
+        "",
+        "## Summary",
+        "",
+        f"- Stale references detected: `{len(stale_doc_refs)}`",
+        f"- Source notes affected: `{len(source_counts)}`",
+        "",
+        "## Top affected sources",
+        "",
+    ]
+    if source_counts:
+        lines.extend(f"- `{source}`: `{count}` stale reference(s)" for source, count in source_counts.most_common(20))
+    else:
+        lines.append("- No source references were attached to stale links.")
+    lines.extend(["", "## Stale reference samples", ""])
+    for entry in stale_doc_refs[:30]:
+        lines.append(f"- {entry.get('url', '(missing url)')}")
+    lines.extend(
+        [
+            "",
+            "## Related notes",
+            "",
+            "- [[GitHub Source Of Truth]]",
+            "- [[Conflict Log]]",
+            "- [[Archive Index]]",
+            "- [[Weekly Synthesis]]",
         ]
     )
     return "\n".join(lines)
@@ -1725,12 +2368,26 @@ def build_support_to_code_map(rows: list[dict[str, Any]]) -> str:
 def build_research_hub() -> str:
     return "\n".join(
         [
-            frontmatter({"type": "hub", "area": PRODUCT_CONTEXT["slug"], "source": "generated", "tags": ["research", "hub"]}),
+            frontmatter(
+                {
+                    "type": "hub",
+                    "area": PRODUCT_CONTEXT["slug"],
+                    "source": "generated",
+                    **basb_frontmatter(
+                        stage="organize",
+                        para="resource",
+                        distillation="executive",
+                        actionability="now",
+                    ),
+                    "tags": ["research", "hub"],
+                }
+            ),
             "# Research Hub",
             "",
             "- [[Support Articles Hub]]",
             "- [[Wiki Pages Hub]]",
             "- [[Code Intelligence Hub]]",
+            "- [[Intermediate Packet Index]]",
             "- [[Corpus Overview]]",
             "- [[Linked Pages Registry]]",
             "",
@@ -1836,7 +2493,20 @@ def build_conflict_log(conflicts_by_kind: dict[str, list[str]]) -> str:
 def build_home_note(total_support: int, total_wiki: int, total_capabilities: int, total_repo_notes: int, stale_doc_count: int) -> str:
     return "\n".join(
         [
-            frontmatter({"type": "hub", "area": PRODUCT_CONTEXT["slug"], "source": "generated", "tags": ["home"]}),
+            frontmatter(
+                {
+                    "type": "hub",
+                    "area": PRODUCT_CONTEXT["slug"],
+                    "source": "generated",
+                    **basb_frontmatter(
+                        stage="organize",
+                        para="resource",
+                        distillation="executive",
+                        actionability="now",
+                    ),
+                    "tags": ["home"],
+                }
+            ),
             "# Intelligence Home",
             "",
             f"This vault is the working memory layer for {PRODUCT_CONTEXT['name']}'s support corpus, engineering wiki, and repository surface.",
@@ -1852,10 +2522,14 @@ def build_home_note(total_support: int, total_wiki: int, total_capabilities: int
             "",
             "## Start here",
             "",
+            "- [[CODE Dashboard]]",
+            "- [[PARA Map]]",
+            "- [[Output Pipeline]]",
             "- [[Product Capability Map]]",
             "- [[Support Articles Hub]]",
             "- [[Wiki Pages Hub]]",
             "- [[Code Intelligence Hub]]",
+            "- [[Intermediate Packet Index]]",
             "- [[GitHub Source Of Truth]]",
             "- [[Engineering Readiness]]",
             "- [[Conflict Log]]",
@@ -1874,6 +2548,7 @@ def build_home_note(total_support: int, total_wiki: int, total_capabilities: int
             "- [[Support-to-Code Map]]",
             "- [[Architecture and Service Map]]",
             "- [[Runbook Coverage]]",
+            "- [[Archive Index]]",
         ]
     )
 
@@ -1908,18 +2583,30 @@ def main() -> None:
     code_dir = paths.vault / "40 Research" / "Code Intelligence"
     repo_notes_dir = code_dir / "Repos"
     code_reference_dir = code_dir / "References"
+    intermediate_packet_dir = paths.vault / "40 Research" / "Intermediate Packets"
+    output_candidate_dir = paths.vault / "30 Initiatives" / "Output Candidates"
+    review_dir = paths.vault / "70 Journal" / "Reviews"
+    stale_archive_dir = paths.vault / "90 Archive" / "Stale Sources"
     capability_dir = paths.vault / "20 Product" / "Capabilities"
 
     clear_markdown_dir(support_dir)
     clear_markdown_dir(wiki_dir)
     clear_markdown_dir(repo_notes_dir)
     clear_markdown_dir(code_reference_dir)
+    clear_generated_markdown_dir(intermediate_packet_dir)
+    clear_generated_markdown_dir(output_candidate_dir)
+    clear_generated_markdown_dir(review_dir)
+    clear_generated_markdown_dir(stale_archive_dir)
     clear_markdown_dir(capability_dir)
 
     ensure_dir(support_dir)
     ensure_dir(wiki_dir)
     ensure_dir(repo_notes_dir)
     ensure_dir(code_reference_dir)
+    ensure_dir(intermediate_packet_dir)
+    ensure_dir(output_candidate_dir)
+    ensure_dir(review_dir)
+    ensure_dir(stale_archive_dir)
     ensure_dir(capability_dir)
 
     article_note_stems: dict[str, str] = {}
@@ -2129,6 +2816,14 @@ def main() -> None:
             16,
         )
         code_reference_links = [code_reference_link(hit, code_reference_stems) for hit in record["code_hits"]]
+        record["code_reference_links"] = code_reference_links
+        record["quality"] = capture_quality_score(
+            signals=record["signals"],
+            link_records=links_by_source.get(record["source_ref"], []),
+            code_reference_links=code_reference_links,
+            capabilities=record["capabilities"],
+            conflicts=[item["message"] for item in record["conflicts"]],
+        )
         for conflict in record["conflicts"]:
             conflict_entries_by_kind[conflict["kind"]].append(f"{note_link(record['stem'])}: {conflict['message']}")
         body = build_support_note(
@@ -2169,6 +2864,14 @@ def main() -> None:
             16,
         )
         code_reference_links = [code_reference_link(hit, code_reference_stems) for hit in record["code_hits"]]
+        record["code_reference_links"] = code_reference_links
+        record["quality"] = capture_quality_score(
+            signals=record["signals"],
+            link_records=links_by_source.get(record["source_ref"], []),
+            code_reference_links=code_reference_links,
+            capabilities=record["capabilities"],
+            conflicts=[item["message"] for item in record["conflicts"]],
+        )
         for conflict in record["conflicts"]:
             conflict_entries_by_kind[conflict["kind"]].append(f"{note_link(record['stem'])}: {conflict['message']}")
         body = build_wiki_note(
@@ -2189,9 +2892,12 @@ def main() -> None:
         write_note(wiki_dir / section / f"{record['stem']}.md", body)
 
     capability_rows: list[dict[str, Any]] = []
+    packet_records: list[dict[str, Any]] = []
+    packet_links: list[str] = []
     support_grouped_for_hub: dict[str, list[str]] = defaultdict(list)
     for key, links in support_links_by_cap.items():
         support_grouped_for_hub[key] = sorted(links)
+    all_source_records = [*support_records, *wiki_records]
     for capability in CAPABILITIES:
         cap_stem = stem_for_capability(capability["title"])
         support_links = sorted(support_links_by_cap.get(capability["key"], []))
@@ -2199,6 +2905,28 @@ def main() -> None:
         repo_note_links = [note_link(stem_for_repo(repo_name)) for repo_name in capability["repos"]]
         code_hits = code_hits_by_cap.get(capability["key"], [])
         code_reference_links = [code_reference_link(hit, code_reference_stems) for hit in code_hits]
+        capability_records = [
+            record
+            for record in all_source_records
+            if capability["key"] in record["capabilities"]
+        ]
+        conflict_links = [
+            f"{note_link(record['stem'])}: {conflict['message']}"
+            for record in capability_records
+            for conflict in record.get("conflicts", [])
+        ]
+        stale_doc_count = sum(
+            1
+            for record in capability_link_records.get(capability["key"], [])
+            if record.get("status") == "stale-doc-reference"
+        )
+        evidence_score = score_packet_evidence(
+            support_links=support_links,
+            wiki_links=wiki_links,
+            code_reference_links=code_reference_links,
+            conflict_count=len(conflict_links),
+            stale_doc_count=stale_doc_count,
+        )
         body = build_capability_note(
             capability=capability,
             support_links=support_links,
@@ -2209,6 +2937,37 @@ def main() -> None:
             link_records=capability_link_records.get(capability["key"], []),
         )
         write_note(capability_dir / f"{cap_stem}.md", body)
+        packet_stem = safe_filename(f"Packet - {capability['title']}")
+        packet_link = note_link(packet_stem)
+        packet_record = {
+            "title": capability["title"],
+            "stem": packet_stem,
+            "link": packet_link,
+            "packet_kind": "capability",
+            "support_links": support_links,
+            "wiki_links": wiki_links,
+            "repo_note_links": repo_note_links,
+            "code_reference_links": code_reference_links,
+            "conflict_links": conflict_links,
+            "conflict_count": len(conflict_links),
+            "stale_doc_count": stale_doc_count,
+            "evidence_score": evidence_score,
+        }
+        write_note(
+            intermediate_packet_dir / f"{packet_stem}.md",
+            build_intermediate_packet_note(
+                capability=capability,
+                support_links=support_links,
+                wiki_links=wiki_links,
+                repo_note_links=repo_note_links,
+                code_reference_links=code_reference_links,
+                conflict_links=conflict_links,
+                stale_doc_count=stale_doc_count,
+                evidence_score=evidence_score,
+            ),
+        )
+        packet_records.append(packet_record)
+        packet_links.append(packet_link)
         capability_rows.append(
             {
                 "title": capability["title"],
@@ -2220,10 +2979,142 @@ def main() -> None:
             }
         )
 
+    conflict_titles = {
+        "documentation-drift": "Documentation Drift",
+        "restricted-source": "Restricted Source",
+        "code-traceability-gap": "Code Traceability Gap",
+    }
+    for kind, entries in sorted(conflict_entries_by_kind.items()):
+        if len(entries) < 2:
+            continue
+        title = f"{conflict_titles.get(kind, kind.title())} Evidence Cluster"
+        packet_stem = safe_filename(f"Packet - {title}")
+        packet_link = note_link(packet_stem)
+        evidence_score = min(10, 4 + min(6, len(entries)))
+        capability = {
+            "key": f"cluster-{kind}",
+            "title": title,
+            "description": f"Reusable packet for recurring {kind.replace('-', ' ')} signals found across the source corpus.",
+        }
+        packet_record = {
+            "title": title,
+            "stem": packet_stem,
+            "link": packet_link,
+            "packet_kind": "conflict-cluster",
+            "conflict_kind": kind,
+            "support_links": [],
+            "wiki_links": [],
+            "repo_note_links": [],
+            "code_reference_links": [],
+            "conflict_links": unique_lines(entries, 30),
+            "conflict_count": len(entries),
+            "stale_doc_count": len(entries) if kind == "documentation-drift" else 0,
+            "evidence_score": evidence_score,
+        }
+        write_note(
+            intermediate_packet_dir / f"{packet_stem}.md",
+            build_intermediate_packet_note(
+                capability=capability,
+                support_links=[],
+                wiki_links=[],
+                repo_note_links=[],
+                code_reference_links=[],
+                packet_kind="conflict-cluster",
+                conflict_links=packet_record["conflict_links"],
+                stale_doc_count=packet_record["stale_doc_count"],
+                evidence_score=evidence_score,
+            ),
+        )
+        packet_records.append(packet_record)
+        packet_links.append(packet_link)
+
+    code_path_packets: list[tuple[int, tuple[str, str], dict[str, Any]]] = []
+    for key, entry in code_reference_registry.items():
+        support_links = unique_lines(entry["support_links"], 40)
+        wiki_links = unique_lines(entry["wiki_links"], 40)
+        if len(support_links) + len(wiki_links) < 2:
+            continue
+        score = score_packet_evidence(
+            support_links=support_links,
+            wiki_links=wiki_links,
+            code_reference_links=[code_reference_link(entry["hit"], code_reference_stems)],
+        )
+        code_path_packets.append((score, key, entry))
+    for score, key, entry in sorted(code_path_packets, key=lambda item: (-item[0], item[1]))[:20]:
+        hit = entry["hit"]
+        title = f"Code Path - {hit['repo']}/{hit['relative_path']}"
+        packet_stem = safe_filename(f"Packet - {title}", limit=180)
+        packet_link = note_link(packet_stem)
+        support_links = unique_lines(entry["support_links"], 40)
+        wiki_links = unique_lines(entry["wiki_links"], 40)
+        code_reference_links = [code_reference_link(hit, code_reference_stems)]
+        repo_note_links = [note_link(stem_for_repo(hit["repo"]))]
+        capability = {
+            "key": f"code-path-{dedupe_key(title)[:48]}",
+            "title": title,
+            "description": "Reusable code-path packet linking repeated product evidence to one implementation anchor.",
+        }
+        packet_record = {
+            "title": title,
+            "stem": packet_stem,
+            "link": packet_link,
+            "packet_kind": "code-path-cluster",
+            "support_links": support_links,
+            "wiki_links": wiki_links,
+            "repo_note_links": repo_note_links,
+            "code_reference_links": code_reference_links,
+            "conflict_links": [],
+            "conflict_count": 0,
+            "stale_doc_count": 0,
+            "evidence_score": score,
+        }
+        write_note(
+            intermediate_packet_dir / f"{packet_stem}.md",
+            build_intermediate_packet_note(
+                capability=capability,
+                support_links=support_links,
+                wiki_links=wiki_links,
+                repo_note_links=repo_note_links,
+                code_reference_links=code_reference_links,
+                packet_kind="code-path-cluster",
+                evidence_score=score,
+            ),
+        )
+        packet_records.append(packet_record)
+        packet_links.append(packet_link)
+
+    output_candidate_records: list[dict[str, Any]] = []
+    for packet in select_output_candidates(packet_records):
+        output_kind = infer_output_kind(packet)
+        output_stem = stem_for_output_candidate(packet["title"])
+        output_link = note_link(output_stem)
+        write_note(output_candidate_dir / f"{output_stem}.md", build_output_candidate_note(packet))
+        output_candidate_records.append(
+            {
+                "title": packet["title"],
+                "stem": output_stem,
+                "link": output_link,
+                "output_kind": output_kind,
+                "source_packet": packet["link"],
+                "evidence_score": packet.get("evidence_score", 0),
+            }
+        )
+
+    stale_doc_refs = [entry for entry in external_links if entry.get("status") == "stale-doc-reference"]
+    archive_records_written = 0
+    if stale_doc_refs:
+        write_note(stale_archive_dir / f"Stale Sources - {DATE}.md", build_stale_sources_archive_note(stale_doc_refs))
+        archive_records_written = 1
+    write_note(
+        review_dir / f"Weekly Review - {DATE}.md",
+        build_weekly_review_note(packet_records, output_candidate_records, stale_doc_refs, conflict_entries_by_kind),
+    )
+
     write_note(support_dir / "Support Articles Hub.md", build_support_articles_hub(support_grouped_for_hub))
     write_note(wiki_dir / "Wiki Pages Hub.md", build_wiki_pages_hub({key: sorted(value) for key, value in section_grouped.items()}))
     write_note(code_dir / "Code Intelligence Hub.md", build_code_intelligence_hub(repo_links, [row["link"] for row in capability_rows]))
     write_note(code_dir / "Code Reference Index.md", build_code_reference_index({key: sorted(value) for key, value in code_reference_index.items()}))
+    write_note(intermediate_packet_dir / "Intermediate Packet Index.md", build_intermediate_packet_index(packet_links))
     write_note(paths.vault / "20 Product" / "Product Capability Map.md", build_product_capability_map(capability_rows))
     total_support_articles = sum(1 for item in support_inventory if item["category"] == "support-article")
     total_reference_docs = len(support_inventory) - total_support_articles
@@ -2248,6 +3139,9 @@ def main() -> None:
                 "support_notes": len(support_records),
                 "wiki_notes": len(wiki_records),
                 "capability_notes": len(CAPABILITIES),
+                "intermediate_packets": len(packet_records),
+                "output_candidates": len(output_candidate_records),
+                "archive_records": archive_records_written,
                 "repo_notes": len(repo_snapshots),
                 "vault": str(paths.vault),
                 "vault_sanitizer": sanitize_summary,

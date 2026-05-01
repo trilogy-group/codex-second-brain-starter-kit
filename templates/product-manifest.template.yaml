@@ -74,9 +74,29 @@ engineering_readiness:
         - Add repo notes and implementation maps.
       next_steps:
         - Connect repositories to the vault and create code-intelligence notes.
+    - key: product-basb-alignment
+      title: Product BASB alignment
+      ask: 4
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Verify CODE dashboards, PARA mapping, BASB metadata, and archive/output loops.
+      next_steps:
+        - Review Product BASB hubs and audit findings after the first rebuild.
+    - key: progressive-summarization-coverage
+      title: Progressive summarization coverage
+      ask: 5
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Add Essence, Use in current project, and intermediate packet coverage.
+      next_steps:
+        - Promote high-value raw evidence into distilled notes and reusable packets.
     - key: architecture-and-runtime-understanding
       title: Architecture and runtime understanding
-      ask: 4
+      ask: 6
       status: missing
       summary: Describe current status.
       evidence: []
@@ -86,7 +106,7 @@ engineering_readiness:
         - Build an architecture and service map from repos and documentation.
     - key: support-to-code-traceability
       title: Support-to-code traceability
-      ask: 5
+      ask: 7
       status: missing
       summary: Describe current status.
       evidence: []
@@ -96,7 +116,7 @@ engineering_readiness:
         - Connect high-value documentation paths to implementation anchors.
     - key: runbook-and-setup-coverage
       title: Runbook and setup coverage
-      ask: 6
+      ask: 8
       status: missing
       summary: Describe current status.
       evidence: []
@@ -106,7 +126,7 @@ engineering_readiness:
         - Promote runbooks and setup docs into dedicated notes.
     - key: blocked-dependencies-and-manual-work
       title: Blocked dependencies and manual work
-      ask: 7
+      ask: 9
       status: missing
       summary: Describe current status.
       evidence: []
@@ -114,9 +134,19 @@ engineering_readiness:
         - Record access blockers and manual gaps explicitly.
       next_steps:
         - Build blocker registries and unresolved-dependency notes.
+    - key: output-conversion-and-archive-hygiene
+      title: Output conversion and archive hygiene
+      ask: 10
+      status: missing
+      summary: Describe current status.
+      evidence: []
+      missing:
+        - Add output candidates, project closeout records, and archive hygiene.
+      next_steps:
+        - Convert high-value intelligence into outputs and archive completed initiatives.
     - key: future-automation-opportunities
       title: Future automation opportunities
-      ask: 8
+      ask: 11
       status: missing
       summary: Describe current status.
       evidence: []

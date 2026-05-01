@@ -9,6 +9,7 @@ import re
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import date
 from html import unescape
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from urllib.request import Request, urlopen
 import yaml
 
 
+DATE = date.today().isoformat()
 URL_RE = re.compile(r"https?://[^\s)>\]\"']+")
 TITLE_RE = re.compile(r"^\s*#\s+(.+?)\s*$", re.MULTILINE)
 HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
@@ -688,7 +690,15 @@ def corpus_overview_note(
         "---",
         "type: review",
         f"area: {area_key}",
+        "status: active",
+        f"date: {DATE}",
         "source: generated",
+        "review_period: source-index",
+        "basb_stage: capture",
+        "para_category: resource",
+        "distillation_level: highlighted",
+        "actionability: soon",
+        "output_target: \"\"",
         "tags:",
         "  - corpus",
         "---",

@@ -81,7 +81,7 @@ engineering_readiness:
 ## Notes
 
 - `ask: 1` maps to the manager ask about importing any product into the system.
-- `ask: 2` through `ask: 8` can be used to break engineering readiness into distinct operational categories such as linked-page capture, code intelligence, runtime understanding, traceability, runbooks, blockers, and automation opportunities.
+- `ask: 2` and later can be used to break readiness into distinct operational categories such as linked-page capture, code intelligence, Product BASB alignment, progressive summarization, runtime understanding, traceability, runbooks, blockers, output conversion, archive hygiene, and automation opportunities.
 - Keep evidence entries as absolute paths or URLs when possible.
 - `profile.intelligence_path` should point to a capability profile that stays generic at the tooling layer but is allowed to carry product-specific keywords and repo mappings.
 - Leave `sources.support_article_url_template` empty if the source system does not have a stable article URL pattern.

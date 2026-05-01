@@ -4,6 +4,21 @@ Use these schemas when the user wants a repeatable vault structure rather than a
 
 ## Product-memory note types
 
+Durable product notes should also carry Product BASB metadata:
+- `basb_stage: capture | organize | distill | express | archive`
+- `para_category: project | area | resource | archive`
+- `distillation_level: raw | highlighted | distilled | executive`
+- `actionability: now | soon | someday | reference`
+- `output_target` when the note feeds a spec, ticket, PR, runbook, launch artifact, or other shippable output
+
+Generated lifecycle notes add:
+- `output_kind: prd | spec | ticket | pull-request-plan | runbook | decision | launch-note | post-launch-learning`
+- `source_packet`
+- `evidence_score`
+- `shipping_path`
+- `review_period`
+- `archive_reason`
+
 ### Area
 
 Required:
@@ -72,6 +87,71 @@ Required:
 - `area`
 - `status`
 - `date`
+
+### Intermediate packet
+
+Required:
+- `type: intermediate-packet`
+- `area`
+- `status`
+- `date`
+- `basb_stage`
+- `para_category`
+- `distillation_level`
+- `actionability`
+
+Typical use:
+- reusable research briefs, support-to-code traces, code investigations, bug hypotheses, or launch/runbook fragments
+
+### Output
+
+Required:
+- `type: output`
+- `area`
+- `status`
+- `date`
+- `basb_stage`
+- `para_category`
+- `distillation_level`
+- `actionability`
+- `source_packet`
+- `evidence_score`
+- `shipping_path`
+
+Typical use:
+- PRD, spec, ticket, PR, runbook, decision, launch note, or post-launch learning record
+
+Optional:
+- `output_target`
+- `output_kind`
+
+### Archive record
+
+Required:
+- `type: archive-record`
+- `area`
+- `status`
+- `date`
+- `basb_stage`
+- `para_category`
+- `archive_reason`
+
+Typical use:
+- closeout notes for completed initiatives, retired decisions, stale source snapshots, and reusable project learnings
+
+### Review
+
+Required:
+- `type: review`
+- `area`
+- `status`
+- `date`
+- `review_period`
+- `basb_stage`
+- `para_category`
+
+Typical use:
+- weekly Product BASB review notes that summarize packets, output candidates, stale sources, and next actions
 
 ## Operations note types
 
@@ -168,6 +248,42 @@ date: {{date}}
 metric:
 tags:
   - initiative
+---
+```
+
+### Intermediate packet note
+
+```yaml
+---
+type: intermediate-packet
+area:
+status: reusable
+date: {{date}}
+basb_stage: distill
+para_category: resource
+distillation_level: executive
+actionability: soon
+output_target:
+tags:
+  - intermediate-packet
+---
+```
+
+### Output note
+
+```yaml
+---
+type: output
+area:
+status: proposed
+date: {{date}}
+basb_stage: express
+para_category: project
+distillation_level: executive
+actionability: now
+output_target:
+tags:
+  - output
 ---
 ```
 

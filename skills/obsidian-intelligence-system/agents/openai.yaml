@@ -1,4 +1,4 @@
 interface:
   display_name: "Obsidian Intelligence System"
   short_description: "Build Obsidian intelligence systems"
-  default_prompt: "Turn this vault and its source material into a linked Obsidian intelligence system with structured frontmatter, dashboards, templates, hub nodes, and research-to-action notes."
+  default_prompt: "Turn this vault and its source material into a Product BASB Obsidian intelligence system: run CODE in order, map notes into PARA, use progressive summarization, preserve raw evidence, create intermediate packets, and convert high-value intelligence into shippable output candidates."

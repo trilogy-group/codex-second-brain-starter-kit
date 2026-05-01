@@ -32,6 +32,7 @@ python3 "${PACKAGE_ROOT}/skills/product-intelligence-factory/scripts/sanitize_va
 python3 "${PACKAGE_ROOT}/skills/product-engineering-ops/scripts/generate_engineering_readiness.py" --help >/dev/null
 python3 "${PACKAGE_ROOT}/skills/obsidian-intelligence-system/scripts/scaffold_vault.py" --help >/dev/null
 python3 "${PACKAGE_ROOT}/skills/obsidian-intelligence-system/scripts/audit_vault.py" --help >/dev/null
+python3 "${PACKAGE_ROOT}/skills/obsidian-intelligence-system/scripts/migrate_to_product_basb.py" --help >/dev/null
 python3 "${PACKAGE_ROOT}/scripts/second_brain_wizard.py" --help >/dev/null
 
 echo "bundled scripts: ok"
