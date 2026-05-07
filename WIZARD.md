@@ -61,7 +61,7 @@ Each second brain still has its own:
   --portfolio-root "/absolute/path/to/second-brain-portfolio"
 ```
 
-### Refresh audits and readiness reports
+### Refresh source indices, vault notes, audits, and readiness reports
 
 ```bash
 ./scripts/second_brain_wizard.py refresh \
@@ -76,6 +76,8 @@ Optionally target a single second brain:
   --slug "acme-platform"
 ```
 
+To refresh only audit and readiness metadata without regenerating source indices or vault notes, add `--metadata-only`.
+
 ## Interactive mode
 
 If you run the script without a subcommand, it opens a simple menu for:
@@ -83,7 +85,7 @@ If you run the script without a subcommand, it opens a simple menu for:
 - adding a second brain
 - listing second brains
 - running doctor checks
-- refreshing outputs
+- refreshing vault, audit, and readiness outputs
 
 ## Why this matters
 

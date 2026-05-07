@@ -17,6 +17,12 @@ BOOTSTRAP_SCRIPT = PACKAGE_ROOT / "scripts" / "bootstrap_test_workspace.sh"
 VALIDATE_MANIFEST = (
     PACKAGE_ROOT / "skills" / "product-intelligence-factory" / "scripts" / "validate_product_manifest.py"
 )
+BUILD_SOURCE_INDICES = (
+    PACKAGE_ROOT / "skills" / "product-intelligence-factory" / "scripts" / "build_source_indices.py"
+)
+REBUILD_PRODUCT_BRAIN = (
+    PACKAGE_ROOT / "skills" / "product-intelligence-factory" / "scripts" / "rebuild_product_brain.py"
+)
 AUDIT_VAULT = PACKAGE_ROOT / "skills" / "obsidian-intelligence-system" / "scripts" / "audit_vault.py"
 GENERATE_READINESS = (
     PACKAGE_ROOT / "skills" / "product-engineering-ops" / "scripts" / "generate_engineering_readiness.py"
@@ -267,7 +273,7 @@ def doctor(portfolio_root: Path) -> int:
     return 1 if failures else 0
 
 
-def refresh(portfolio_root: Path, slug: str | None = None) -> int:
+def refresh(portfolio_root: Path, slug: str | None = None, *, metadata_only: bool = False) -> int:
     registry = ensure_registry_exists(portfolio_root)
     brains = registry.get("brains") or []
     selected = [brain for brain in brains if slug is None or brain.get("slug") == slug]
@@ -280,6 +286,9 @@ def refresh(portfolio_root: Path, slug: str | None = None) -> int:
         audit = Path(str(brain["audit_path"]))
         readiness = Path(str(brain["readiness_report_path"]))
         run([sys.executable, str(VALIDATE_MANIFEST), "--manifest", str(manifest), "--check-paths"])
+        if not metadata_only:
+            run([sys.executable, str(BUILD_SOURCE_INDICES), "--manifest", str(manifest)])
+            run([sys.executable, str(REBUILD_PRODUCT_BRAIN), "--manifest", str(manifest)])
         run([sys.executable, str(AUDIT_VAULT), "--vault", str(vault), "--write", str(audit)])
         run([sys.executable, str(GENERATE_READINESS), "--manifest", str(manifest), "--write", str(readiness)])
         brain["status"] = "refreshed"
@@ -296,7 +305,7 @@ def interactive_mode() -> int:
     print("2. Add a new second brain")
     print("3. List second brains")
     print("4. Doctor check all second brains")
-    print("5. Refresh audits and readiness reports")
+    print("5. Refresh vault, audit, and readiness outputs")
     choice = prompt("Choose an action")
 
     if choice == "1":
@@ -370,9 +379,14 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_cmd = sub.add_parser("doctor", help="Validate all registered second brains.")
     doctor_cmd.add_argument("--portfolio-root", required=True, type=Path)
 
-    refresh_cmd = sub.add_parser("refresh", help="Regenerate audit and readiness outputs.")
+    refresh_cmd = sub.add_parser("refresh", help="Regenerate source indices, vault notes, audit, and readiness outputs.")
     refresh_cmd.add_argument("--portfolio-root", required=True, type=Path)
     refresh_cmd.add_argument("--slug")
+    refresh_cmd.add_argument(
+        "--metadata-only",
+        action="store_true",
+        help="Only regenerate audit and readiness outputs; skip source indexing and vault rebuild.",
+    )
 
     return parser
 
@@ -409,7 +423,7 @@ def main() -> int:
     if args.command == "doctor":
         return doctor(args.portfolio_root)
     if args.command == "refresh":
-        return refresh(args.portfolio_root, args.slug)
+        return refresh(args.portfolio_root, args.slug, metadata_only=args.metadata_only)
 
     parser.error("Unknown command.")
     return 2

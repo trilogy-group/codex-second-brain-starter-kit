@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+from urllib.error import URLError
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
 BUILD_SCRIPT = TOOLS_DIR / "build_source_indices.py"
 REBUILD_SCRIPT = TOOLS_DIR / "rebuild_product_brain.py"
 INIT_MANIFEST_SCRIPT = TOOLS_DIR / "init_product_manifest.py"
+WIZARD_SCRIPT = TOOLS_DIR.parents[2] / "scripts" / "second_brain_wizard.py"
 
 
 def load_module(module_path: Path, module_name: str):
@@ -101,6 +106,54 @@ class GenericToolingTests(unittest.TestCase):
             "stale-doc-reference",
         )
 
+    def test_hash_prefixed_support_articles_keep_local_evidence_urls(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_hash_support_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            source = corpus / "109d036617194ac5ae4830ffdc2ba80c_49888-article.md"
+            source.write_text(
+                "\n".join(
+                    [
+                        "# Invite Users Directly to Translated Content",
+                        "",
+                        "https://support.acme.test/article/49888-invite-users-directly-to-translated-content",
+                        "https://hubname.acme.test/join/starter?lang=fr",
+                    ]
+                )
+            )
+            paths = module.Paths(
+                workspace=root / "workspace",
+                vault=root / "vault",
+                corpus=corpus,
+                mirror=root / "mirror",
+                docx_extract=root / "docx",
+                repos_root=root / "repos",
+                links_dir=root / "mirror" / "external-pages",
+                json_dir=root / "mirror" / "inventories",
+            )
+            settings = {
+                "product_name": "Acme",
+                "product_slug": "acme",
+                "support_article_url_template": "https://support.acme.test/article/{article_id}",
+                "stale_doc_hosts": set(),
+            }
+
+            articles, links = module.collect_support_articles(paths, settings)
+            records = module.build_link_inventory(
+                links,
+                paths,
+                settings,
+                known_local_support_urls={item["source_url"] for item in articles if item.get("source_url")},
+            )
+
+        self.assertEqual(articles[0]["article_id"], "49888")
+        self.assertEqual(articles[0]["source_url"], "https://support.acme.test/article/49888")
+        self.assertEqual(list(links), ["https://support.acme.test/article/49888-invite-users-directly-to-translated-content"])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["status"], "local-support-evidence")
+
     def test_known_support_urls_are_treated_as_local_evidence(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_local_support_test")
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -125,14 +178,174 @@ class GenericToolingTests(unittest.TestCase):
             records = module.build_link_inventory(
                 {
                     "https://support.example.com/article/12345": {"support/12345-article.md"},
+                    "https://support.example.com/article/12345-how-to-use-it": {"support/reference.md"},
                 },
                 paths,
                 settings,
                 known_local_support_urls={"https://support.example.com/article/12345"},
             )
 
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0]["status"], "local-support-evidence")
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all(record["status"] == "local-support-evidence" for record in records))
+
+    def test_support_url_normalization_handles_slugs_queries_fragments_and_slashes(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_support_url_normalization_test")
+
+        normalized = {
+            module.normalize_known_support_url(url)
+            for url in [
+                "https://support.example.com/article/12345",
+                "https://support.example.com/article/12345-how-to-use-it",
+                "https://support.example.com/article/12345-how-to-use-it/",
+                "https://support.example.com/article/12345-how-to-use-it/?preview=1",
+                "https://support.example.com/article/12345-how-to-use-it#faq",
+            ]
+        }
+
+        self.assertEqual(normalized, {"https://support.example.com/article/12345"})
+
+    def test_placeholder_urls_are_not_collected_as_external_evidence(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_placeholder_url_test")
+
+        self.assertIsNone(module.sanitize_url("https://hubname.acme.test/join/starter?lang=fr"))
+        self.assertIsNone(module.sanitize_url("https://yourhub.acme.test/join/starter"))
+
+    def test_fetch_url_uses_verified_ssl_context(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_ssl_context_test")
+
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "text/html"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def geturl(self):
+                return "https://support.example.com/article/12345"
+
+            def read(self, _size):
+                return b"<html><title>Support Article</title><body>Public evidence</body></html>"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(module, "urlopen", return_value=FakeResponse()) as mocked_urlopen:
+                result = module.fetch_url(
+                    "https://support.example.com/article/12345",
+                    ["12345-article.md"],
+                    Path(tmp_dir),
+                    {"stale_doc_hosts": set()},
+                )
+
+        self.assertEqual(result["status"], "mirrored")
+        self.assertIsNotNone(mocked_urlopen.call_args.kwargs.get("context"))
+
+    def test_url_errors_are_reported_as_transient_fetch_errors(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_url_error_status_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(module, "urlopen", side_effect=URLError(OSError(-3, "Temporary failure in name resolution"))):
+                result = module.fetch_url(
+                    "https://support.example.com/article/49888",
+                    ["49888-article.md"],
+                    Path(tmp_dir),
+                    {"stale_doc_hosts": set()},
+                )
+
+        self.assertEqual(result["status"], "transient-fetch-error")
+        self.assertIn("Temporary failure in name resolution", result["error"])
+
+    def test_build_and_rebuild_use_local_support_evidence_for_hash_prefixed_articles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            corpus = root / "corpus"
+            workspace = root / "workspace"
+            vault = root / "vault"
+            mirror = root / "mirror"
+            profile = workspace / "config" / "intelligence-profile.yaml"
+            manifest = root / "manifest.yaml"
+            corpus.mkdir()
+            profile.parent.mkdir(parents=True)
+            (corpus / "109d036617194ac5ae4830ffdc2ba80c_49888-article.md").write_text(
+                "\n".join(
+                    [
+                        "# Invite Users Directly to Translated Content",
+                        "",
+                        "Invite users directly to a translated sign-up page.",
+                        "",
+                        "https://support.acme.test/article/49888-invite-users-directly-to-translated-content",
+                        "https://hubname.acme.test/join/starter?lang=fr",
+                    ]
+                )
+            )
+            profile.write_text(
+                "\n".join(
+                    [
+                        "semantic_clustering:",
+                        "  provider: openai",
+                        "  embedding_model: text-embedding-3-small",
+                        "  min_cluster_size: 3",
+                        "  similarity_threshold: 0.78",
+                        "  max_clusters: 40",
+                        "  llm_model: gpt-4.1-mini",
+                        "  llm_cluster_synthesis: false",
+                        "  max_llm_clusters: 0",
+                        "code_intelligence:",
+                        "  max_files_per_repo: 10",
+                        "  include_git_history: false",
+                        "  include_tests: true",
+                        "  include_dependency_graph: true",
+                        "  parser_mode: regex-fallback",
+                        "capabilities:",
+                        "  - key: platform-core",
+                        "    title: Platform Core",
+                        "    description: Core support behavior.",
+                        "    keywords:",
+                        "      - invite",
+                        "      - translated",
+                        "    repos: []",
+                    ]
+                )
+            )
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "product:",
+                        "  name: Acme",
+                        "  slug: acme",
+                        "  mode: hybrid",
+                        f"  vault_path: {vault}",
+                        f"  workspace_path: {workspace}",
+                        "sources:",
+                        f"  corpus_path: {corpus}",
+                        f"  mirror_path: {mirror}",
+                        f"  docx_extract_path: {workspace / 'docx'}",
+                        "  support_article_url_template: https://support.acme.test/article/{article_id}",
+                        "  stale_doc_hosts: []",
+                        "profile:",
+                        f"  intelligence_path: {profile}",
+                        "repositories:",
+                        f"  local_clone_root: {workspace / 'repos'}",
+                        "  safe_mirror_root: /tmp/acme-mirrors",
+                        "  items: []",
+                    ]
+                )
+            )
+            env = {**os.environ, "PRODUCT_BASB_EMBEDDING_FIXTURE": "1"}
+
+            subprocess.run([sys.executable, str(BUILD_SCRIPT), "--manifest", str(manifest)], check=True, env=env, capture_output=True, text=True)
+            subprocess.run([sys.executable, str(REBUILD_SCRIPT), "--manifest", str(manifest)], check=True, env=env, capture_output=True, text=True)
+
+            external_links = (mirror / "inventories" / "external_links.json").read_text()
+            support_note = next((vault / "40 Research" / "Support Articles").glob("Support - 49888 - *.md")).read_text()
+
+        self.assertIn('"status": "local-support-evidence"', external_links)
+        self.assertNotIn("hubname.acme.test", external_links)
+        self.assertIn("Invite users directly to a translated sign-up page.", support_note)
+        self.assertNotIn("## Uncaptured evidence", support_note)
 
     def test_repo_snapshots_tolerate_missing_repo_paths(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_missing_repo_test")
@@ -166,6 +379,67 @@ class GenericToolingTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
         self.assertFalse(snapshots[0]["path_exists"])
         self.assertEqual(snapshots[0]["top_dirs"], [])
+
+    def test_wizard_refresh_rebuilds_indices_and_vault_before_metadata(self) -> None:
+        module = load_module(WIZARD_SCRIPT, "second_brain_wizard_refresh_test")
+        registry = {
+            "brains": [
+                {
+                    "name": "Acme",
+                    "slug": "acme",
+                    "manifest_path": "/tmp/portfolio/manifests/acme.yaml",
+                    "vault_path": "/tmp/portfolio/vaults/Acme",
+                    "audit_path": "/tmp/portfolio/vaults/Acme/80 Assets/vault-audit.md",
+                    "readiness_report_path": "/tmp/portfolio/workspaces/acme/reports/acme.md",
+                }
+            ]
+        }
+        commands: list[list[str]] = []
+
+        with (
+            mock.patch.object(module, "ensure_registry_exists", return_value=registry),
+            mock.patch.object(module, "write_yaml"),
+            mock.patch.object(module, "run", side_effect=commands.append),
+        ):
+            result = module.refresh(Path("/tmp/portfolio"), "acme")
+
+        self.assertEqual(result, 0)
+        command_text = [" ".join(command) for command in commands]
+        self.assertIn(str(module.VALIDATE_MANIFEST), command_text[0])
+        self.assertIn(str(module.BUILD_SOURCE_INDICES), command_text[1])
+        self.assertIn(str(module.REBUILD_PRODUCT_BRAIN), command_text[2])
+        self.assertIn(str(module.AUDIT_VAULT), command_text[3])
+        self.assertIn(str(module.GENERATE_READINESS), command_text[4])
+
+    def test_wizard_metadata_only_refresh_skips_vault_rebuild(self) -> None:
+        module = load_module(WIZARD_SCRIPT, "second_brain_wizard_metadata_only_test")
+        registry = {
+            "brains": [
+                {
+                    "name": "Acme",
+                    "slug": "acme",
+                    "manifest_path": "/tmp/portfolio/manifests/acme.yaml",
+                    "vault_path": "/tmp/portfolio/vaults/Acme",
+                    "audit_path": "/tmp/portfolio/vaults/Acme/80 Assets/vault-audit.md",
+                    "readiness_report_path": "/tmp/portfolio/workspaces/acme/reports/acme.md",
+                }
+            ]
+        }
+        commands: list[list[str]] = []
+
+        with (
+            mock.patch.object(module, "ensure_registry_exists", return_value=registry),
+            mock.patch.object(module, "write_yaml"),
+            mock.patch.object(module, "run", side_effect=commands.append),
+        ):
+            result = module.refresh(Path("/tmp/portfolio"), "acme", metadata_only=True)
+
+        self.assertEqual(result, 0)
+        command_text = "\n".join(" ".join(command) for command in commands)
+        self.assertNotIn(str(module.BUILD_SOURCE_INDICES), command_text)
+        self.assertNotIn(str(module.REBUILD_PRODUCT_BRAIN), command_text)
+        self.assertIn(str(module.AUDIT_VAULT), command_text)
+        self.assertIn(str(module.GENERATE_READINESS), command_text)
 
 
 if __name__ == "__main__":

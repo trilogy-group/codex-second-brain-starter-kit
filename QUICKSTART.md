@@ -100,3 +100,5 @@ A good first test should end with:
 ./scripts/second_brain_wizard.py doctor --portfolio-root "/absolute/path/to/second-brain-portfolio"
 ./scripts/second_brain_wizard.py refresh --portfolio-root "/absolute/path/to/second-brain-portfolio"
 ```
+
+`refresh` rebuilds source indices and vault notes before regenerating audit and readiness outputs. Use `--metadata-only` when you only want the audit/readiness pass.

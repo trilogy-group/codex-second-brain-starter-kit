@@ -6,6 +6,7 @@ import concurrent.futures
 import importlib.util
 import json
 import re
+import ssl
 import subprocess
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -27,7 +28,8 @@ HTML_TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTA
 SCRIPT_STYLE_RE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 TAG_RE = re.compile(r"<[^>]+>")
 WHITESPACE_RE = re.compile(r"\s+")
-SUPPORT_ARTICLE_URL_RE = re.compile(r"/article/(\d{4,8})(?:[/?#].*)?$", re.IGNORECASE)
+SUPPORT_ARTICLE_URL_RE = re.compile(r"/article/(\d{3,8})(?:-[^/?#]*)?/?$", re.IGNORECASE)
+SUPPORT_ARTICLE_FILENAME_RE = re.compile(r"(?:^|[_-])(\d{3,8})-article$", re.IGNORECASE)
 
 PLACEHOLDER_PARTS = (
     "{",
@@ -43,8 +45,18 @@ PLACEHOLDER_PARTS = (
     "author.email",
     "url.com",
 )
+PLACEHOLDER_HOST_LABELS = {"hubname", "yourhub", "yourdomain", "yourcompany", "example"}
 TRAILING_CHARS = ".,;:)]}`\"'"
 USER_AGENT = "ProductIntelligenceFactory/1.0 (+https://github.com/trilogy-group/codex-second-brain-starter-kit)"
+
+
+def default_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi  # type: ignore[import-not-found]
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        return ssl.create_default_context()
 
 
 @dataclass
@@ -141,16 +153,24 @@ def sanitize_url(raw_url: str) -> str | None:
         return None
     if not parsed.netloc or "." not in parsed.netloc:
         return None
+    host_labels = set((parsed.hostname or parsed.netloc).lower().split("."))
+    if host_labels.intersection(PLACEHOLDER_HOST_LABELS):
+        return None
     if parsed.netloc.endswith(".internal"):
         return None
     return url
 
 
+def support_article_id_from_path(path: Path) -> str:
+    match = SUPPORT_ARTICLE_FILENAME_RE.search(path.stem)
+    return match.group(1) if match else ""
+
+
 def normalize_known_support_url(url: str) -> str:
-    article_match = SUPPORT_ARTICLE_URL_RE.search(url)
+    parsed = urlparse(url)
+    article_match = SUPPORT_ARTICLE_URL_RE.search(parsed.path)
     if not article_match:
         return url.split("#", 1)[0]
-    parsed = urlparse(url)
     article_id = article_match.group(1)
     return f"{parsed.scheme}://{parsed.netloc}/article/{article_id}"
 
@@ -203,7 +223,7 @@ def collect_support_articles(paths: Paths, settings: dict[str, Any]) -> tuple[li
     for md_path in sorted(paths.corpus.rglob("*.md")):
         rel = md_path.relative_to(paths.corpus)
         text = md_path.read_text(errors="ignore")
-        article_id = rel.stem.replace("-article", "")
+        article_id = support_article_id_from_path(rel)
         source_url = support_source_url(article_id, settings)
         title = title_from_text(text, md_path.stem)
         urls = sorted({url for url in (sanitize_url(item) for item in URL_RE.findall(text)) if url})
@@ -216,7 +236,7 @@ def collect_support_articles(paths: Paths, settings: dict[str, Any]) -> tuple[li
                 "relative_path": str(rel),
                 "source_url": source_url,
                 "link_count": len(urls),
-                "category": "support-article" if rel.name.endswith("-article.md") else "reference-doc",
+                "category": "support-article" if article_id or rel.name.endswith("-article.md") else "reference-doc",
             }
         )
     return articles, links
@@ -350,7 +370,7 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
 
     try:
         request = Request(url, headers={"User-Agent": USER_AGENT})
-        with urlopen(request, timeout=8) as response:
+        with urlopen(request, timeout=8, context=default_ssl_context()) as response:
             status_code = getattr(response, "status", response.getcode())
             final_url = response.geturl()
             content_type = response.headers.get("Content-Type", "")
@@ -417,7 +437,7 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
         record["error"] = str(exc)
         return record
     except URLError as exc:
-        record["status"] = "blocked"
+        record["status"] = "transient-fetch-error"
         record["error"] = str(exc.reason)
         return record
     except Exception as exc:  # noqa: BLE001
