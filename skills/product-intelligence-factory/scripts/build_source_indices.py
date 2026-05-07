@@ -8,6 +8,7 @@ import json
 import re
 import ssl
 import subprocess
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
@@ -48,6 +49,28 @@ PLACEHOLDER_PARTS = (
 PLACEHOLDER_HOST_LABELS = {"hubname", "yourhub", "yourdomain", "yourcompany", "example"}
 TRAILING_CHARS = ".,;:)]}`\"'"
 USER_AGENT = "ProductIntelligenceFactory/1.0 (+https://github.com/trilogy-group/codex-second-brain-starter-kit)"
+FETCH_RETRY_ATTEMPTS = 3
+FETCH_RETRY_BACKOFF_SECONDS = 0.25
+RETRYABLE_URL_ERROR_MARKERS = (
+    "temporary failure in name resolution",
+    "name or service not known",
+    "nodename nor servname",
+    "try again",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "network is unreachable",
+    "temporarily unavailable",
+)
+RETRYABLE_URL_ERRNOS = {-3, -2, 54, 60, 61, 101, 104, 110, 111}
+COMMENT_AUTH_PROMPTS = (
+    "please sign in to comment",
+    "sign in to comment",
+    "please log in to comment",
+    "log in to comment",
+    "please login to comment",
+    "login to comment",
+)
 
 
 def default_ssl_context() -> ssl.SSLContext:
@@ -339,6 +362,35 @@ def html_to_text(raw_html: str) -> str:
     return WHITESPACE_RE.sub(" ", text).strip()
 
 
+def is_retryable_url_error(exc: URLError) -> bool:
+    reason = exc.reason
+    if isinstance(reason, (TimeoutError, ConnectionResetError, ConnectionAbortedError)):
+        return True
+    errno = getattr(reason, "errno", None)
+    if isinstance(errno, int) and errno in RETRYABLE_URL_ERRNOS:
+        return True
+    reason_text = str(reason).lower()
+    return any(marker in reason_text for marker in RETRYABLE_URL_ERROR_MARKERS)
+
+
+def is_likely_auth_gated_text(body_text: str) -> bool:
+    inspected = body_text.lower()[:2000]
+    for prompt in COMMENT_AUTH_PROMPTS:
+        inspected = inspected.replace(prompt, " ")
+    inspected = WHITESPACE_RE.sub(" ", inspected).strip()
+    if inspected in {"sign in", "log in", "login"}:
+        return True
+    if re.search(r"\b(access denied|unauthorized|forbidden)\b", inspected):
+        return True
+    if re.search(r"\b(?:sign in|log in|login)\b.{0,120}\b(?:to continue|to access|to view|required)\b", inspected):
+        return True
+    if re.search(r"\b(?:sign in|log in|login)\b", inspected) and any(
+        marker in inspected for marker in ("password", "single sign-on", "sso", "authentication required")
+    ):
+        return True
+    return False
+
+
 def is_legacy_doc_host(domain: str, settings: dict[str, Any]) -> bool:
     return domain in settings.get("stale_doc_hosts", set())
 
@@ -368,13 +420,32 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
     if special in {"needs-google-drive", "stale-doc-reference"}:
         return record
 
+    request = Request(url, headers={"User-Agent": USER_AGENT})
+    for attempt in range(1, FETCH_RETRY_ATTEMPTS + 1):
+        try:
+            with urlopen(request, timeout=8, context=default_ssl_context()) as response:
+                status_code = getattr(response, "status", response.getcode())
+                final_url = response.geturl()
+                content_type = response.headers.get("Content-Type", "")
+                raw_bytes = response.read(512_000)
+            record["retry_count"] = attempt
+            break
+        except HTTPError as exc:
+            record["http_status"] = exc.code
+            record["status"] = "auth-gated" if exc.code in {401, 403} else "blocked"
+            record["error"] = str(exc)
+            return record
+        except URLError as exc:
+            if attempt < FETCH_RETRY_ATTEMPTS and is_retryable_url_error(exc):
+                time.sleep(FETCH_RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            record["status"] = "transient-fetch-error"
+            record["transient_error"] = True
+            record["retry_count"] = attempt
+            record["error"] = str(exc.reason)
+            return record
+
     try:
-        request = Request(url, headers={"User-Agent": USER_AGENT})
-        with urlopen(request, timeout=8, context=default_ssl_context()) as response:
-            status_code = getattr(response, "status", response.getcode())
-            final_url = response.geturl()
-            content_type = response.headers.get("Content-Type", "")
-            raw_bytes = response.read(512_000)
         record["http_status"] = status_code
         record["final_url"] = final_url
         record["content_type"] = content_type
@@ -398,7 +469,7 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
             record["status"] = "binary-or-empty"
             return record
 
-        if any(token in body_text.lower()[:2000] for token in ("sign in", "log in", "login", "single sign-on")):
+        if is_likely_auth_gated_text(body_text):
             record["status"] = "auth-gated"
             return record
 
@@ -430,15 +501,6 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
         )
         record["status"] = "mirrored"
         record["mirror_path"] = str(mirror_file)
-        return record
-    except HTTPError as exc:
-        record["http_status"] = exc.code
-        record["status"] = "auth-gated" if exc.code in {401, 403} else "blocked"
-        record["error"] = str(exc)
-        return record
-    except URLError as exc:
-        record["status"] = "transient-fetch-error"
-        record["error"] = str(exc.reason)
         return record
     except Exception as exc:  # noqa: BLE001
         record["status"] = "blocked"

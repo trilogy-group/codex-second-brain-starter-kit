@@ -247,7 +247,10 @@ class GenericToolingTests(unittest.TestCase):
     def test_url_errors_are_reported_as_transient_fetch_errors(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_url_error_status_test")
         with tempfile.TemporaryDirectory() as tmp_dir:
-            with mock.patch.object(module, "urlopen", side_effect=URLError(OSError(-3, "Temporary failure in name resolution"))):
+            with (
+                mock.patch.object(module, "urlopen", side_effect=URLError(OSError(-3, "Temporary failure in name resolution"))) as mocked_urlopen,
+                mock.patch.object(module.time, "sleep"),
+            ):
                 result = module.fetch_url(
                     "https://support.example.com/article/49888",
                     ["49888-article.md"],
@@ -256,7 +259,127 @@ class GenericToolingTests(unittest.TestCase):
                 )
 
         self.assertEqual(result["status"], "transient-fetch-error")
+        self.assertTrue(result["transient_error"])
+        self.assertEqual(result["retry_count"], 3)
+        self.assertEqual(mocked_urlopen.call_count, 3)
         self.assertIn("Temporary failure in name resolution", result["error"])
+
+    def test_transient_url_error_retries_then_mirrors_successful_response(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_url_retry_success_test")
+
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "text/html"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def geturl(self):
+                return "https://support.example.com/article/49888-invite-users-directly-to-translated-content"
+
+            def read(self, _size):
+                return b"<html><title>Support Article</title><body>Recovered public evidence</body></html>"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                mock.patch.object(
+                    module,
+                    "urlopen",
+                    side_effect=[
+                        URLError(OSError(-3, "Temporary failure in name resolution")),
+                        FakeResponse(),
+                    ],
+                ) as mocked_urlopen,
+                mock.patch.object(module.time, "sleep"),
+            ):
+                result = module.fetch_url(
+                    "https://support.example.com/article/49888",
+                    ["49888-article.md"],
+                    Path(tmp_dir),
+                    {"stale_doc_hosts": set()},
+                )
+
+        self.assertEqual(result["status"], "mirrored")
+        self.assertEqual(result["retry_count"], 2)
+        self.assertEqual(mocked_urlopen.call_count, 2)
+        self.assertEqual(result["final_url"], "https://support.example.com/article/49888-invite-users-directly-to-translated-content")
+
+    def test_public_article_with_sign_in_to_comment_is_not_auth_gated(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_public_comment_auth_test")
+
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "text/html"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def geturl(self):
+                return "https://support.example.com/article/49888"
+
+            def read(self, _size):
+                return (
+                    b"<html><title>Public Article</title><body>"
+                    b"Invite users directly to translated content with language parameters. "
+                    b"FAQ content is visible. Please sign in to comment."
+                    b"</body></html>"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(module, "urlopen", return_value=FakeResponse()):
+                result = module.fetch_url(
+                    "https://support.example.com/article/49888",
+                    ["49888-article.md"],
+                    Path(tmp_dir),
+                    {"stale_doc_hosts": set()},
+                )
+
+        self.assertEqual(result["status"], "mirrored")
+
+    def test_real_login_wall_is_auth_gated(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_real_auth_gate_test")
+
+        class FakeResponse:
+            status = 200
+            headers = {"Content-Type": "text/html"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def geturl(self):
+                return "https://support.example.com/private"
+
+            def read(self, _size):
+                return b"<html><title>Sign in</title><body>Sign in to continue. Email Password Single sign-on</body></html>"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(module, "urlopen", return_value=FakeResponse()):
+                result = module.fetch_url(
+                    "https://support.example.com/private",
+                    ["private.md"],
+                    Path(tmp_dir),
+                    {"stale_doc_hosts": set()},
+                )
+
+        self.assertEqual(result["status"], "auth-gated")
 
     def test_build_and_rebuild_use_local_support_evidence_for_hash_prefixed_articles(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
