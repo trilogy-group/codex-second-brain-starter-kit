@@ -17,6 +17,7 @@ It packages:
 - packaged source-index, vault-rebuild, and privacy-sanitizing scripts for richer second-brain generation
 - a Product BASB workflow that maps CODE, PARA, progressive summarization, intermediate packets, archives, and shippable outputs into Obsidian
 - lifecycle automation that drafts output candidates, weekly reviews, and stale-source archive records inside the vault
+- a canonical `product_ontology.json` artifact for product purpose, personas, capabilities, workflows, repos, APIs, entities, tests, CI/CD, and evidence citations
 - deep code-intelligence inventories for routes, schemas, calls, dependencies, tests, ownership, churn, AST/parser backends, and parser limitations
 - required OpenAI embedding-based semantic clustering plus LLM cluster synthesis for reusable intermediate packets across support, wiki, code, and generated notes
 - starter prompts you can paste into Codex to run the workflow end to end

@@ -306,6 +306,11 @@ def unique_lines(lines: list[str], limit: int) -> list[str]:
     return result
 
 
+def has_any(text: str, terms: tuple[str, ...]) -> bool:
+    lowered = text.casefold()
+    return any(term.casefold() in lowered for term in terms)
+
+
 def text_tokens(value: str) -> set[str]:
     return {token for token in re.findall(r"[A-Za-z0-9]{3,}", value.lower())}
 
@@ -3107,6 +3112,249 @@ def build_links_by_source(external_links: list[dict[str, Any]]) -> dict[str, lis
     return mapping
 
 
+def ontology_citation(
+    *,
+    title: str,
+    path: str = "",
+    citation_uri: str = "",
+    source_type: str = "",
+) -> dict[str, str]:
+    return {
+        "title": normalize_text(title),
+        "path": normalize_text(path),
+        "citation_uri": normalize_text(citation_uri),
+        "source_type": normalize_text(source_type),
+    }
+
+
+def ontology_field(value: Any, *, confidence: str, citations: list[dict[str, str]], missing_reason: str = "") -> dict[str, Any]:
+    has_value = bool(value)
+    return {
+        "value": value,
+        "confidence": confidence if has_value else "missing",
+        "citations": citations[:12] if has_value else [],
+        "missing_reason": "" if has_value else missing_reason,
+    }
+
+
+def source_record_citation(record: dict[str, Any], source_type: str) -> dict[str, str]:
+    item = record["item"]
+    source_uri = item.get("source_url") or item.get("relative_path") or record.get("source_ref") or ""
+    return ontology_citation(
+        title=record["signals"].get("title") or item.get("title") or source_uri or source_type,
+        path=record.get("source_ref") or item.get("relative_path") or "",
+        citation_uri=source_uri,
+        source_type=source_type,
+    )
+
+
+def first_product_purpose(
+    product_name: str,
+    support_records: list[dict[str, Any]],
+    wiki_records: list[dict[str, Any]],
+    repo_snapshots: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, str]]]:
+    preferred_terms = ("overview", "introduction", "readme", "getting started", "what it does", "product reference")
+    for record in [*support_records, *wiki_records]:
+        haystack = f"{record['signals'].get('title', '')} {record.get('source_ref', '')}".lower()
+        if not any(term in haystack for term in preferred_terms):
+            continue
+        paragraphs = record["signals"].get("paragraphs") or []
+        if paragraphs:
+            source_type = "support" if record in support_records else "wiki"
+            return paragraphs[0], [source_record_citation(record, source_type)]
+    for snapshot in repo_snapshots:
+        summary = normalize_text(str(snapshot.get("readme_summary") or ""))
+        if summary:
+            return summary, [
+                ontology_citation(
+                    title=f"Repo - {snapshot.get('name', 'repository')}",
+                    path=f"repository:{snapshot.get('name', '')}",
+                    citation_uri=str(snapshot.get("path") or snapshot.get("name") or ""),
+                    source_type="repository",
+                )
+            ]
+    return f"{product_name} still needs stronger README, documentation, or product profile evidence.", []
+
+
+def ontology_terms_from_records(
+    records: list[dict[str, Any]],
+    terms: tuple[str, ...],
+    *,
+    limit: int = 10,
+) -> tuple[list[str], list[dict[str, str]]]:
+    values: list[str] = []
+    citations: list[dict[str, str]] = []
+    for record in records:
+        text = f"{record['signals'].get('title', '')}\n{record['text']}\n{record.get('source_ref', '')}"
+        if not has_any(text, terms):
+            continue
+        for line in [*record["signals"].get("headings", []), *record["signals"].get("bullets", []), *record["signals"].get("paragraphs", [])]:
+            for token in re.findall(r"\b[A-Z][A-Za-z0-9]{2,}(?:\s+[A-Z][A-Za-z0-9]{2,})?\b", line):
+                if token.casefold() in {"source", "readme", "github", "article", "overview"}:
+                    continue
+                if token not in values:
+                    values.append(token)
+                if len(values) >= limit:
+                    break
+            if len(values) >= limit:
+                break
+        source_type = "support" if record.get("source_ref", "").startswith("support") or "article" in record.get("source_ref", "") else "wiki"
+        citations.append(source_record_citation(record, source_type))
+        if len(values) >= limit:
+            break
+    return unique_lines(values, limit), citations[:8]
+
+
+def build_product_ontology(
+    *,
+    manifest: dict[str, Any],
+    support_records: list[dict[str, Any]],
+    wiki_records: list[dict[str, Any]],
+    repo_snapshots: list[dict[str, Any]],
+    capability_rows: list[dict[str, Any]],
+    code_intel: dict[str, Any],
+    external_links: list[dict[str, Any]],
+    docx_extracts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    product = manifest.get("product") or {}
+    product_name = str(product.get("name") or PRODUCT_CONTEXT["name"])
+    product_slug = str(product.get("slug") or PRODUCT_CONTEXT["slug"])
+    all_records = [*support_records, *wiki_records]
+    purpose, purpose_citations = first_product_purpose(product_name, support_records, wiki_records, repo_snapshots)
+    personas, persona_citations = ontology_terms_from_records(all_records, ("persona", "user", "customer", "operator", "member", "admin"))
+    workflows, workflow_citations = ontology_terms_from_records(all_records, ("workflow", "flow", "journey", "process", "campaign", "challenge"))
+    integrations, integration_citations = ontology_terms_from_records(all_records, EXTERNAL_SYSTEM_TERMS)
+    graph = code_intel.get("graph", {})
+    files = code_intel.get("files", [])
+    repo_citations = [
+        ontology_citation(
+            title=f"Repo - {snapshot.get('name', 'repository')}",
+            path=f"repository:{snapshot.get('name', '')}",
+            citation_uri=str(snapshot.get("path") or snapshot.get("name") or ""),
+            source_type="repository",
+        )
+        for snapshot in repo_snapshots
+    ]
+    code_citations = [
+        ontology_citation(
+            title=f"{item.get('repo', '')}/{item.get('relative_path', '')}",
+            path=str(item.get("relative_path") or ""),
+            citation_uri=f"{item.get('repo', '')}/{item.get('relative_path', '')}",
+            source_type="code",
+        )
+        for item in files[:12]
+    ]
+    repositories = [
+        {
+            "name": snapshot.get("name"),
+            "role": snapshot.get("role"),
+            "branch": snapshot.get("branch"),
+            "readme_title": snapshot.get("readme_title"),
+            "readme_summary": snapshot.get("readme_summary"),
+            "top_dirs": snapshot.get("top_dirs", [])[:12],
+            "key_files": snapshot.get("key_files", [])[:12],
+        }
+        for snapshot in repo_snapshots
+    ]
+    capabilities = [
+        {
+            "title": row["title"],
+            "support_count": row["support_count"],
+            "wiki_count": row["wiki_count"],
+            "repositories": row["repos"],
+            "code_count": row["code_count"],
+        }
+        for row in capability_rows
+    ]
+    services = unique_lines(
+        [
+            name
+            for snapshot in repo_snapshots
+            for name in [*snapshot.get("monorepo_services", []), *snapshot.get("monorepo_apps", [])]
+        ],
+        20,
+    )
+    apis = [edge.get("to", "") for edge in graph.get("routes", [])[:80] if edge.get("to")]
+    data_entities = [edge.get("to", "") for edge in graph.get("schemas", [])[:80] if edge.get("to")]
+    test_map = [edge.get("to", "") for edge in graph.get("tests", [])[:80] if edge.get("to")]
+    deployment_terms = ("deploy", "deployment", "staging", "preview", "production", "kubernetes", "helm", "terraform", "cdk")
+    environments = unique_lines(
+        [
+            item.get("relative_path", "")
+            for item in files
+            if has_any(f"{item.get('relative_path', '')} {' '.join(item.get('dependencies', []))}", deployment_terms)
+        ],
+        20,
+    )
+    known_bugs = unique_lines(
+        [
+            source_record_citation(record, "support")["title"]
+            for record in all_records
+            if has_any(f"{record['signals'].get('title', '')}\n{record['text']}", ("bug", "failure", "error", "regression", "ticket"))
+        ],
+        12,
+    )
+    source_citations = unique_lines(
+        [json.dumps(item, sort_keys=True) for item in [*purpose_citations, *repo_citations, *code_citations, *persona_citations, *workflow_citations, *integration_citations]],
+        30,
+    )
+    parsed_citations = [json.loads(item) for item in source_citations]
+    fields = {
+        "product_purpose": ontology_field(purpose, confidence="medium" if purpose_citations else "low", citations=purpose_citations, missing_reason="No product overview or README summary was found."),
+        "personas": ontology_field(personas, confidence="medium", citations=persona_citations, missing_reason="No user/persona evidence was found."),
+        "capabilities": ontology_field(capabilities, confidence="high" if capabilities else "missing", citations=repo_citations, missing_reason="No capability profile rows were generated."),
+        "workflows": ontology_field(workflows, confidence="medium", citations=workflow_citations, missing_reason="No workflow evidence was found."),
+        "repositories": ontology_field(repositories, confidence="high" if repositories else "missing", citations=repo_citations, missing_reason="No repositories were indexed."),
+        "services": ontology_field(services, confidence="medium", citations=repo_citations, missing_reason="No services or apps were detected."),
+        "apis": ontology_field(apis, confidence="medium", citations=code_citations, missing_reason="No routes or API contracts were detected."),
+        "data_entities": ontology_field(data_entities, confidence="medium", citations=code_citations, missing_reason="No schemas or data entities were detected."),
+        "integrations": ontology_field(integrations, confidence="medium", citations=integration_citations, missing_reason="No integration evidence was found."),
+        "environments": ontology_field(environments, confidence="medium", citations=code_citations, missing_reason="No deployment or environment evidence was detected."),
+        "test_map": ontology_field(test_map, confidence="medium", citations=code_citations, missing_reason="No test anchors were detected."),
+        "known_bugs": ontology_field(known_bugs, confidence="medium", citations=parsed_citations, missing_reason="No bug/support evidence was detected."),
+    }
+    ci_cd_profile = {
+        "summary": code_intel.get("summary", {}),
+        "repo_summaries": code_intel.get("repos", []),
+        "test_anchor_count": len(test_map),
+        "route_count": len(apis),
+        "schema_count": len(data_entities),
+        "deployment_signals": environments,
+    }
+    return {
+        "schema_version": 1,
+        "source": "codex-second-brain-starter-kit",
+        "generated_at": DATE,
+        "product": {"name": product_name, "slug": product_slug},
+        "product_purpose": purpose,
+        "personas": personas,
+        "capabilities": [row["title"] for row in capability_rows],
+        "workflows": workflows,
+        "repositories": [snapshot.get("name") for snapshot in repo_snapshots],
+        "repository_details": repositories,
+        "services": services,
+        "apis": apis,
+        "events_jobs": unique_lines([item.get("relative_path", "") for item in files if has_any(item.get("relative_path", ""), ("job", "worker", "cron", "queue"))], 20),
+        "data_entities": data_entities,
+        "integrations": integrations,
+        "environments": environments,
+        "ci_cd_profile": ci_cd_profile,
+        "test_map": test_map,
+        "known_bugs": known_bugs,
+        "feature_areas": [row["title"] for row in capability_rows],
+        "source_inventory": {
+            "support_notes": len(support_records),
+            "wiki_notes": len(wiki_records),
+            "repositories": [snapshot.get("name") for snapshot in repo_snapshots],
+            "docx_extracts": len(docx_extracts),
+            "external_links": len(external_links),
+        },
+        "fields": fields,
+        "source_citations": parsed_citations,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Rebuild a product second brain with durable source and code notes.")
     parser.add_argument("--manifest", required=True, type=Path)
@@ -3568,6 +3816,18 @@ def main() -> None:
             }
         )
 
+    product_ontology = build_product_ontology(
+        manifest=manifest,
+        support_records=support_records,
+        wiki_records=wiki_records,
+        repo_snapshots=repo_snapshots,
+        capability_rows=capability_rows,
+        code_intel=code_intel,
+        external_links=external_links,
+        docx_extracts=docx_extracts,
+    )
+    write_json(paths.json_dir / "product_ontology.json", product_ontology)
+
     conflict_titles = {
         "documentation-drift": "Documentation Drift",
         "restricted-source": "Restricted Source",
@@ -3817,6 +4077,7 @@ def main() -> None:
                 "output_candidates": len(output_candidate_records),
                 "archive_records": archive_records_written,
                 "repo_notes": len(repo_snapshots),
+                "product_ontology": str(paths.json_dir / "product_ontology.json"),
                 "code_intelligence": code_intel.get("summary", {}),
                 "semantic_clusters": len(semantic_result.get("clusters", [])),
                 "semantic_stats": semantic_result.get("stats", {}),

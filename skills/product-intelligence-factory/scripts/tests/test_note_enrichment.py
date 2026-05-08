@@ -21,6 +21,98 @@ def load_module(module_path: Path, module_name: str):
 
 
 class NoteEnrichmentTests(unittest.TestCase):
+    def test_product_ontology_exposes_cited_machine_readable_strategy(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_ontology_test")
+        module.configure_runtime(
+            {
+                "product": {"name": "Acme", "slug": "acme"},
+                "sources": {"stale_doc_hosts": []},
+            },
+            {
+                "capabilities": [
+                    {
+                        "key": "advocacy",
+                        "title": "Customer Advocacy",
+                        "description": "Customer advocacy workflows.",
+                        "keywords": ["advocacy", "campaign"],
+                        "repos": ["acme-app"],
+                    }
+                ]
+            },
+        )
+        support_record = {
+            "item": {
+                "title": "Acme Product Overview",
+                "source_url": "https://support.example.com/article/100",
+                "relative_path": "100-overview.md",
+            },
+            "text": "Acme helps customer advocates run campaigns and rewards.",
+            "signals": {
+                "title": "Acme Product Overview",
+                "headings": ["Overview"],
+                "bullets": ["Admins create advocacy campaigns for members."],
+                "paragraphs": ["Acme helps customer advocates run campaigns and rewards."],
+            },
+            "source_ref": "100-overview.md",
+        }
+
+        ontology = module.build_product_ontology(
+            manifest={"product": {"name": "Acme", "slug": "acme"}},
+            support_records=[support_record],
+            wiki_records=[],
+            repo_snapshots=[
+                {
+                    "name": "acme-app",
+                    "role": "primary",
+                    "branch": "main",
+                    "readme_title": "Acme",
+                    "readme_summary": "Acme is a customer advocacy platform.",
+                    "top_dirs": ["src"],
+                    "key_files": ["package.json"],
+                    "monorepo_services": ["api"],
+                    "monorepo_apps": ["web"],
+                }
+            ],
+            capability_rows=[
+                {
+                    "title": "Customer Advocacy",
+                    "link": "[[Customer Advocacy]]",
+                    "support_count": 1,
+                    "wiki_count": 0,
+                    "repos": ["acme-app"],
+                    "code_count": 2,
+                }
+            ],
+            code_intel={
+                "summary": {"route_count": 1, "schema_count": 1, "test_anchor_count": 1},
+                "repos": [{"repo": "acme-app", "test_anchor_count": 1}],
+                "files": [
+                    {
+                        "repo": "acme-app",
+                        "relative_path": "src/api/campaigns.ts",
+                        "dependencies": [],
+                    }
+                ],
+                "graph": {
+                    "routes": [{"from": "acme-app/src/api/campaigns.ts", "to": "GET /campaigns"}],
+                    "schemas": [{"from": "acme-app/src/api/campaigns.ts", "to": "type:Campaign"}],
+                    "tests": [{"from": "acme-app/src/api/campaigns.test.ts", "to": "campaign test"}],
+                },
+            },
+            external_links=[],
+            docx_extracts=[],
+        )
+
+        self.assertEqual(ontology["source"], "codex-second-brain-starter-kit")
+        self.assertEqual(ontology["product"]["slug"], "acme")
+        self.assertIn("customer advocates", ontology["product_purpose"])
+        self.assertIn("Customer Advocacy", ontology["capabilities"])
+        self.assertIn("GET /campaigns", ontology["apis"])
+        self.assertIn("type:Campaign", ontology["data_entities"])
+        self.assertIn("campaign test", ontology["test_map"])
+        self.assertEqual(ontology["fields"]["product_purpose"]["confidence"], "medium")
+        self.assertEqual(ontology["fields"]["product_purpose"]["citations"][0]["source_type"], "support")
+
     def test_support_note_preserves_full_article_content_and_obsidian_links(self) -> None:
         module = load_module(MODULE_PATH, "rebuild_product_brain_note_test")
         module.configure_runtime(

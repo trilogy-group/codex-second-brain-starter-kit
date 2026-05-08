@@ -78,6 +78,7 @@ When the packaged helpers are available, run the source-index and rebuild flow b
 
 Expected outputs:
 - linked notes
+- a canonical machine-readable product ontology at `mirror/inventories/product_ontology.json`
 - Product BASB metadata across durable generated notes
 - capture-quality scores
 - Essence and Use in current project sections before full source content
@@ -86,6 +87,7 @@ Expected outputs:
 - a weekly review note in `70 Journal/Reviews/`
 - stale-source archive records in `90 Archive/Stale Sources/`
 - code-intelligence maps in `40 Research/Code Intelligence/Maps/` and `40 Research/Code Intelligence/Graphs/`
+- product ontology fields for purpose, personas, capabilities, workflows, repos, APIs, entities, integrations, CI/CD, tests, and known bugs
 - semantic intermediate packets with LLM synthesis in `40 Research/Intermediate Packets/`
 - AST/parser metadata in code-reference notes when optional tree-sitter parsers are available
 - full support and wiki content preserved in-note
