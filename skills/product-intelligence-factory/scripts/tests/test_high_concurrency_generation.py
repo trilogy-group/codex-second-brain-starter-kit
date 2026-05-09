@@ -807,6 +807,50 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(snapshot["missing_percent"], 75)
         self.assertEqual(len(events), 2)
 
+    def test_source_fetch_progress_callback_tracks_completed_links(self) -> None:
+        source_indices = load_module(BUILD_SOURCE_INDICES_SCRIPT, "build_source_indices_progress_test")
+        cache_module = load_module(SOURCE_INDEX_CACHE_SCRIPT, "source_index_cache_progress_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            paths = source_indices.Paths(
+                workspace=root,
+                vault=root / "vault",
+                corpus=root / "corpus",
+                mirror=root / "mirror",
+                docx_extract=root / "docx",
+                repos_root=root / "repos",
+                links_dir=root / "links",
+                json_dir=root / "inventories",
+            )
+            events: list[dict[str, int]] = []
+
+            def fake_fetch(url, source_refs, links_dir, settings):
+                return {
+                    "url": url,
+                    "domain": "example.com",
+                    "source_refs": source_refs,
+                    "status": "blocked" if url.endswith("/two") else "mirrored",
+                }
+
+            source_cache = cache_module.load_cache(root / "source_index_cache.json")
+            settings = {"source_fetch_workers": 2, "source_index_cache": source_cache}
+            with mock.patch.object(source_indices, "fetch_url", side_effect=fake_fetch):
+                records = source_indices.build_link_inventory(
+                    {
+                        "https://example.com/one": {"a.md"},
+                        "https://example.com/two": {"b.md"},
+                    },
+                    paths,
+                    settings,
+                    progress_callback=lambda completed, total: events.append(
+                        {"completed": completed, "total": total}
+                    ),
+                )
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(events[-1], {"completed": 2, "total": 2})
+        self.assertIn({"completed": 1, "total": 2}, events)
+
     def test_benchmark_history_tracks_trends_across_runs(self) -> None:
         benchmark_module = load_module(BENCHMARK_REBUILD_SCRIPT, "benchmark_rebuild_history_test")
         with tempfile.TemporaryDirectory() as tmp_dir:

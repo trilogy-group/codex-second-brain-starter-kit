@@ -782,6 +782,7 @@ def build_link_inventory(
     *,
     known_local_support_urls: set[str] | None = None,
     force: bool = False,
+    progress_callback: Any | None = None,
 ) -> list[dict[str, Any]]:
     ensure_dir(paths.links_dir)
     results: list[dict[str, Any]] = []
@@ -832,6 +833,10 @@ def build_link_inventory(
             remote_links[url] = refs
     settings["cached_response_headers"] = cached_response_headers
     source_fetch_workers = int(settings.get("source_fetch_workers", 40))
+    completed_links = len(results) + len(local_records)
+    total_links = max(1, len(source_links))
+    if progress_callback is not None and completed_links:
+        progress_callback(completed_links, total_links)
     with concurrent.futures.ThreadPoolExecutor(max_workers=source_fetch_workers) as executor:
         futures = {
             executor.submit(fetch_url, url, sorted(source_refs), paths.links_dir, settings): url
@@ -847,10 +852,16 @@ def build_link_inventory(
                     cached["conditional_not_modified"] = True
                     source_cache["stats"]["conditional_hits"] = int(source_cache["stats"].get("conditional_hits", 0)) + 1
                     results.append(cached)
+                    completed_links += 1
+                    if progress_callback is not None:
+                        progress_callback(completed_links, total_links)
                     continue
             if isinstance(source_cache, dict):
                 source_index_cache.store(source_cache, url, cache_hash, record)
             results.append(record)
+            completed_links += 1
+            if progress_callback is not None:
+                progress_callback(completed_links, total_links)
     results.extend(local_records)
     return sorted(results, key=lambda item: (item["status"], item["domain"], item["url"]))
 
@@ -1238,6 +1249,14 @@ def main() -> None:
         settings,
         known_local_support_urls=known_local_support_urls,
         force=args.force,
+        progress_callback=lambda completed, total: progress.record(
+            "source_fetch",
+            "running",
+            completed_units=completed,
+            total_units=total,
+            link_count=len(all_links),
+            cache_entries=len(source_cache.get("entries", {})),
+        ),
     )
     source_index_cache.write_cache(source_cache_path, source_cache)
     record_timing(

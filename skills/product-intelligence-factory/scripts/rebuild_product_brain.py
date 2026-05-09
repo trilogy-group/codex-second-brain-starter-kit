@@ -4014,6 +4014,14 @@ def main() -> None:
             note_specs,
             cache=render_cache,
             workers=generation_config["note_render_workers"],
+            progress_callback=lambda completed, total: progress.record(
+                "note_rendering",
+                "running",
+                completed_units=completed,
+                total_units=total,
+                note_count=len(note_specs),
+                note_render_workers=generation_config["note_render_workers"],
+            ),
         )
         rendered_note_stats = note_rendering.write_rendered_notes(
             rendered,

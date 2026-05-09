@@ -5,7 +5,7 @@ import hashlib
 import json
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -81,6 +81,7 @@ def render_note_specs(
     cache: dict[str, Any] | None,
     workers: int,
     observed_workers: list[int] | None = None,
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[RenderedNote]:
     if workers <= 0:
         raise SystemExit("note_render_workers must be greater than zero.")
@@ -90,8 +91,16 @@ def render_note_specs(
     if not ordered_specs:
         return []
     cache_lock = threading.Lock() if cache is not None else None
+    total = len(ordered_specs)
+    completed = 0
+    rendered: list[RenderedNote] = []
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="basb-note-render") as executor:
-        rendered = list(executor.map(lambda spec: _render_one(spec, cache, cache_lock), ordered_specs))
+        futures = [executor.submit(_render_one, spec, cache, cache_lock) for spec in ordered_specs]
+        for future in as_completed(futures):
+            rendered.append(future.result())
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(completed, total)
     return sorted(rendered, key=lambda item: item.path.as_posix())
 
 
