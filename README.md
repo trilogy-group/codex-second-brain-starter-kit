@@ -124,6 +124,40 @@ Benchmark cold and warm runs with:
 python3 skills/product-intelligence-factory/scripts/benchmark_rebuild.py --manifest "/absolute/path/to/product.yaml" --runs 2 --label "large-source-baseline"
 ```
 
+## Retrieval-guided warm rebuilds
+
+Large brains get faster and more useful when unchanged evidence can be reused and changed evidence can be ranked before generation. The rebuild now keeps a local SQLite FTS evidence index in `sources.mirror_path/inventories/` and uses it to rank support, wiki, code, semantic, shard, packet, output, and generated-note evidence before expensive synthesis.
+
+Keep these retrieval artifacts between runs:
+- `evidence_index.sqlite`
+- `evidence_index_manifest.json`
+- `changed_scope_report.json`
+- the cache files listed in the large-source performance section
+
+Enable the default retrieval and changed-scope settings in `profile.intelligence_path`:
+
+```yaml
+retrieval_index:
+  enabled: true
+  max_candidates_per_source: 30
+  min_score: 0.0
+
+generation_performance:
+  changed_scope_rebuild: true
+```
+
+The SQLite FTS index is local, rebuildable, generic, and does not require a vector database. JSON inventories remain the source of truth; the SQLite file is an acceleration layer for ranked linking and warm rebuild planning.
+
+Use `--force` when retrieval logic changed, the index is corrupted, you want a clean benchmark, or you suspect stale changed-scope output. A forced run rebuilds the retrieval index and treats the changed scope as intentionally dirty.
+
+Benchmark retrieval-guided warm runs with:
+
+```bash
+python3 skills/product-intelligence-factory/scripts/benchmark_rebuild.py --manifest "/absolute/path/to/product.yaml" --runs 2 --label "retrieval-changed-scope"
+```
+
+When tuning, inspect `performance_summary.json`, `changed_scope_report.json`, `rebuild_timings.json`, and `rate_limit_events.json`. Raise workers gradually only after cache hit ratios, changed-scope counts, and rate-limit waits look healthy.
+
 Existing vaults can be upgraded conservatively with a dry-run migration first:
 
 ```bash

@@ -14,6 +14,7 @@ CODE_INTELLIGENCE_SCRIPT = TOOLS_DIR / "code_intelligence.py"
 SEMANTIC_SCRIPT = TOOLS_DIR / "semantic_clustering.py"
 REBUILD_SCRIPT = TOOLS_DIR / "rebuild_product_brain.py"
 GENERATION_PERFORMANCE_SCRIPT = TOOLS_DIR / "generation_performance.py"
+EVIDENCE_INDEX_SCRIPT = TOOLS_DIR / "evidence_index.py"
 
 
 def load_module(module_path: Path, module_name: str):
@@ -47,6 +48,79 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertEqual(config["agent_shards"]["worker_mode"], "llm-synthesis")
         self.assertEqual(config["agent_shards"]["shard_model"], "gpt-4.1-mini")
         self.assertEqual(config["agent_shards"]["max_cards_per_shard"], 80)
+        self.assertTrue(config["changed_scope_rebuild"])
+
+    def test_default_retrieval_index_config_is_enabled_and_validated(self) -> None:
+        evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_config_test")
+
+        default_config = evidence_index.default_retrieval_config({})
+        custom_config = evidence_index.default_retrieval_config(
+            {"retrieval_index": {"enabled": False, "max_candidates_per_source": 11, "min_score": 0.25}}
+        )
+
+        self.assertTrue(default_config["enabled"])
+        self.assertEqual(default_config["max_candidates_per_source"], 30)
+        self.assertEqual(default_config["min_score"], 0.0)
+        self.assertFalse(custom_config["enabled"])
+        self.assertEqual(custom_config["max_candidates_per_source"], 11)
+        self.assertEqual(custom_config["min_score"], 0.25)
+        with self.assertRaises(SystemExit):
+            evidence_index.default_retrieval_config({"retrieval_index": {"max_candidates_per_source": 0}})
+
+    def test_retrieval_ranked_code_hits_prefer_index_matches_and_fallback_to_keywords(self) -> None:
+        evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_ranking_test")
+        rebuild = load_module(REBUILD_SCRIPT, "rebuild_product_brain_retrieval_ranking_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            index_path = Path(tmp_dir) / "evidence_index.sqlite"
+            evidence_index.rebuild_index(
+                index_path,
+                [
+                    evidence_index.EvidenceRow(
+                        evidence_id="code:billing",
+                        kind="code",
+                        title="BillingSessionHandler",
+                        body="Handles invoice token failures and payment session recovery.",
+                        source_ref="repo/app/billing.py",
+                        path="repo/app/billing.py",
+                        capabilities=["billing"],
+                        code_refs=[],
+                        fingerprint="billing",
+                    ),
+                    evidence_index.EvidenceRow(
+                        evidence_id="code:auth",
+                        kind="code",
+                        title="AuthController",
+                        body="Handles login session token failures.",
+                        source_ref="repo/app/auth.py",
+                        path="repo/app/auth.py",
+                        capabilities=["identity"],
+                        code_refs=[],
+                        fingerprint="auth",
+                    ),
+                ],
+            )
+            fallback_hits = [
+                {"repo": "repo", "relative_path": "app/auth.py", "absolute_path": str(Path(tmp_dir) / "repo" / "app" / "auth.py"), "sample": "session login", "score": 1},
+                {"repo": "repo", "relative_path": "app/billing.py", "absolute_path": str(Path(tmp_dir) / "repo" / "app" / "billing.py"), "sample": "invoice payment", "score": 1},
+            ]
+            ranked = rebuild.retrieval_ranked_code_hits(
+                index_path=index_path,
+                query="invoice token payment session",
+                fallback_hits=fallback_hits,
+                limit=2,
+                min_score=0.0,
+            )
+            fallback = rebuild.retrieval_ranked_code_hits(
+                index_path=Path(tmp_dir) / "missing.sqlite",
+                query="invoice token payment session",
+                fallback_hits=fallback_hits,
+                limit=2,
+                min_score=0.0,
+            )
+
+        self.assertEqual([item["relative_path"] for item in ranked], ["app/billing.py", "app/auth.py"])
+        self.assertEqual(ranked[0]["retrieval_source"], "sqlite-fts")
+        self.assertEqual(fallback, fallback_hits)
 
     def test_source_extract_workers_default_to_parallel_workers_and_support_env_override(self) -> None:
         module = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_source_extract_test")

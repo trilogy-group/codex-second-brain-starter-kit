@@ -175,6 +175,7 @@ def main() -> None:
         timings = load_json(inventories / "rebuild_timings.json")
         shards = load_json(inventories / "generation_shards.json")
         rate_events = load_json(inventories / "rate_limit_events.json")
+        changed_scope = load_json(inventories / "changed_scope_report.json")
         digest = vault_digest(vault)
         digests.append(digest)
         runs.append(
@@ -185,6 +186,11 @@ def main() -> None:
                 "total_seconds": round(source_seconds + rebuild_seconds, 4),
                 "cache_stats": cache.get("stats", {}),
                 "stage_timings": timings.get("stages", {}),
+                "changed_scope": {
+                    "changed_counts": changed_scope.get("changed_counts", {}),
+                    "impacted_capabilities": changed_scope.get("impacted_capabilities", []),
+                    "impacted_code_refs": changed_scope.get("impacted_code_refs", []),
+                },
                 "shard_summary": shards.get("reducer", {}),
                 "rate_limit_summary": rate_events.get("summary", {}),
                 "rate_limit_wait_seconds": (rate_events.get("summary") or {}).get("total_wait_seconds", 0),

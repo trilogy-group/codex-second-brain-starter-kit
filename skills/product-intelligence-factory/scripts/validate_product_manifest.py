@@ -86,9 +86,26 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                     errors.append("profile code_intelligence.max_files_per_repo must be positive.")
                 if code and code.get("parser_mode", "ast-when-available") not in {"ast-when-available", "regex-only"}:
                     errors.append("profile code_intelligence.parser_mode must be `ast-when-available` or `regex-only`.")
+                retrieval = profile_data.get("retrieval_index") or {}
+                if isinstance(retrieval, dict):
+                    if "max_candidates_per_source" in retrieval:
+                        try:
+                            candidates = int(retrieval["max_candidates_per_source"])
+                        except (TypeError, ValueError):
+                            candidates = 0
+                        if candidates <= 0:
+                            errors.append("profile retrieval_index.max_candidates_per_source must be positive.")
+                    if "min_score" in retrieval:
+                        try:
+                            min_score = float(retrieval["min_score"])
+                        except (TypeError, ValueError):
+                            min_score = -1.0
+                        if min_score < 0:
+                            errors.append("profile retrieval_index.min_score must be zero or greater.")
                 generation = profile_data.get("generation_performance") or {}
                 worker_fields = [
                     "parallel_workers",
+                    "source_extract_workers",
                     "source_fetch_workers",
                     "repo_analysis_workers",
                     "code_analysis_workers",

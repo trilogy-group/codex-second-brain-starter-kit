@@ -16,6 +16,7 @@ DEFAULT_GENERATION_PERFORMANCE: dict[str, Any] = {
     "llm_synthesis_workers": 10,
     "embedding_batch_size": 512,
     "incremental_rebuild": True,
+    "changed_scope_rebuild": True,
     "agent_shards": {
         "enabled": True,
         "max_shards": 12,
@@ -51,6 +52,7 @@ ENV_OVERRIDES = {
     "embedding_workers": ("PRODUCT_BASB_EMBEDDING_WORKERS",),
     "llm_synthesis_workers": ("PRODUCT_BASB_LLM_SYNTHESIS_WORKERS", "TYLER_SECOND_BRAIN_LLM_WORKERS"),
     "embedding_batch_size": ("PRODUCT_BASB_EMBEDDING_BATCH_SIZE",),
+    "changed_scope_rebuild": ("PRODUCT_BASB_CHANGED_SCOPE_REBUILD", "TYLER_SECOND_BRAIN_CHANGED_SCOPE_REBUILD"),
     "agent_shards.enabled": ("PRODUCT_BASB_AGENT_SHARDS_ENABLED", "TYLER_SECOND_BRAIN_AGENT_SHARDS_ENABLED"),
     "agent_shards.max_shards": ("PRODUCT_BASB_AGENT_MAX_SHARDS", "TYLER_SECOND_BRAIN_AGENT_MAX_SHARDS"),
     "agent_shards.max_concurrent_shards": (
@@ -183,6 +185,11 @@ def default_generation_config(profile: dict[str, Any] | None = None) -> dict[str
             field="embedding_batch_size",
         ),
         "incremental_rebuild": bool(configured.get("incremental_rebuild", DEFAULT_GENERATION_PERFORMANCE["incremental_rebuild"])),
+        "changed_scope_rebuild": _configured_bool(
+            configured,
+            "changed_scope_rebuild",
+            DEFAULT_GENERATION_PERFORMANCE["changed_scope_rebuild"],
+        ),
         "agent_shards": {
             "enabled": _configured_bool(shard_config, "agent_shards.enabled", True, config_key="enabled"),
             "max_shards": _explicit_positive_int(

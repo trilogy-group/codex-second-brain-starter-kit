@@ -115,6 +115,11 @@ def build_profile() -> dict[str, object]:
             "include_dependency_graph": True,
             "parser_mode": "ast-when-available",
         },
+        "retrieval_index": {
+            "enabled": True,
+            "max_candidates_per_source": 30,
+            "min_score": 0.0,
+        },
         "generation_performance": {
             "parallel_workers": 24,
             "source_extract_workers": 24,
@@ -126,6 +131,7 @@ def build_profile() -> dict[str, object]:
             "llm_synthesis_workers": 10,
             "embedding_batch_size": 512,
             "incremental_rebuild": True,
+            "changed_scope_rebuild": True,
             "agent_shards": {
                 "enabled": True,
                 "max_shards": 12,

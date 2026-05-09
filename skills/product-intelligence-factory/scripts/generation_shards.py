@@ -125,6 +125,52 @@ def _compact_card(kind: str, item: dict[str, Any], index: int) -> dict[str, Any]
     }
 
 
+def _item_sort_label(kind: str, item: dict[str, Any]) -> str:
+    return str(item.get("stem") or item.get("source_ref") or item.get("id") or item.get("title") or item.get("label") or kind)
+
+
+def _item_evidence_id(kind: str, item: dict[str, Any]) -> str:
+    if kind == "support-evidence":
+        return f"support:{item.get('source_ref') or item.get('stem') or ''}"
+    if kind == "wiki-evidence":
+        return f"wiki:{item.get('source_ref') or item.get('stem') or ''}"
+    if kind == "semantic-synthesis":
+        return f"semantic:{item.get('id') or item.get('title') or ''}"
+    if kind == "repo-code":
+        return f"repo:{item.get('label') or ''}"
+    return _item_sort_label(kind, item)
+
+
+def _prioritized_items(kind: str, items: list[dict[str, Any]], changed_scope: dict[str, Any] | None) -> list[dict[str, Any]]:
+    changed_ids = set(changed_scope.get("changed_evidence_ids", [])) if isinstance(changed_scope, dict) else set()
+    impacted_caps = set(changed_scope.get("impacted_capabilities", [])) if isinstance(changed_scope, dict) else set()
+    impacted_code_refs = set(changed_scope.get("impacted_code_refs", [])) if isinstance(changed_scope, dict) else set()
+
+    def priority(item: dict[str, Any]) -> tuple[int, str]:
+        score = 0
+        if _item_evidence_id(kind, item) in changed_ids:
+            score += 100
+        capabilities = {str(value) for value in item.get("capabilities", [])}
+        score += 20 * len(capabilities.intersection(impacted_caps))
+        code_refs = {
+            str(value)
+            for value in [
+                *item.get("code_reference_links", []),
+                *(f"{hit.get('repo', '')}/{hit.get('relative_path', '')}" for hit in item.get("code_hits", [])),
+            ]
+            if str(value).strip()
+        }
+        score += 10 * len(code_refs.intersection(impacted_code_refs))
+        if item.get("conflicts"):
+            score += min(8, len(item.get("conflicts", [])))
+        quality = item.get("quality") if isinstance(item.get("quality"), dict) else {}
+        if quality.get("score"):
+            score += min(5, int(quality.get("score", 0) or 0))
+        return (-score, _item_sort_label(kind, item))
+
+    return sorted(items, key=priority)
+
+
 def plan_generation_shards(
     *,
     generation_config: dict[str, Any],
@@ -132,6 +178,7 @@ def plan_generation_shards(
     support_records: list[dict[str, Any]],
     wiki_records: list[dict[str, Any]],
     semantic_cards: list[dict[str, Any]],
+    changed_scope: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     shard_config = generation_config["agent_shards"]
     if not shard_config.get("enabled", True):
@@ -141,10 +188,10 @@ def plan_generation_shards(
     worker_mode = str(shard_config.get("worker_mode", "llm-synthesis"))
     shard_model = str(shard_config.get("shard_model", "gpt-4.1-mini"))
     source_groups = [
-        ("repo-code", [{"label": name} for name in sorted(repo_names)]),
-        ("support-evidence", sorted(support_records, key=lambda item: str(item.get("stem") or item.get("source_ref") or ""))),
-        ("wiki-evidence", sorted(wiki_records, key=lambda item: str(item.get("stem") or item.get("source_ref") or ""))),
-        ("semantic-synthesis", sorted(semantic_cards, key=lambda item: str(item.get("id") or item.get("title") or ""))),
+        ("repo-code", _prioritized_items("repo-code", [{"label": name} for name in sorted(repo_names)], changed_scope)),
+        ("support-evidence", _prioritized_items("support-evidence", support_records, changed_scope)),
+        ("wiki-evidence", _prioritized_items("wiki-evidence", wiki_records, changed_scope)),
+        ("semantic-synthesis", _prioritized_items("semantic-synthesis", semantic_cards, changed_scope)),
     ]
     non_empty_groups = [(kind, items) for kind, items in source_groups if items]
     if not non_empty_groups or max_shards <= 0:
@@ -564,6 +611,7 @@ def run_generation_shards(
     rate_limit_config: dict[str, Any] | None = None,
     cache_path: Path | None = None,
     force: bool = False,
+    changed_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     shard_config = generation_config["agent_shards"]
     max_shards = min(12, int(shard_config["max_shards"]))
@@ -577,6 +625,7 @@ def run_generation_shards(
         support_records=support_records,
         wiki_records=wiki_records,
         semantic_cards=semantic_cards,
+        changed_scope=changed_scope,
     )
     run_id = run_id or datetime.now(timezone.utc).strftime("job-%Y%m%dT%H%M%SZ")
     scratch_root = workspace_path / "_generation_shards" / run_id

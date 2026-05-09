@@ -605,6 +605,20 @@ class GenericToolingTests(unittest.TestCase):
         self.assertIn("rate_limit_events.json", body)
         self.assertNotIn("support.influitive.com", body)
 
+    def test_readme_documents_retrieval_guided_warm_rebuilds(self) -> None:
+        readme = TOOLS_DIR.parents[2] / "README.md"
+        body = readme.read_text(encoding="utf-8")
+
+        self.assertIn("## Retrieval-guided warm rebuilds", body)
+        self.assertIn("retrieval_index:", body)
+        self.assertIn("changed_scope_rebuild: true", body)
+        self.assertIn("evidence_index.sqlite", body)
+        self.assertIn("evidence_index_manifest.json", body)
+        self.assertIn("changed_scope_report.json", body)
+        self.assertIn("retrieval-changed-scope", body)
+        self.assertIn("SQLite FTS", body)
+        self.assertIn("does not require a vector database", body)
+
 
 if __name__ == "__main__":
     unittest.main()

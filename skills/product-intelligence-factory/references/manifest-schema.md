@@ -48,6 +48,10 @@ profile:
 #   include_tests: true
 #   include_dependency_graph: true
 #   parser_mode: ast-when-available
+# retrieval_index:
+#   enabled: true
+#   max_candidates_per_source: 30
+#   min_score: 0.0
 # generation_performance:
 #   parallel_workers: 24
 #   source_extract_workers: 24
@@ -59,6 +63,7 @@ profile:
 #   llm_synthesis_workers: 10
 #   embedding_batch_size: 512
 #   incremental_rebuild: true
+#   changed_scope_rebuild: true
 #   agent_shards:
 #     enabled: true
 #     max_shards: 12

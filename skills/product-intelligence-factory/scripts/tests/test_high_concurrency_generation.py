@@ -23,6 +23,7 @@ PROMOTE_OUTPUT_CANDIDATE_SCRIPT = TOOLS_DIR / "promote_output_candidate.py"
 BENCHMARK_REBUILD_SCRIPT = TOOLS_DIR / "benchmark_rebuild.py"
 BUILD_SOURCE_INDICES_SCRIPT = TOOLS_DIR / "build_source_indices.py"
 SEMANTIC_SCRIPT = TOOLS_DIR / "semantic_clustering.py"
+EVIDENCE_INDEX_SCRIPT = TOOLS_DIR / "evidence_index.py"
 
 
 def load_module(module_path: Path, module_name: str):
@@ -35,6 +36,116 @@ def load_module(module_path: Path, module_name: str):
 
 
 class HighConcurrencyGenerationTests(unittest.TestCase):
+    def test_evidence_index_upserts_searches_and_removes_stale_rows(self) -> None:
+        evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_lifecycle_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            index_path = root / "evidence_index.sqlite"
+            manifest_path = root / "evidence_index_manifest.json"
+            rows = [
+                evidence_index.EvidenceRow(
+                    evidence_id="support:alpha",
+                    kind="support",
+                    title="Login troubleshooting",
+                    body="Reset session tokens when login access fails.",
+                    source_ref="support/alpha.md",
+                    path="support/alpha.md",
+                    capabilities=["identity"],
+                    code_refs=["repo/app/auth.py"],
+                    fingerprint="a",
+                    metadata={"quality": "high"},
+                ),
+                evidence_index.EvidenceRow(
+                    evidence_id="code:auth",
+                    kind="code",
+                    title="AuthController",
+                    body="Handles session token login failures.",
+                    source_ref="repo/app/auth.py",
+                    path="repo/app/auth.py",
+                    capabilities=["identity"],
+                    code_refs=[],
+                    fingerprint="b",
+                ),
+            ]
+
+            stats = evidence_index.rebuild_index(index_path, rows, manifest_path=manifest_path)
+            results = evidence_index.search(index_path, "session token login", limit=5)
+            stale_stats = evidence_index.rebuild_index(index_path, rows[:1], manifest_path=manifest_path)
+            stale_results = evidence_index.search(index_path, "AuthController", limit=5)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(evidence_index.sqlite_fts_available())
+        self.assertEqual(stats["indexed_rows"], 2)
+        self.assertEqual([item["evidence_id"] for item in results], ["code:auth", "support:alpha"])
+        self.assertEqual(stale_stats["deleted_rows"], 1)
+        self.assertEqual(stale_results, [])
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["row_count"], 1)
+
+    def test_evidence_index_changed_scope_marks_added_modified_deleted_and_force(self) -> None:
+        evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_changed_scope_test")
+        previous_rows = [
+            evidence_index.EvidenceRow(
+                evidence_id="support:alpha",
+                kind="support",
+                title="Login",
+                body="Login fails",
+                source_ref="support/alpha.md",
+                path="support/alpha.md",
+                capabilities=["identity"],
+                code_refs=["repo/app/auth.py"],
+                fingerprint="old",
+            ),
+            evidence_index.EvidenceRow(
+                evidence_id="support:beta",
+                kind="support",
+                title="Billing",
+                body="Invoice setup",
+                source_ref="support/beta.md",
+                path="support/beta.md",
+                capabilities=["billing"],
+                code_refs=[],
+                fingerprint="same",
+            ),
+        ]
+        current_rows = [
+            evidence_index.EvidenceRow(
+                evidence_id="support:alpha",
+                kind="support",
+                title="Login",
+                body="Login fails after SSO",
+                source_ref="support/alpha.md",
+                path="support/alpha.md",
+                capabilities=["identity"],
+                code_refs=["repo/app/auth.py"],
+                fingerprint="new",
+            ),
+            evidence_index.EvidenceRow(
+                evidence_id="support:gamma",
+                kind="support",
+                title="Profiles",
+                body="Profile setup",
+                source_ref="support/gamma.md",
+                path="support/gamma.md",
+                capabilities=["profiles"],
+                code_refs=[],
+                fingerprint="fresh",
+            ),
+        ]
+
+        report = evidence_index.changed_scope_report(previous_rows, current_rows)
+        forced = evidence_index.changed_scope_report(previous_rows, current_rows, force=True)
+
+        self.assertEqual(report["changed_counts"]["added"], 1)
+        self.assertEqual(report["changed_counts"]["modified"], 1)
+        self.assertEqual(report["changed_counts"]["deleted"], 1)
+        self.assertEqual(report["impacted_capabilities"], ["billing", "identity", "profiles"])
+        self.assertEqual(report["impacted_code_refs"], ["repo/app/auth.py"])
+        self.assertFalse(report["force"])
+        self.assertEqual(forced["changed_counts"]["unchanged"], 0)
+        self.assertEqual(forced["changed_counts"]["modified"], 2)
+        self.assertTrue(forced["force"])
+
     def test_source_extract_cache_reuses_unchanged_markdown_and_force_bypasses(self) -> None:
         build = load_module(BUILD_SOURCE_INDICES_SCRIPT, "build_source_indices_source_cache_test")
         with tempfile.TemporaryDirectory() as tmp_dir:

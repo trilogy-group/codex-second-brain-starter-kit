@@ -7,6 +7,7 @@ import importlib.util
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -24,6 +25,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import code_intelligence
+import evidence_index
 import generation_performance
 import generation_progress
 import generation_shards
@@ -183,6 +185,7 @@ def load_product_profile(manifest: dict[str, Any]) -> dict[str, Any]:
         "path": path,
         "capabilities": capabilities,
         "generation_performance": generation_performance.default_generation_config(data),
+        "retrieval_index": evidence_index.default_retrieval_config(data),
         "rate_limits": generation_performance.default_rate_limit_config(data),
         "semantic_clustering": semantic_clustering.default_semantic_config(data),
         "code_intelligence": code_intelligence.default_code_config(data),
@@ -270,6 +273,252 @@ def write_performance_summary(paths: Paths, payload: dict[str, Any]) -> None:
 
 def content_fingerprint(payload: Any) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def evidence_fingerprint(payload: Any) -> str:
+    return content_fingerprint(payload)
+
+
+def source_record_to_evidence_row(kind: str, record: dict[str, Any]) -> evidence_index.EvidenceRow:
+    item = record.get("item", {})
+    source_ref = str(record.get("source_ref") or item.get("relative_path") or record.get("stem") or "")
+    title = str(record.get("signals", {}).get("title") or item.get("title") or source_ref)
+    code_refs = [
+        f"{hit.get('repo', '')}/{hit.get('relative_path', '')}"
+        for hit in record.get("code_hits", [])
+        if hit.get("repo") and hit.get("relative_path")
+    ]
+    body = "\n".join(
+        [
+            title,
+            str(record.get("text") or ""),
+            " ".join(record.get("signals", {}).get("headings", [])),
+            " ".join(record.get("signals", {}).get("bullets", [])),
+        ]
+    )
+    return evidence_index.EvidenceRow(
+        evidence_id=f"{kind}:{source_ref}",
+        kind=kind,
+        title=title,
+        body=body,
+        source_ref=source_ref,
+        path=str(record.get("raw_path") or source_ref),
+        capabilities=[str(item) for item in record.get("capabilities", [])],
+        code_refs=code_refs,
+        fingerprint=evidence_fingerprint(
+            {
+                "kind": kind,
+                "source_ref": source_ref,
+                "title": title,
+                "body": body,
+                "capabilities": record.get("capabilities", []),
+                "code_refs": code_refs,
+            }
+        ),
+        metadata={
+            "stem": record.get("stem", ""),
+            "note_link": note_link(record.get("stem", "")) if record.get("stem") else "",
+            "quality": record.get("quality", {}),
+        },
+    )
+
+
+def code_file_to_evidence_row(item: dict[str, Any]) -> evidence_index.EvidenceRow:
+    repo = str(item.get("repo") or "")
+    relative_path = str(item.get("relative_path") or "")
+    symbols = item.get("symbols") if isinstance(item.get("symbols"), dict) else {}
+    symbol_terms = [
+        str(value)
+        for values in symbols.values()
+        if isinstance(values, list)
+        for value in values
+    ]
+    route_terms = [f"{route.get('method', '')} {route.get('path', '')}" for route in item.get("routes", [])]
+    schema_terms = [f"{schema.get('kind', '')} {schema.get('name', '')}" for schema in item.get("schemas", [])]
+    body = "\n".join(
+        [
+            f"{repo}/{relative_path}",
+            str(item.get("language") or ""),
+            str(item.get("sample") or ""),
+            " ".join(symbol_terms),
+            " ".join(route_terms),
+            " ".join(schema_terms),
+            " ".join(str(dep) for dep in item.get("dependencies", [])[:80]),
+            " ".join(str(signal) for signal in item.get("implementation_signals", [])),
+        ]
+    )
+    capabilities = [
+        capability["key"]
+        for capability in CAPABILITIES
+        if repo in capability.get("repos", [])
+    ]
+    return evidence_index.EvidenceRow(
+        evidence_id=f"code:{repo}:{relative_path}",
+        kind="code",
+        title=f"{repo}/{relative_path}",
+        body=body,
+        source_ref=f"{repo}/{relative_path}",
+        path=f"{repo}/{relative_path}",
+        capabilities=capabilities,
+        code_refs=[f"{repo}/{relative_path}"],
+        fingerprint=evidence_fingerprint(
+            {
+                "repo": repo,
+                "relative_path": relative_path,
+                "content_sha256": item.get("content_sha256"),
+                "symbols": symbols,
+                "routes": item.get("routes", []),
+                "schemas": item.get("schemas", []),
+                "dependencies": item.get("dependencies", []),
+            }
+        ),
+        metadata={
+            "repo": repo,
+            "relative_path": relative_path,
+            "absolute_path": item.get("absolute_path", ""),
+            "language": item.get("language", ""),
+            "parser_backend": item.get("parser_backend", ""),
+        },
+    )
+
+
+def semantic_card_to_evidence_row(card: dict[str, Any]) -> evidence_index.EvidenceRow:
+    evidence_id = str(card.get("id") or card.get("title") or "semantic-card")
+    code_refs = [
+        str(link).replace("[[Code - ", "").replace("]]", "")
+        for link in card.get("code_reference_links", [])
+        if str(link).strip()
+    ]
+    body = "\n".join(
+        [
+            str(card.get("title") or ""),
+            str(card.get("summary") or ""),
+            " ".join(str(item) for item in card.get("evidence_terms", [])),
+            " ".join(str(item) for item in card.get("code_terms", [])),
+        ]
+    )
+    return evidence_index.EvidenceRow(
+        evidence_id=f"semantic:{evidence_id}",
+        kind="semantic",
+        title=str(card.get("title") or evidence_id),
+        body=body,
+        source_ref=evidence_id,
+        path=str(card.get("link") or evidence_id),
+        capabilities=[str(item) for item in card.get("capabilities", [])],
+        code_refs=code_refs,
+        fingerprint=evidence_fingerprint(card),
+        metadata={"link": card.get("link", ""), "source_links": card.get("source_links", [])},
+    )
+
+
+def shard_insight_to_evidence_row(insight: dict[str, Any], index: int) -> evidence_index.EvidenceRow:
+    evidence_id = str(insight.get("id") or f"shard-insight-{index}")
+    return evidence_index.EvidenceRow(
+        evidence_id=f"shard:{evidence_id}",
+        kind="shard",
+        title=str(insight.get("theme") or "Shard Insight"),
+        body="\n".join([str(insight.get("summary") or ""), str(insight.get("output_rationale") or "")]),
+        source_ref=evidence_id,
+        path=str(insight.get("source_shard_note") or evidence_id),
+        capabilities=[str(item) for item in insight.get("capabilities", [])],
+        code_refs=[str(item) for item in insight.get("code_surfaces", [])],
+        fingerprint=evidence_fingerprint(insight),
+        metadata={"evidence_ids": insight.get("evidence_ids", [])},
+    )
+
+
+def packet_to_evidence_row(packet: dict[str, Any]) -> evidence_index.EvidenceRow:
+    code_refs = [
+        str(link).replace("[[Code - ", "").replace("]]", "")
+        for link in packet.get("code_reference_links", [])
+        if str(link).strip()
+    ]
+    capabilities = [str(packet.get("capability_key"))] if packet.get("capability_key") else []
+    return evidence_index.EvidenceRow(
+        evidence_id=f"packet:{packet.get('stem') or packet.get('title')}",
+        kind="packet",
+        title=str(packet.get("title") or "Intermediate Packet"),
+        body="\n".join(
+            [
+                str(packet.get("title") or ""),
+                " ".join(packet.get("support_links", [])),
+                " ".join(packet.get("wiki_links", [])),
+                " ".join(packet.get("conflict_links", [])),
+                " ".join(packet.get("shard_insight_links", [])),
+            ]
+        ),
+        source_ref=str(packet.get("link") or packet.get("stem") or ""),
+        path=str(packet.get("link") or packet.get("stem") or ""),
+        capabilities=capabilities,
+        code_refs=code_refs,
+        fingerprint=evidence_fingerprint(packet),
+        metadata={"packet_kind": packet.get("packet_kind", ""), "evidence_score": packet.get("evidence_score", 0)},
+    )
+
+
+def output_candidate_to_evidence_row(record: dict[str, Any]) -> evidence_index.EvidenceRow:
+    return evidence_index.EvidenceRow(
+        evidence_id=f"output:{record.get('stem') or record.get('title')}",
+        kind="output",
+        title=str(record.get("title") or "Output Candidate"),
+        body="\n".join([str(record.get("title") or ""), str(record.get("source_packet") or ""), str(record.get("output_kind") or "")]),
+        source_ref=str(record.get("source_packet") or record.get("link") or ""),
+        path=str(record.get("link") or record.get("stem") or ""),
+        capabilities=[],
+        code_refs=[],
+        fingerprint=evidence_fingerprint(record),
+        metadata={"output_kind": record.get("output_kind", ""), "evidence_score": record.get("evidence_score", 0)},
+    )
+
+
+def generated_note_manifest_rows(manifest_path: Path) -> list[evidence_index.EvidenceRow]:
+    if not manifest_path.exists():
+        return []
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    rows: list[evidence_index.EvidenceRow] = []
+    for key, entry in sorted((manifest.get("entries") or {}).items()):
+        path = str(entry.get("path") or key)
+        title = Path(path).stem
+        rows.append(
+            evidence_index.EvidenceRow(
+                evidence_id=f"generated-note:{path}",
+                kind="generated-note",
+                title=title,
+                body=" ".join([title, str(entry.get("cache_namespace") or ""), str(entry.get("cache_key") or "")]),
+                source_ref=path,
+                path=path,
+                capabilities=[],
+                code_refs=[],
+                fingerprint=str(entry.get("body_sha256") or evidence_fingerprint(entry)),
+                metadata={
+                    "cache_namespace": entry.get("cache_namespace", ""),
+                    "cache_key": entry.get("cache_key", ""),
+                    "generated": entry.get("generated", False),
+                },
+            )
+        )
+    return rows
+
+
+def slow_stage_recommendations(timings: dict[str, Any], cache_stats: dict[str, Any]) -> list[str]:
+    stages = timings.get("stages") if isinstance(timings.get("stages"), dict) else {}
+    recommendations: list[str] = []
+    if stages:
+        slowest_name, slowest = max(stages.items(), key=lambda item: float(item[1].get("seconds", 0.0) or 0.0))
+        seconds = float(slowest.get("seconds", 0.0) or 0.0)
+        if seconds > 0:
+            recommendations.append(f"Slowest stage is {slowest_name} at {seconds:.4f}s; tune the worker knobs or inspect that stage first.")
+    hits = int(cache_stats.get("hits", 0) or 0)
+    misses = int(cache_stats.get("misses", 0) or 0)
+    if hits + misses and hits < misses:
+        recommendations.append("Warm cache hit ratio is below 50%; preserve inventories and cache files between runs before raising workers.")
+    rate_summary = timings.get("rate_limit_summary") if isinstance(timings.get("rate_limit_summary"), dict) else {}
+    if float(rate_summary.get("total_wait_seconds", 0) or 0) > 0:
+        recommendations.append("Rate-limit waits were recorded; raise concurrency gradually or lower OpenAI/source fetch worker counts.")
+    return recommendations
 
 
 def record_timing(timings: dict[str, Any], stage: str, started: float, **metadata: Any) -> None:
@@ -469,9 +718,10 @@ def note_code_hits(
     capabilities: list[str],
     capability_code_hits: dict[str, list[dict[str, Any]]],
     limit: int = 8,
+    retrieval_index_path: Path | None = None,
+    retrieval_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     del repo_roots
-    del repo_names
     keywords = note_code_search_keywords(signals, capabilities)
     fallback_hits: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -482,7 +732,88 @@ def note_code_hits(
                 continue
             seen.add(key)
             fallback_hits.append(hit)
-    return rank_code_hits_for_keywords(fallback_hits, keywords, limit=limit)
+    ranked_fallback = rank_code_hits_for_keywords(fallback_hits, keywords, limit=max(limit, len(fallback_hits)))
+    if retrieval_index_path and retrieval_config and retrieval_config.get("enabled", True):
+        return retrieval_ranked_code_hits(
+            index_path=retrieval_index_path,
+            query=" ".join(keywords),
+            fallback_hits=ranked_fallback,
+            limit=limit,
+            min_score=float(retrieval_config.get("min_score", 0.0) or 0.0),
+            repo_names=repo_names,
+        )
+    return prune_code_hits(ranked_fallback, limit)
+
+
+def retrieval_ranked_code_hits(
+    *,
+    index_path: Path,
+    query: str,
+    fallback_hits: list[dict[str, Any]],
+    limit: int = 8,
+    min_score: float = 0.0,
+    repo_names: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    if not index_path.exists():
+        return fallback_hits[:limit]
+    allowed_repos = set(repo_names or [])
+    fallback_by_key = {
+        (str(hit.get("repo", "")), str(hit.get("relative_path", ""))): hit
+        for hit in fallback_hits
+    }
+    ranked: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    try:
+        results = evidence_index.search(index_path, query, limit=max(limit * 3, 12), kinds=["code"], min_score=min_score)
+    except (OSError, RuntimeError, sqlite3.Error) as exc:
+        del exc
+        return fallback_hits[:limit]
+    for result in results:
+        metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+        repo = str(metadata.get("repo") or "").strip()
+        relative_path = str(metadata.get("relative_path") or "").strip()
+        if not repo or not relative_path:
+            source_ref = str(result.get("source_ref") or "")
+            if "/" in source_ref:
+                repo, relative_path = source_ref.split("/", 1)
+        if not repo or not relative_path:
+            continue
+        if allowed_repos and repo not in allowed_repos:
+            continue
+        key = (repo, relative_path)
+        if key in seen:
+            continue
+        absolute_path = str(metadata.get("absolute_path") or fallback_by_key.get(key, {}).get("absolute_path") or "")
+        if not absolute_path:
+            continue
+        seen.add(key)
+        fallback = dict(fallback_by_key.get(key, {}))
+        sample = str(result.get("body") or "")[:240]
+        ranked.append(
+            {
+                **fallback,
+                "repo": repo,
+                "relative_path": relative_path,
+                "absolute_path": absolute_path,
+                "sample": fallback.get("sample") or sample,
+                "score": int(fallback.get("score", 0) or 0) + max(1, int(float(result.get("score", 0.0) or 0.0) * 1000000)),
+                "retrieval_score": result.get("score", 0.0),
+                "retrieval_source": "sqlite-fts",
+            }
+        )
+        if len(ranked) >= limit:
+            break
+    for hit in fallback_hits:
+        key = (str(hit.get("repo", "")), str(hit.get("relative_path", "")))
+        if key in seen:
+            continue
+        if allowed_repos and key[0] not in allowed_repos:
+            continue
+        ranked.append(hit)
+        seen.add(key)
+        if len(ranked) >= limit:
+            break
+    return prune_code_hits(ranked, limit)
 
 
 def support_article_id_from_url(url: str) -> str | None:
@@ -3533,6 +3864,7 @@ def main() -> None:
     workspace_path = Path(str(manifest.get("product", {}).get("workspace_path") or paths.mirror.parent)).expanduser()
     repo_roots = repo_lookup(manifest)
     generation_config = profile["generation_performance"]
+    retrieval_config = profile["retrieval_index"]
     rate_limit_config = profile["rate_limits"]
     existing_rate_inventory = rate_limits.load_rate_limit_inventory(paths.json_dir / "rate_limit_events.json")
     rate_limiter = rate_limits.WindowRateLimiter(
@@ -3544,6 +3876,7 @@ def main() -> None:
     timings: dict[str, Any] = {
         "generated_at": DATE,
         "generation_performance": generation_config,
+        "retrieval_index": retrieval_config,
         "rate_limits": rate_limit_config,
         "force": bool(args.force),
     }
@@ -3763,12 +4096,64 @@ def main() -> None:
 
     repo_links = [note_link(stem_for_repo(snapshot["name"])) for snapshot in repo_snapshots]
 
+    evidence_index_path = paths.json_dir / "evidence_index.sqlite"
+    evidence_manifest_path = paths.json_dir / "evidence_index_manifest.json"
+    changed_scope_path = paths.json_dir / "changed_scope_report.json"
+    previous_evidence_rows = evidence_index.load_rows(evidence_index_path) if evidence_index_path.exists() else []
+    base_evidence_rows = [
+        *(source_record_to_evidence_row("support", record) for record in support_records),
+        *(source_record_to_evidence_row("wiki", record) for record in wiki_records),
+        *(code_file_to_evidence_row(item) for item in code_intel.get("files", [])),
+    ]
+    if retrieval_config.get("enabled", True):
+        retrieval_started = time.perf_counter()
+        evidence_index_stats = evidence_index.rebuild_index(
+            evidence_index_path,
+            base_evidence_rows,
+            manifest_path=evidence_manifest_path,
+            delete_stale=False,
+        )
+        record_timing(
+            timings,
+            "evidence_index",
+            retrieval_started,
+            indexed_rows=evidence_index_stats.get("indexed_rows", 0),
+            deleted_rows=evidence_index_stats.get("deleted_rows", 0),
+            phase="base",
+        )
+    else:
+        evidence_index_stats = {
+            "enabled": False,
+            "indexed_rows": 0,
+            "deleted_rows": 0,
+            "index_path": str(evidence_index_path),
+        }
+    changed_scope_report = evidence_index.changed_scope_report(
+        previous_evidence_rows,
+        base_evidence_rows,
+        force=bool(args.force or not generation_config.get("changed_scope_rebuild", True)),
+    )
+    if not generation_config.get("changed_scope_rebuild", True):
+        changed_scope_report["changed_scope_rebuild"] = False
+    evidence_index.write_changed_scope_report(changed_scope_path, changed_scope_report)
+
     code_hits_by_cap: dict[str, list[dict[str, Any]]] = {}
     for capability in CAPABILITIES:
-        code_hits_by_cap[capability["key"]] = prune_code_hits(
+        fallback_hits = prune_code_hits(
             rg_code_hits(repo_roots, capability["repos"], capability["keywords"], limit=40),
-            24,
+            40,
         )
+        if retrieval_config.get("enabled", True):
+            code_hits_by_cap[capability["key"]] = retrieval_ranked_code_hits(
+                index_path=evidence_index_path,
+                query=" ".join([capability["title"], *capability["keywords"]]),
+                fallback_hits=fallback_hits,
+                limit=24,
+                min_score=float(retrieval_config.get("min_score", 0.0) or 0.0),
+                repo_names=capability["repos"],
+            )
+        else:
+            code_hits_by_cap[capability["key"]] = prune_code_hits(fallback_hits, 24)
 
     repo_caps: dict[str, list[str]] = defaultdict(list)
     for capability in CAPABILITIES:
@@ -3784,6 +4169,8 @@ def main() -> None:
             record["signals"],
             record["capabilities"],
             code_hits_by_cap,
+            retrieval_index_path=evidence_index_path,
+            retrieval_config=retrieval_config,
         )
         record["conflicts"] = detect_note_conflicts(
             text=record["text"],
@@ -3801,6 +4188,8 @@ def main() -> None:
             record["signals"],
             record["capabilities"],
             code_hits_by_cap,
+            retrieval_index_path=evidence_index_path,
+            retrieval_config=retrieval_config,
         )
         record["conflicts"] = detect_note_conflicts(
             text=record["text"],
@@ -4090,6 +4479,7 @@ def main() -> None:
         rate_limit_config=rate_limit_config,
         cache_path=paths.json_dir / "generation_shard_cache.json",
         force=args.force,
+        changed_scope=changed_scope_report,
     )
     record_timing(
         timings,
@@ -4684,6 +5074,39 @@ def main() -> None:
         merged_count=shard_inventory.get("reducer", {}).get("merged_count", 0),
         rejected_count=shard_inventory.get("reducer", {}).get("rejected_count", 0),
     )
+    final_evidence_rows = [
+        *(source_record_to_evidence_row("support", record) for record in support_records),
+        *(source_record_to_evidence_row("wiki", record) for record in wiki_records),
+        *(code_file_to_evidence_row(item) for item in code_intel.get("files", [])),
+        *(semantic_card_to_evidence_row(card) for card in semantic_cards),
+        *(shard_insight_to_evidence_row(insight, index) for index, insight in enumerate(shard_inventory.get("shard_insights", shard_insights))),
+        *(packet_to_evidence_row(packet) for packet in packet_records),
+        *(output_candidate_to_evidence_row(record) for record in output_candidate_records),
+        *generated_note_manifest_rows(generated_notes_manifest_path),
+    ]
+    if retrieval_config.get("enabled", True):
+        final_index_started = time.perf_counter()
+        evidence_index_stats = evidence_index.rebuild_index(
+            evidence_index_path,
+            final_evidence_rows,
+            manifest_path=evidence_manifest_path,
+        )
+        record_timing(
+            timings,
+            "evidence_index_final",
+            final_index_started,
+            indexed_rows=evidence_index_stats.get("indexed_rows", 0),
+            deleted_rows=evidence_index_stats.get("deleted_rows", 0),
+            phase="final",
+        )
+    changed_scope_report = evidence_index.changed_scope_report(
+        previous_evidence_rows,
+        final_evidence_rows,
+        force=bool(args.force or not generation_config.get("changed_scope_rebuild", True)),
+    )
+    if not generation_config.get("changed_scope_rebuild", True):
+        changed_scope_report["changed_scope_rebuild"] = False
+    evidence_index.write_changed_scope_report(changed_scope_path, changed_scope_report)
     progress.record("vault_validation", "running", completed_units=0, total_units=2)
     sanitize_summary = sanitize_vault_notes(paths.vault)
     record_timing(
@@ -4709,6 +5132,7 @@ def main() -> None:
                 "semantic_clustering": semantic_config,
                 "code_intelligence": profile["code_intelligence"],
                 "generation_performance": generation_config,
+                "retrieval_index": retrieval_config,
                 "rate_limits": rate_limit_config,
             }),
             "source_inventories": content_fingerprint({
@@ -4720,7 +5144,7 @@ def main() -> None:
             }),
         },
         "dependency_graph": render_cache.get("dependency_graph", {}) if render_cache is not None else {},
-        "cache_policy": "Per-source, per-code-file, semantic-card, and generated-note entries are reused by content hash; aggregate notes are regenerated with a date-scoped cache key.",
+        "cache_policy": "Per-source, per-code-file, semantic-card, retrieval-index, shard, and generated-note entries are reused by content hash; aggregate notes are regenerated with a date-scoped cache key.",
     }
     if render_cache is not None:
         render_cache.update(cache_metadata)
@@ -4734,6 +5158,8 @@ def main() -> None:
     )
     timings["rate_limit_summary"] = rate_limit_inventory.get("summary", {})
     timings["total_seconds"] = round(sum(item["seconds"] for item in timings.get("stages", {}).values()), 4)
+    rebuild_cache_stats = render_cache.get("stats", {}) if isinstance(render_cache, dict) else {}
+    performance_recommendations = slow_stage_recommendations(timings, rebuild_cache_stats)
     write_json(paths.json_dir / "rebuild_timings.json", timings)
     write_performance_summary(
         paths,
@@ -4743,12 +5169,29 @@ def main() -> None:
                 "force": bool(args.force),
                 "code_intelligence": code_intel.get("summary", {}),
                 "semantic_stats": semantic_result.get("stats", {}),
+                "retrieval_index": {
+                    **evidence_index_stats,
+                    "config": retrieval_config,
+                    "manifest_path": str(evidence_manifest_path),
+                },
+                "changed_scope": {
+                    "report_path": str(changed_scope_path),
+                    "changed_counts": changed_scope_report.get("changed_counts", {}),
+                    "impacted_capabilities": changed_scope_report.get("impacted_capabilities", []),
+                    "impacted_code_refs": changed_scope_report.get("impacted_code_refs", []),
+                },
                 "generation_shards": {
                     "cache_hits": shard_inventory.get("cache_hits", 0),
                     "cache_misses": shard_inventory.get("cache_misses", 0),
                     "status_counts": shard_inventory.get("status_counts", {}),
                 },
                 "note_rendering": rendered_note_stats,
+                "cache_hit_ratio": round(
+                    int(rebuild_cache_stats.get("hits", 0) or 0)
+                    / max(1, int(rebuild_cache_stats.get("hits", 0) or 0) + int(rebuild_cache_stats.get("misses", 0) or 0)),
+                    4,
+                ),
+                "recommendations": performance_recommendations,
                 "rate_limit_summary": rate_limit_inventory.get("summary", {}),
                 "timings_path": str(paths.json_dir / "rebuild_timings.json"),
             }
@@ -4787,6 +5230,8 @@ def main() -> None:
                 "code_intelligence": code_intel.get("summary", {}),
                 "semantic_clusters": len(semantic_result.get("clusters", [])),
                 "semantic_stats": semantic_result.get("stats", {}),
+                "retrieval_index": evidence_index_stats,
+                "changed_scope_report": str(changed_scope_path),
                 "generation_performance": generation_config,
                 "rebuild_timings": str(paths.json_dir / "rebuild_timings.json"),
                 "vault": str(paths.vault),
