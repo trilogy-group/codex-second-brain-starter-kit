@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -82,6 +83,37 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(stale_results, [])
         self.assertEqual(manifest["schema_version"], 1)
         self.assertEqual(manifest["row_count"], 1)
+
+    def test_evidence_index_redacts_sensitive_text_before_upsert(self) -> None:
+        evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_sensitive_text_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            index_path = Path(tmp_dir) / "evidence_index.sqlite"
+            rows = [
+                evidence_index.EvidenceRow(
+                    evidence_id="support:secret",
+                    kind="support",
+                    title="Credentialed runbook",
+                    body=(
+                        "Fetch https://gitlab+deploy-token-20:secret@gitlab.acme.test/repo.git "
+                        "and rotate sk-proj-testtoken_1234567890abcdef."
+                    ),
+                    source_ref="support@example.com",
+                    path="support/secret.md",
+                    capabilities=["identity"],
+                    code_refs=[],
+                )
+            ]
+
+            evidence_index.rebuild_index(index_path, rows)
+            with sqlite3.connect(index_path) as connection:
+                body, source_ref = connection.execute("SELECT body, source_ref FROM evidence").fetchone()
+
+        self.assertNotIn("gitlab+deploy-token-20:secret@", body)
+        self.assertNotIn("sk-proj-testtoken_1234567890abcdef", body)
+        self.assertNotIn("support@example.com", source_ref)
+        self.assertIn("[REDACTED_CREDENTIALS]@", body)
+        self.assertIn("[REDACTED_API_KEY]", body)
+        self.assertIn("[REDACTED_EMAIL]", source_ref)
 
     def test_evidence_index_changed_scope_marks_added_modified_deleted_and_force(self) -> None:
         evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_changed_scope_test")
@@ -478,6 +510,35 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(second.value, "second")
         self.assertEqual(cache["stats"]["invalidations"]["note_render.support"], 1)
         self.assertIn("note_render.support:support-a", cache["dependency_graph"])
+
+    def test_incremental_cache_write_redacts_sensitive_strings(self) -> None:
+        cache_module = load_module(INCREMENTAL_CACHE_SCRIPT, "incremental_cache_sensitive_write_test")
+        cache = cache_module.empty_incremental_cache()
+        cache_module.get_or_build(
+            cache,
+            "support",
+            "credentialed-note",
+            {"value": 1},
+            lambda: {
+                "body": (
+                    "Contact support@example.com, fetch "
+                    "https://gitlab+deploy-token-20:secret@gitlab.acme.test/repo.git, "
+                    "and rotate sk-proj-testtoken_1234567890abcdef."
+                )
+            },
+        )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cache_path = Path(tmp_dir) / "rebuild_cache.json"
+            cache_module.write_incremental_cache(cache_path, cache)
+            payload = cache_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("support@example.com", payload)
+        self.assertNotIn("gitlab+deploy-token-20:secret@", payload)
+        self.assertNotIn("sk-proj-testtoken_1234567890abcdef", payload)
+        self.assertIn("[REDACTED_EMAIL]", payload)
+        self.assertIn("[REDACTED_CREDENTIALS]@", payload)
+        self.assertIn("[REDACTED_API_KEY]", payload)
 
     def test_rate_limiter_records_backpressure_waits(self) -> None:
         rate_module = load_module(RATE_LIMITS_SCRIPT, "rate_limits_wait_test")

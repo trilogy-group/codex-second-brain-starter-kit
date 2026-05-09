@@ -6,10 +6,17 @@ import json
 import os
 import re
 import sqlite3
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import sanitize_vault_privacy
 
 
 EVIDENCE_INDEX_SCHEMA_VERSION = 1
@@ -29,6 +36,20 @@ RETRIEVAL_ENV_OVERRIDES = {
 }
 
 
+def _sanitize_text(value: Any) -> str:
+    return sanitize_vault_privacy.sanitize_markdown_text(str(value), set())
+
+
+def _sanitize_metadata(value: Any) -> Any:
+    if isinstance(value, str):
+        return _sanitize_text(value)
+    if isinstance(value, list):
+        return [_sanitize_metadata(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_metadata(item) for key, item in value.items()}
+    return value
+
+
 @dataclass(frozen=True)
 class EvidenceRow:
     evidence_id: str
@@ -43,17 +64,21 @@ class EvidenceRow:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def normalized(self) -> "EvidenceRow":
-        capabilities = sorted({str(item) for item in self.capabilities if str(item).strip()})
-        code_refs = sorted({str(item) for item in self.code_refs if str(item).strip()})
-        metadata = json.loads(json.dumps(self.metadata, sort_keys=True, default=str))
+        title = _sanitize_text(self.title)
+        body = _sanitize_text(self.body)
+        source_ref = _sanitize_text(self.source_ref)
+        path = _sanitize_text(self.path)
+        capabilities = sorted({_sanitize_text(item) for item in self.capabilities if str(item).strip()})
+        code_refs = sorted({_sanitize_text(item) for item in self.code_refs if str(item).strip()})
+        metadata = json.loads(json.dumps(_sanitize_metadata(self.metadata), sort_keys=True, default=str))
         fingerprint = self.fingerprint or row_content_hash(
             {
                 "evidence_id": self.evidence_id,
                 "kind": self.kind,
-                "title": self.title,
-                "body": self.body,
-                "source_ref": self.source_ref,
-                "path": self.path,
+                "title": title,
+                "body": body,
+                "source_ref": source_ref,
+                "path": path,
                 "capabilities": capabilities,
                 "code_refs": code_refs,
                 "metadata": metadata,
@@ -62,10 +87,10 @@ class EvidenceRow:
         return EvidenceRow(
             evidence_id=str(self.evidence_id),
             kind=str(self.kind),
-            title=str(self.title),
-            body=str(self.body),
-            source_ref=str(self.source_ref),
-            path=str(self.path),
+            title=title,
+            body=body,
+            source_ref=source_ref,
+            path=path,
             capabilities=capabilities,
             code_refs=code_refs,
             fingerprint=fingerprint,

@@ -117,6 +117,8 @@ Keep these paths stable between runs:
 - the repository clone paths listed in the manifest
 - generated cache files such as `source_extract_cache.json`, `source_index_cache.json`, `rebuild_cache.json`, `embedding_cache.json`, `llm_cluster_cache.json`, `semantic_result_cache.json`, `generation_shard_cache.json`, and `generated_notes_manifest.json`
 
+Treat those paths as local product-evidence caches. They make warm rebuilds much faster, but they should not be committed or copied to shared storage unless your team explicitly wants the underlying source evidence there. The generated Markdown, rebuild cache, and SQLite evidence index redact credentialed URL userinfo, OpenAI-style API keys, private IPs, and email addresses before writing reusable artifacts; if real credentials were present in source material, rotate them and rerun with `--force` so every cache and index is rebuilt from sanitized inputs.
+
 Tune workers in `profile.intelligence_path` gradually. Start from the defaults, raise one knob at a time, and watch `source_index_timings.json`, `rebuild_timings.json`, `performance_summary.json`, and `rate_limit_events.json` before increasing concurrency again.
 
 ```yaml

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from http.client import InvalidURL
 from pathlib import Path
 from unittest import mock
 from urllib.error import URLError
@@ -210,6 +211,19 @@ class GenericToolingTests(unittest.TestCase):
         self.assertIsNone(module.sanitize_url("https://hubname.acme.test/join/starter?lang=fr"))
         self.assertIsNone(module.sanitize_url("https://yourhub.acme.test/join/starter"))
 
+    def test_malformed_urls_are_skipped_during_sanitization(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_malformed_url_test")
+
+        self.assertIsNone(module.sanitize_url("https://[broken-host.example.test/path"))
+
+    def test_credentialed_urls_are_redacted_before_inventory(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_credentialed_url_test")
+
+        sanitized = module.sanitize_url("https://oauth2:secret-token@gitlab.acme.test/group/project/-/issues/1")
+
+        self.assertEqual(sanitized, "https://gitlab.acme.test/group/project/-/issues/1")
+        self.assertNotIn("secret-token", sanitized)
+
     def test_non_latin1_urls_are_blocked_without_fetching(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_non_latin1_url_test")
 
@@ -225,6 +239,26 @@ class GenericToolingTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertIn("non-Latin-1", result["error"])
         mocked_urlopen.assert_not_called()
+
+    def test_invalid_fetch_urls_are_blocked_without_secret_leakage(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_invalid_url_test")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(
+                module,
+                "urlopen",
+                side_effect=InvalidURL("nonnumeric port: 'secret-token@gitlab.example.com'"),
+            ):
+                result = module.fetch_url(
+                    "https://gitlab.example.com/group/project",
+                    ["50121-article.md"],
+                    Path(tmp_dir),
+                    {"stale_doc_hosts": set()},
+                )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("Invalid URL", result["error"])
+        self.assertNotIn("secret-token", result["error"])
 
     def test_fetch_url_uses_verified_ssl_context(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_ssl_context_test")

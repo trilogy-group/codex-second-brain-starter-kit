@@ -3,9 +3,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import sanitize_vault_privacy
 
 
 SCHEMA_VERSION = 1
@@ -34,6 +41,16 @@ def empty_incremental_cache() -> dict[str, Any]:
             "invalidations": {},
         },
     }
+
+
+def _sanitize_cache_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        return sanitize_vault_privacy.sanitize_markdown_text(value, set())
+    if isinstance(value, list):
+        return [_sanitize_cache_payload(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sanitize_cache_payload(item) for key, item in value.items()}
+    return value
 
 
 def load_incremental_cache(path: Path) -> dict[str, Any]:
@@ -67,7 +84,8 @@ def write_incremental_cache(path: Path, cache: dict[str, Any]) -> None:
     cache.setdefault("entries", {})
     cache.setdefault("dependency_graph", {})
     cache.setdefault("stats", {"hits": 0, "misses": 0, "skipped_stages": {}})
-    path.write_text(json.dumps(cache, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    safe_cache = _sanitize_cache_payload(cache)
+    path.write_text(json.dumps(safe_cache, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
 
 
 def reset_stats(cache: dict[str, Any]) -> None:

@@ -16,6 +16,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date
 from html import unescape
+from http.client import InvalidURL
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -201,10 +202,21 @@ def title_from_text(text: str, fallback: str) -> str:
     return fallback
 
 
+def redact_url_credentials(url: str) -> str:
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return url
+    if "@" not in parsed.netloc:
+        return url
+    return parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[1]).geturl()
+
+
 def sanitize_url(raw_url: str) -> str | None:
     url = raw_url.strip().rstrip(TRAILING_CHARS)
     if not url.startswith(("http://", "https://")):
         return None
+    url = redact_url_credentials(url)
     if any(part in url.lower() for part in PLACEHOLDER_PARTS):
         return None
     if " " in url or "\n" in url or "`" in url:
@@ -641,6 +653,7 @@ def classify_special_url(url: str, settings: dict[str, Any]) -> str | None:
 
 
 def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[str, Any]) -> dict[str, Any]:
+    url = redact_url_credentials(url)
     special = classify_special_url(url, settings)
     parsed_url = urlparse(url)
     domain = (parsed_url.hostname or parsed_url.netloc).lower()
@@ -675,7 +688,12 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
                 request_headers["If-None-Match"] = str(headers_for_url["etag"])
             if headers_for_url.get("last_modified"):
                 request_headers["If-Modified-Since"] = str(headers_for_url["last_modified"])
-    request = Request(url, headers=request_headers)
+    try:
+        request = Request(url, headers=request_headers)
+    except (InvalidURL, ValueError):
+        record["status"] = "blocked"
+        record["error"] = "Invalid URL could not be fetched safely"
+        return record
     for attempt in range(1, FETCH_RETRY_ATTEMPTS + 1):
         try:
             with urlopen(request, timeout=8, context=default_ssl_context()) as response:
@@ -712,6 +730,11 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
             record["transient_error"] = True
             record["retry_count"] = attempt
             record["error"] = str(exc.reason)
+            return record
+        except (InvalidURL, ValueError):
+            record["status"] = "blocked"
+            record["retry_count"] = attempt
+            record["error"] = "Invalid URL could not be fetched safely"
             return record
 
     try:

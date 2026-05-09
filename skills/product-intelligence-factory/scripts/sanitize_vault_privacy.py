@@ -9,6 +9,7 @@ from pathlib import Path
 
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s@]+)@")
+API_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
 PRIVATE_IP_RE = re.compile(
     r"\b(?:10(?:\.\d{1,3}){3}|172\.(?:1[6-9]|2\d|3[0-1])(?:\.\d{1,3}){2}|192\.168(?:\.\d{1,3}){2})\b"
 )
@@ -63,6 +64,7 @@ def detect_likely_person_names(markdown_paths: list[Path]) -> set[str]:
 def sanitize_markdown_text(text: str, person_names: set[str]) -> str:
     sanitized = text
     sanitized = URL_CREDENTIAL_RE.sub(r"\1[REDACTED_CREDENTIALS]@", sanitized)
+    sanitized = API_KEY_RE.sub("[REDACTED_API_KEY]", sanitized)
     sanitized = EMAIL_RE.sub("[REDACTED_EMAIL]", sanitized)
     sanitized = PRIVATE_IP_RE.sub("[REDACTED_PRIVATE_IP]", sanitized)
     for name in sorted(person_names, key=len, reverse=True):

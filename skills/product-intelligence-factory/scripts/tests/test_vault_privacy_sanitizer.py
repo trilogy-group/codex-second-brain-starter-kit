@@ -27,6 +27,7 @@ class VaultPrivacySanitizerTests(unittest.TestCase):
             [
                 "- Contact support@example.com or alice@customer.example",
                 "- Use https://gitlab+deploy-token-20:secret@gitlab.example.com/repo.git",
+                "- API key sk-proj-testtoken_1234567890abcdef should not be retained",
                 "- Internal host 10.241.126.160 should stay private",
                 "## Priyanka Bhotika",
             ]
@@ -37,10 +38,12 @@ class VaultPrivacySanitizerTests(unittest.TestCase):
         self.assertNotIn("support@example.com", sanitized)
         self.assertNotIn("alice@customer.example", sanitized)
         self.assertNotIn("gitlab+deploy-token-20:secret@", sanitized)
+        self.assertNotIn("sk-proj-testtoken_1234567890abcdef", sanitized)
         self.assertNotIn("10.241.126.160", sanitized)
         self.assertNotIn("Priyanka Bhotika", sanitized)
         self.assertIn("[REDACTED_EMAIL]", sanitized)
         self.assertIn("[REDACTED_CREDENTIALS]@", sanitized)
+        self.assertIn("[REDACTED_API_KEY]", sanitized)
         self.assertIn("[REDACTED_PRIVATE_IP]", sanitized)
         self.assertIn("[REDACTED_PERSON]", sanitized)
 
