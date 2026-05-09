@@ -15,7 +15,6 @@ from urllib.error import HTTPError
 
 
 OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
-OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 LLM_SYNTHESIS_PROMPT_VERSION = "product-basb-cluster-synthesis-v1"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -24,6 +23,21 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import generation_performance
 import rate_limits
+import openai_responses
+
+
+SEMANTIC_ENV_OVERRIDES = {
+    "llm_model": ("PRODUCT_BASB_LLM_MODEL", "TYLER_SECOND_BRAIN_LLM_MODEL"),
+    "reasoning_effort": ("PRODUCT_BASB_LLM_REASONING_EFFORT", "TYLER_SECOND_BRAIN_LLM_REASONING_EFFORT"),
+}
+
+
+def _semantic_value(configured: dict[str, Any], field: str, default: Any) -> Any:
+    for env_name in SEMANTIC_ENV_OVERRIDES.get(field, ()):
+        value = os.environ.get(env_name)
+        if value not in (None, ""):
+            return value
+    return configured.get(field, default)
 
 
 def _response_headers(response: Any) -> dict[str, str]:
@@ -62,7 +76,8 @@ def default_semantic_config(profile: dict[str, Any] | None = None) -> dict[str, 
         "min_cluster_size": int(configured.get("min_cluster_size", 3)),
         "similarity_threshold": float(configured.get("similarity_threshold", 0.78)),
         "max_clusters": int(configured.get("max_clusters", 40)),
-        "llm_model": configured.get("llm_model", "gpt-4.1-mini"),
+        "llm_model": _semantic_value(configured, "llm_model", openai_responses.DEFAULT_REASONING_MODEL),
+        "reasoning_effort": _semantic_value(configured, "reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT),
         "llm_cluster_synthesis": bool(configured.get("llm_cluster_synthesis", True)),
         "max_llm_clusters": int(configured.get("max_llm_clusters", 40)),
         "embedding_workers": generation_config["embedding_workers"],
@@ -128,7 +143,7 @@ class OpenAIEmbeddingClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=600) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 headers = _response_headers(response)
         except HTTPError as exc:
@@ -146,31 +161,23 @@ class OpenAILLMSynthesisClient:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.response_observer = response_observer
 
-    def synthesize_cluster(self, cluster: dict[str, Any], model: str) -> dict[str, Any]:
+    def synthesize_cluster(self, cluster: dict[str, Any], model: str, reasoning_effort: str = openai_responses.DEFAULT_REASONING_EFFORT) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is required for LLM semantic cluster synthesis.")
         payload = json.dumps(
-            {
-                "model": model,
-                "response_format": {"type": "json_object"},
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You name and explain Product BASB intermediate-packet clusters. "
-                            "Return only JSON with keys: theme, summary, why_this_cluster_exists, "
-                            "merge_split_recommendation, output_candidate_rationale, limitations."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": json.dumps(compact_cluster_for_llm(cluster), sort_keys=True),
-                    },
-                ],
-            }
+            openai_responses.build_json_response_payload(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                instructions=(
+                    "You name and explain Product BASB intermediate-packet clusters. "
+                    "Return JSON only with keys: theme, summary, why_this_cluster_exists, "
+                    "merge_split_recommendation, output_candidate_rationale, limitations."
+                ),
+                user_content=json.dumps(compact_cluster_for_llm(cluster), sort_keys=True),
+            )
         ).encode("utf-8")
         request = urllib.request.Request(
-            OPENAI_CHAT_COMPLETIONS_URL,
+            openai_responses.OPENAI_RESPONSES_URL,
             data=payload,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -189,9 +196,7 @@ class OpenAILLMSynthesisClient:
             raise
         if self.response_observer is not None:
             self.response_observer(headers)
-        content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        return parsed if isinstance(parsed, dict) else {}
+        return openai_responses.parse_json_response(data)
 
 
 class FixtureEmbeddingClient:
@@ -219,8 +224,8 @@ class FixtureEmbeddingClient:
 
 
 class FixtureLLMSynthesisClient:
-    def synthesize_cluster(self, cluster: dict[str, Any], model: str) -> dict[str, Any]:
-        del model
+    def synthesize_cluster(self, cluster: dict[str, Any], model: str, reasoning_effort: str = openai_responses.DEFAULT_REASONING_EFFORT) -> dict[str, Any]:
+        del model, reasoning_effort
         theme = cluster.get("theme") or theme_for_cards(cluster.get("cards", []))
         return {
             "theme": f"{theme} Synthesized",
@@ -262,6 +267,7 @@ def semantic_result_cache_key(cards: list[dict[str, Any]], config: dict[str, Any
             "similarity_threshold",
             "max_clusters",
             "llm_model",
+            "reasoning_effort",
             "llm_cluster_synthesis",
             "max_llm_clusters",
         )
@@ -400,12 +406,13 @@ def compact_cluster_for_llm(cluster: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def llm_cache_key(cluster: dict[str, Any], model: str) -> str:
+def llm_cache_key(cluster: dict[str, Any], model: str, reasoning_effort: str) -> str:
     card_ids = sorted(str(card_id) for card_id in cluster.get("card_ids", []))
     raw = json.dumps(
         {
             "prompt_version": LLM_SYNTHESIS_PROMPT_VERSION,
             "model": model,
+            "reasoning_effort": reasoning_effort,
             "card_ids": card_ids,
         },
         sort_keys=True,
@@ -413,7 +420,7 @@ def llm_cache_key(cluster: dict[str, Any], model: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def apply_llm_synthesis(cluster: dict[str, Any], synthesis: dict[str, Any], status: str, model: str) -> dict[str, Any]:
+def apply_llm_synthesis(cluster: dict[str, Any], synthesis: dict[str, Any], status: str, model: str, reasoning_effort: str) -> dict[str, Any]:
     result = dict(cluster)
     if status == "succeeded":
         if synthesis.get("theme"):
@@ -428,6 +435,7 @@ def apply_llm_synthesis(cluster: dict[str, Any], synthesis: dict[str, Any], stat
         result["limitations"] = [str(item) for item in limitations if str(item).strip()] or result.get("limitations", [])
     result["llm_synthesis_status"] = status
     result["llm_model"] = model
+    result["llm_reasoning_effort"] = reasoning_effort
     result["llm_prompt_version"] = LLM_SYNTHESIS_PROMPT_VERSION
     return result
 
@@ -445,11 +453,13 @@ def synthesize_clusters_with_llm(
                 **cluster,
                 "llm_synthesis_status": "disabled",
                 "llm_model": str(config.get("llm_model", "")),
+                "llm_reasoning_effort": str(config.get("reasoning_effort", "")),
                 "llm_prompt_version": LLM_SYNTHESIS_PROMPT_VERSION,
             }
             for cluster in clusters
         ], {"llm_cache_hits": 0, "llm_cache_misses": 0, "llm_failures": 0}
-    model = str(config.get("llm_model", "gpt-4.1-mini"))
+    model = openai_responses.ensure_allowed_synthesis_model(str(config.get("llm_model", openai_responses.DEFAULT_REASONING_MODEL)), field="semantic_clustering.llm_model")
+    reasoning_effort = openai_responses.normalize_reasoning_effort(config.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT))
     max_llm_clusters = int(config.get("max_llm_clusters", 40))
     cache = load_cache(llm_cache_path)
     worker_count = int(config.get("llm_synthesis_workers", 10))
@@ -472,13 +482,13 @@ def synthesize_clusters_with_llm(
     tasks: list[tuple[int, str, dict[str, Any]]] = []
     for index, cluster in enumerate(clusters):
         if index >= max_llm_clusters:
-            synthesized[index] = apply_llm_synthesis(cluster, {}, "skipped-max-clusters", model)
+            synthesized[index] = apply_llm_synthesis(cluster, {}, "skipped-max-clusters", model, reasoning_effort)
             continue
-        key = llm_cache_key(cluster, model)
+        key = llm_cache_key(cluster, model, reasoning_effort)
         cached = cache["items"].get(key)
-        if cached and cached.get("model") == model:
+        if cached and cached.get("model") == model and cached.get("reasoning_effort") == reasoning_effort:
             cache_hits += 1
-            synthesized[index] = apply_llm_synthesis(cluster, cached.get("synthesis", {}), "succeeded", model)
+            synthesized[index] = apply_llm_synthesis(cluster, cached.get("synthesis", {}), "succeeded", model, reasoning_effort)
             continue
         cache_misses += 1
         tasks.append((index, key, cluster))
@@ -504,7 +514,7 @@ def synthesize_clusters_with_llm(
                     tokens=token_count,
                     recommended_knob="llm_synthesis_workers",
                 )
-            synthesis = client.synthesize_cluster(cluster, model)
+            synthesis = client.synthesize_cluster(cluster, model, reasoning_effort)
             return index, key, cluster, synthesis, None
         except Exception as exc:
             return index, key, cluster, None, exc
@@ -515,15 +525,16 @@ def synthesize_clusters_with_llm(
         for index, key, cluster, synthesis, error in sorted(results, key=lambda item: item[0]):
             if error is not None or synthesis is None:
                 failures += 1
-                synthesized[index] = apply_llm_synthesis(cluster, {}, "failed", model)
+                synthesized[index] = apply_llm_synthesis(cluster, {}, "failed", model, reasoning_effort)
                 continue
             cache["items"][key] = {
                 "model": model,
+                "reasoning_effort": reasoning_effort,
                 "prompt_version": LLM_SYNTHESIS_PROMPT_VERSION,
                 "card_ids": sorted(str(card_id) for card_id in cluster.get("card_ids", [])),
                 "synthesis": synthesis,
             }
-            synthesized[index] = apply_llm_synthesis(cluster, synthesis, "succeeded", model)
+            synthesized[index] = apply_llm_synthesis(cluster, synthesis, "succeeded", model, reasoning_effort)
     write_cache(llm_cache_path, cache)
     return [item for item in synthesized if item is not None], {"llm_cache_hits": cache_hits, "llm_cache_misses": cache_misses, "llm_failures": failures}
 

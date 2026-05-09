@@ -4,7 +4,8 @@ semantic_clustering:
   min_cluster_size: 3
   similarity_threshold: 0.78
   max_clusters: 40
-  llm_model: gpt-4.1-mini
+  llm_model: gpt-5.5
+  reasoning_effort: xhigh
   llm_cluster_synthesis: true
   max_llm_clusters: 40
 code_intelligence:
@@ -35,7 +36,8 @@ generation_performance:
     max_concurrent_shards: 6
     timeout_seconds: 1800
     worker_mode: llm-synthesis
-    shard_model: gpt-4.1-mini
+    shard_model: gpt-5.5
+    reasoning_effort: xhigh
     max_cards_per_shard: 80
 rate_limits:
   openai_requests_per_minute: 3000

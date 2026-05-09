@@ -234,9 +234,9 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def synthesize_cluster(self, cluster: dict, model: str) -> dict:
+            def synthesize_cluster(self, cluster: dict, model: str, reasoning_effort: str = "xhigh") -> dict:
                 self.calls += 1
-                return super().synthesize_cluster(cluster, model)
+                return super().synthesize_cluster(cluster, model, reasoning_effort)
 
         cards = [
             {"id": "support-1", "kind": "support", "title": "Login failure", "summary": "Session token expires", "capabilities": ["Identity"], "evidence_terms": ["auth"], "code_terms": ["session"]},
@@ -351,6 +351,38 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(inventory["max_concurrent_shards"], 6)
         self.assertLessEqual(max_active, 6)
         self.assertTrue(all(item["status"] == "succeeded" for item in inventory["shards"]))
+
+    def test_shard_payload_accepts_single_note_object(self) -> None:
+        shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_single_note_payload_test")
+
+        notes, evidence_cards, shard_insights = shards._validate_shard_payload(
+            {
+                "notes": {
+                    "title": "Identity Synthesis",
+                    "summary": "Single-note GPT-5.5 response.",
+                    "highlights": ["One"],
+                    "distilled_takeaways": ["Two"],
+                    "executive_use": ["Use this for planning."],
+                    "can_feed": ["Output Pipeline"],
+                    "evidence_ids": ["card-1"],
+                },
+                "evidence_cards": [{"id": "card-1"}],
+                "shard_insights": [
+                    {
+                        "theme": "Identity",
+                        "summary": "Identity evidence.",
+                        "evidence_ids": ["card-1"],
+                        "code_surfaces": [],
+                        "output_rationale": "Promote.",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0]["title"], "Identity Synthesis")
+        self.assertEqual(evidence_cards, [{"id": "card-1"}])
+        self.assertEqual(shard_insights[0]["theme"], "Identity")
 
     def test_reducer_rejects_duplicate_stems_bad_frontmatter_bad_links_and_user_overwrites(self) -> None:
         shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_reducer_test")
@@ -596,55 +628,67 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             def read(self) -> bytes:
                 return json.dumps(self.payload).encode("utf-8")
 
+        response_payloads: list[dict[str, object]] = []
+
         def fake_urlopen(request, timeout):
             del timeout
             body = json.loads(request.data.decode("utf-8"))
             if str(request.full_url).endswith("/embeddings"):
                 return FakeResponse({"data": [{"index": 0, "embedding": [1.0, 0.0]}]})
-            if any("Product BASB shard worker" in message.get("content", "") for message in body.get("messages", [])):
+            response_payloads.append(body)
+            input_text = "\n".join(str(message.get("content", "")) for message in body.get("input", []))
+            if "Product BASB shard worker" in input_text:
                 return FakeResponse(
                     {
-                        "choices": [
+                        "output": [
                             {
-                                "message": {
-                                    "content": json.dumps(
-                                        {
-                                            "notes": [
-                                                {
-                                                    "title": "Shard",
-                                                    "summary": "Shard summary.",
-                                                    "highlights": ["One"],
-                                                    "distilled_takeaways": ["Two"],
-                                                    "executive_use": "Use.",
-                                                    "can_feed": ["Output Pipeline"],
-                                                    "evidence_ids": ["card-1"],
-                                                }
-                                            ],
-                                            "evidence_cards": [],
-                                            "shard_insights": [],
-                                        }
-                                    )
-                                }
+                                "type": "message",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": json.dumps(
+                                            {
+                                                "notes": [
+                                                    {
+                                                        "title": "Shard",
+                                                        "summary": "Shard summary.",
+                                                        "highlights": ["One"],
+                                                        "distilled_takeaways": ["Two"],
+                                                        "executive_use": "Use.",
+                                                        "can_feed": ["Output Pipeline"],
+                                                        "evidence_ids": ["card-1"],
+                                                    }
+                                                ],
+                                                "evidence_cards": [],
+                                                "shard_insights": [],
+                                            }
+                                        ),
+                                    }
+                                ],
                             }
                         ]
                     }
                 )
             return FakeResponse(
                 {
-                    "choices": [
+                    "output": [
                         {
-                            "message": {
-                                "content": json.dumps(
-                                    {
-                                        "theme": "Observed",
-                                        "summary": "Observed summary.",
-                                        "why_this_cluster_exists": "Headers were observed.",
-                                        "merge_split_recommendation": "Keep.",
-                                        "output_candidate_rationale": "Use.",
-                                        "limitations": [],
-                                    }
-                                )
-                            }
+                            "type": "message",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": json.dumps(
+                                        {
+                                            "theme": "Observed",
+                                            "summary": "Observed summary.",
+                                            "why_this_cluster_exists": "Headers were observed.",
+                                            "merge_split_recommendation": "Keep.",
+                                            "output_candidate_rationale": "Use.",
+                                            "limitations": [],
+                                        }
+                                    ),
+                                }
+                            ],
                         }
                     ]
                 }
@@ -667,7 +711,8 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
                 "embedding_model": "text-embedding-3-small",
                 "embedding_batch_size": 512,
                 "embedding_workers": 8,
-                "llm_model": "gpt-4.1-mini",
+                "llm_model": "gpt-5.5",
+                "reasoning_effort": "xhigh",
                 "llm_synthesis_workers": 10,
                 "retry_attempts": 1,
                 "retry_base_seconds": 0.01,
@@ -676,7 +721,8 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             shard_spec = {
                 "id": "shard-01",
                 "kind": "support-evidence",
-                "model": "gpt-4.1-mini",
+                "model": "gpt-5.5",
+                "reasoning_effort": "xhigh",
                 "cards": cards,
                 "input_card_count": 1,
                 "max_concurrent_shards": 6,
@@ -709,6 +755,8 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
                 )
 
         observed_events = [event for event in recorder.events() if event["event"] == "provider_limits_observed"]
+        self.assertEqual([payload["model"] for payload in response_payloads], ["gpt-5.5", "gpt-5.5"])
+        self.assertEqual([payload["reasoning"]["effort"] for payload in response_payloads], ["xhigh", "xhigh"])
         self.assertEqual(
             [event["stage"] for event in observed_events],
             ["semantic_embedding", "semantic_llm_synthesis", "generation_shards"],
@@ -884,7 +932,8 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
                 "status": "running",
                 "item_count": 2,
                 "worker_mode": "fixture",
-                "model": "gpt-4.1-mini",
+                "model": "gpt-5.5",
+                "reasoning_effort": "xhigh",
                 "cards": [
                     {"id": "card-1", "title": "Branding settings", "kind": "support", "summary": "Branding controls."},
                     {"id": "card-2", "title": "Theme docs", "kind": "wiki", "summary": "Theme implementation."},
@@ -906,8 +955,10 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(result["input_card_count"], 2)
         self.assertEqual(result["output_note_count"], 1)
         self.assertEqual(result["shard_insight_count"], 1)
+        self.assertEqual(result["reasoning_effort"], "xhigh")
         self.assertIn("source: generated", body)
         self.assertIn("basb_stage: distill", body)
+        self.assertIn("llm_reasoning_effort: \"xhigh\"", body)
         self.assertIn("## Distilled Takeaways", body)
 
     def test_shard_insights_are_collected_for_reducer_inputs(self) -> None:

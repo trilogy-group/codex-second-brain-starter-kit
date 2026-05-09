@@ -22,11 +22,11 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import rate_limits
+import openai_responses
 
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
 VALID_SHARD_STATUSES = {"queued", "running", "succeeded", "failed", "rejected", "merged"}
-OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 SHARD_PROMPT_VERSION = "product-basb-shard-agent-v1"
 SHARD_CACHE_SCHEMA_VERSION = 1
 
@@ -83,6 +83,7 @@ def _shard_cache_key(spec: dict[str, Any]) -> str:
                 "kind": spec.get("kind"),
                 "worker_mode": spec.get("worker_mode"),
                 "model": spec.get("model"),
+                "reasoning_effort": spec.get("reasoning_effort"),
                 "cards": spec.get("cards", []),
                 "card_ids": spec.get("card_ids", []),
             },
@@ -192,7 +193,13 @@ def plan_generation_shards(
     max_shards = min(12, int(shard_config["max_shards"]))
     max_cards_per_shard = int(shard_config.get("max_cards_per_shard", 80))
     worker_mode = str(shard_config.get("worker_mode", "llm-synthesis"))
-    shard_model = str(shard_config.get("shard_model", "gpt-4.1-mini"))
+    shard_model = openai_responses.ensure_allowed_synthesis_model(
+        str(shard_config.get("shard_model", openai_responses.DEFAULT_REASONING_MODEL)),
+        field="generation_performance.agent_shards.shard_model",
+    )
+    reasoning_effort = openai_responses.normalize_reasoning_effort(
+        shard_config.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT)
+    )
     source_groups = [
         ("repo-code", _prioritized_items("repo-code", [{"label": name} for name in sorted(repo_names)], changed_scope)),
         ("support-evidence", _prioritized_items("support-evidence", support_records, changed_scope)),
@@ -231,6 +238,7 @@ def plan_generation_shards(
                     "input_card_count": len(cards),
                     "worker_mode": worker_mode,
                     "model": shard_model,
+                    "reasoning_effort": reasoning_effort,
                     "prompt_version": SHARD_PROMPT_VERSION,
                     "writes_final_vault": False,
                 }
@@ -256,40 +264,32 @@ class OpenAIShardClient:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         self.response_observer = response_observer
 
-    def synthesize_shard(self, spec: dict[str, Any], model: str) -> dict[str, Any]:
+    def synthesize_shard(self, spec: dict[str, Any], model: str, reasoning_effort: str = openai_responses.DEFAULT_REASONING_EFFORT) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is required for LLM generation shards.")
         payload = json.dumps(
-            {
-                "model": model,
-                "response_format": {"type": "json_object"},
-                "messages": [
+            openai_responses.build_json_response_payload(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                instructions=(
+                    "You are a Product BASB shard worker. Return compact JSON only with keys "
+                    "notes, evidence_cards, and shard_insights. notes must contain title, summary, highlights, "
+                    "distilled_takeaways, executive_use, can_feed, and evidence_ids. Do not include raw secrets. "
+                    "shard_insights must contain theme, summary, evidence_ids, code_surfaces, and output_rationale."
+                ),
+                user_content=json.dumps(
                     {
-                        "role": "system",
-                        "content": (
-                            "You are a Product BASB shard worker. Return compact JSON only with keys "
-                            "notes, evidence_cards, and shard_insights. notes must contain title, summary, highlights, "
-                            "distilled_takeaways, executive_use, can_feed, and evidence_ids. Do not include raw secrets."
-                            " shard_insights must contain theme, summary, evidence_ids, code_surfaces, and output_rationale."
-                        ),
+                        "prompt_version": SHARD_PROMPT_VERSION,
+                        "shard_id": spec.get("id"),
+                        "kind": spec.get("kind"),
+                        "cards": spec.get("cards", [])[: int(spec.get("input_card_count", 0) or 0)],
                     },
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {
-                                "prompt_version": SHARD_PROMPT_VERSION,
-                                "shard_id": spec.get("id"),
-                                "kind": spec.get("kind"),
-                                "cards": spec.get("cards", [])[: int(spec.get("input_card_count", 0) or 0)],
-                            },
-                            sort_keys=True,
-                        ),
-                    },
-                ],
-            }
+                    sort_keys=True,
+                ),
+            )
         ).encode("utf-8")
         request = urllib.request.Request(
-            OPENAI_CHAT_COMPLETIONS_URL,
+            openai_responses.OPENAI_RESPONSES_URL,
             data=payload,
             headers={
                 "Authorization": f"Bearer {self.api_key}",
@@ -298,7 +298,7 @@ class OpenAIShardClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=90) as response:
+            with urllib.request.urlopen(request, timeout=600) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 headers = _response_headers(response)
         except HTTPError as exc:
@@ -308,14 +308,12 @@ class OpenAIShardClient:
             raise
         if self.response_observer is not None:
             self.response_observer(headers)
-        content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-        return parsed if isinstance(parsed, dict) else {}
+        return openai_responses.parse_json_response(data)
 
 
 class FixtureShardClient:
-    def synthesize_shard(self, spec: dict[str, Any], model: str) -> dict[str, Any]:
-        del model
+    def synthesize_shard(self, spec: dict[str, Any], model: str, reasoning_effort: str = openai_responses.DEFAULT_REASONING_EFFORT) -> dict[str, Any]:
+        del model, reasoning_effort
         cards = list(spec.get("cards") or [])
         title = f"{str(spec.get('kind', 'Shard')).replace('-', ' ').title()} Synthesis"
         evidence_ids = [str(card.get("id")) for card in cards[:12] if card.get("id")]
@@ -356,7 +354,13 @@ def _shard_client(*, response_observer: Callable[[dict[str, str]], None] | None 
 
 
 def _validate_shard_payload(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    if not isinstance(payload.get("notes"), list) and isinstance(payload.get("result"), dict):
+        payload = payload["result"]
     notes = payload.get("notes")
+    if isinstance(notes, dict):
+        notes = [notes]
+    if notes is None and isinstance(payload.get("note"), dict):
+        notes = [payload["note"]]
     evidence_cards = payload.get("evidence_cards")
     shard_insights = payload.get("shard_insights")
     if not isinstance(notes, list):
@@ -422,6 +426,7 @@ def _write_shard_note(
         f"shard_kind: {json.dumps(spec['kind'])}",
         f"worker_mode: {json.dumps(spec.get('worker_mode', 'llm-synthesis'))}",
         f"llm_model: {json.dumps(spec.get('model', ''))}",
+        f"llm_reasoning_effort: {json.dumps(spec.get('reasoning_effort', ''))}",
         f"prompt_version: {json.dumps(SHARD_PROMPT_VERSION)}",
         "---",
         f"# {title}",
@@ -433,7 +438,9 @@ def _write_shard_note(
     body.extend(f"- {line}" for line in _note_lines(note.get("highlights")))
     body.extend(["", "## Distilled Takeaways"])
     body.extend(f"- {line}" for line in _note_lines(note.get("distilled_takeaways")))
-    body.extend(["", "## Executive Use", "", str(note.get("executive_use") or "Review before use.").strip()])
+    body.extend(["", "## Executive Use"])
+    executive_use = _note_lines(note.get("executive_use")) or ["Review before use."]
+    body.extend(f"- {line}" for line in executive_use)
     body.extend(["", "## Can Feed"])
     can_feed = _note_lines(note.get("can_feed")) or ["Output Pipeline"]
     body.extend(f"- {line}" for line in can_feed)
@@ -456,7 +463,13 @@ def llm_shard_worker(
     started = time.perf_counter()
     draft_dir = scratch_dir / "draft_notes"
     draft_dir.mkdir(parents=True, exist_ok=True)
-    model = str(spec.get("model") or "gpt-4.1-mini")
+    model = openai_responses.ensure_allowed_synthesis_model(
+        str(spec.get("model") or openai_responses.DEFAULT_REASONING_MODEL),
+        field="generation_performance.agent_shards.shard_model",
+    )
+    reasoning_effort = openai_responses.normalize_reasoning_effort(
+        spec.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT)
+    )
     worker_count = int(spec.get("max_concurrent_shards", 1) or 1)
     rate_config = rate_config or {}
     if client is None and str(spec.get("worker_mode", "")).lower() == "fixture":
@@ -494,7 +507,7 @@ def llm_shard_worker(
         )
 
     def synthesize() -> dict[str, Any]:
-        return client.synthesize_shard(spec, model)
+        return client.synthesize_shard(spec, model, reasoning_effort)
 
     payload, retry_count, retry_wait = rate_limits.with_retries(
         action=synthesize,
@@ -520,6 +533,7 @@ def llm_shard_worker(
         "item_count": spec.get("item_count", 0),
         "worker_mode": spec.get("worker_mode", "llm-synthesis"),
         "model": model,
+        "reasoning_effort": reasoning_effort,
         "prompt_version": SHARD_PROMPT_VERSION,
         "input_card_count": len(spec.get("cards", [])),
         "output_note_count": len(note_names),
@@ -637,7 +651,13 @@ def run_generation_shards(
     max_concurrent = min(6, int(shard_config["max_concurrent_shards"]), max_shards)
     timeout_seconds = int(shard_config.get("timeout_seconds", 1800))
     worker_mode = str(shard_config.get("worker_mode", "llm-synthesis"))
-    shard_model = str(shard_config.get("shard_model", "gpt-4.1-mini"))
+    shard_model = openai_responses.ensure_allowed_synthesis_model(
+        str(shard_config.get("shard_model", openai_responses.DEFAULT_REASONING_MODEL)),
+        field="generation_performance.agent_shards.shard_model",
+    )
+    reasoning_effort = openai_responses.normalize_reasoning_effort(
+        shard_config.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT)
+    )
     specs = plan_generation_shards(
         generation_config={**generation_config, "agent_shards": {**shard_config, "max_shards": max_shards}},
         repo_names=repo_names,
@@ -667,6 +687,7 @@ def run_generation_shards(
             "timeout_seconds": timeout_seconds,
             "worker_mode": worker_mode,
             "model": shard_model,
+            "reasoning_effort": reasoning_effort,
             "shards": [],
             "cache_hits": 0,
             "cache_misses": 0,
@@ -725,6 +746,7 @@ def run_generation_shards(
         "timeout_seconds": timeout_seconds,
         "worker_mode": worker_mode,
         "model": shard_model,
+        "reasoning_effort": reasoning_effort,
         "shards": results,
         "cache_hits": cache_hits,
         "cache_misses": cache_misses,

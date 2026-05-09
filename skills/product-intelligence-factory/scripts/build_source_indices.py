@@ -652,6 +652,10 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
     }
     if special in {"needs-google-drive", "stale-doc-reference"}:
         return record
+    if any(ord(char) > 255 for char in url):
+        record["status"] = "blocked"
+        record["error"] = "URL contains non-Latin-1 characters and cannot be fetched safely"
+        return record
     limiter = settings.get("rate_limiter")
     if limiter is not None:
         waited = limiter.acquire_source_fetch(

@@ -46,7 +46,8 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertEqual(config["agent_shards"]["max_concurrent_shards"], 6)
         self.assertEqual(config["agent_shards"]["timeout_seconds"], 1800)
         self.assertEqual(config["agent_shards"]["worker_mode"], "llm-synthesis")
-        self.assertEqual(config["agent_shards"]["shard_model"], "gpt-4.1-mini")
+        self.assertEqual(config["agent_shards"]["shard_model"], "gpt-5.5")
+        self.assertEqual(config["agent_shards"]["reasoning_effort"], "xhigh")
         self.assertEqual(config["agent_shards"]["max_cards_per_shard"], 80)
         self.assertTrue(config["changed_scope_rebuild"])
 
@@ -382,7 +383,8 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
                 "merge_split_recommendation": "Keep together.",
                 "output_candidate_rationale": "Strong delivery candidate.",
                 "llm_synthesis_status": "succeeded",
-                "llm_model": "gpt-4.1-mini",
+                "llm_model": "gpt-5.5",
+                "llm_reasoning_effort": "xhigh",
                 "cards": [
                     {
                         "link": "[[Support - Login]]",
@@ -403,6 +405,7 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertIn("## LLM synthesis", body)
         self.assertIn("Identity access evidence", body)
         self.assertIn("## Synthesis guidance", body)
+        self.assertIn("llm_reasoning_effort: \"xhigh\"", body)
         self.assertIn("## Synthesis status", body)
         self.assertIn("## Related code surfaces", body)
         self.assertIn("## Output candidates", body)

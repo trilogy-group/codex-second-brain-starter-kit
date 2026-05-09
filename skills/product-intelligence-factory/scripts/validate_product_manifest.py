@@ -8,6 +8,12 @@ from pathlib import Path
 
 import yaml
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import openai_responses
+
 
 REQUIRED_TOP_LEVEL = [
     "product",
@@ -30,6 +36,20 @@ def normalize_path(value: object) -> Path | None:
     if value in (None, ""):
         return None
     return Path(str(value)).expanduser()
+
+
+def validate_synthesis_model(errors: list[str], field: str, value: object) -> None:
+    try:
+        openai_responses.ensure_allowed_synthesis_model(str(value or ""), field=field)
+    except ValueError as exc:
+        errors.append(str(exc))
+
+
+def validate_reasoning_effort(errors: list[str], field: str, value: object) -> None:
+    try:
+        openai_responses.normalize_reasoning_effort(value)
+    except ValueError as exc:
+        errors.append(f"{field} {exc}")
 
 
 def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[str], list[str], dict[str, object]]:
@@ -77,6 +97,17 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                     errors.append("profile semantic_clustering.embedding_model is required when semantic clustering is configured.")
                 if semantic and semantic.get("llm_cluster_synthesis", True) and not semantic.get("llm_model"):
                     errors.append("profile semantic_clustering.llm_model is required when LLM cluster synthesis is enabled.")
+                if semantic and semantic.get("llm_cluster_synthesis", True):
+                    if semantic.get("llm_model"):
+                        validate_synthesis_model(errors, "profile semantic_clustering.llm_model", semantic.get("llm_model"))
+                    if not semantic.get("reasoning_effort"):
+                        errors.append("profile semantic_clustering.reasoning_effort is required when LLM cluster synthesis is enabled.")
+                    else:
+                        validate_reasoning_effort(
+                            errors,
+                            "profile semantic_clustering.reasoning_effort",
+                            semantic.get("reasoning_effort"),
+                        )
                 code = profile_data.get("code_intelligence") or {}
                 try:
                     max_files = int(code.get("max_files_per_repo", 1))
@@ -144,6 +175,21 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                         errors.append("profile generation_performance.agent_shards.worker_mode must be `llm-synthesis` or `fixture`.")
                     if "shard_model" in shard_config and not str(shard_config.get("shard_model") or "").strip():
                         errors.append("profile generation_performance.agent_shards.shard_model is required.")
+                    if "shard_model" in shard_config:
+                        validate_synthesis_model(
+                            errors,
+                            "profile generation_performance.agent_shards.shard_model",
+                            shard_config.get("shard_model"),
+                        )
+                    if shard_config.get("worker_mode", "llm-synthesis") == "llm-synthesis":
+                        if not shard_config.get("reasoning_effort"):
+                            errors.append("profile generation_performance.agent_shards.reasoning_effort is required for llm-synthesis.")
+                        else:
+                            validate_reasoning_effort(
+                                errors,
+                                "profile generation_performance.agent_shards.reasoning_effort",
+                                shard_config.get("reasoning_effort"),
+                            )
                     if "max_cards_per_shard" in shard_config:
                         try:
                             max_cards = int(shard_config["max_cards_per_shard"])

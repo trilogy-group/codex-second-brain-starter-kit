@@ -3197,6 +3197,7 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
                 "evidence_score": cluster.get("evidence_score", 0),
                 "llm_synthesis_status": cluster.get("llm_synthesis_status", "unknown"),
                 "llm_model": cluster.get("llm_model", ""),
+                "llm_reasoning_effort": cluster.get("llm_reasoning_effort", ""),
                 "generated_output_candidates": output_candidate_links,
                 **basb_frontmatter(
                     stage="distill",
@@ -3237,6 +3238,7 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
             "",
             f"- LLM synthesis status: `{cluster.get('llm_synthesis_status', 'unknown')}`",
             f"- LLM model: `{cluster.get('llm_model', '')}`",
+            f"- LLM reasoning effort: `{cluster.get('llm_reasoning_effort', '')}`",
             "",
             "## Cross-source evidence",
             "",

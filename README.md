@@ -45,7 +45,7 @@ Typical use cases:
 - Python 3
 - Git
 - Obsidian
-- `OPENAI_API_KEY` for semantic intermediate-packet clustering during vault rebuilds
+- `OPENAI_API_KEY` for GPT-5.5/xhigh semantic intermediate-packet clustering and generation-shard synthesis during vault rebuilds
 - optional: `tree_sitter` and `tree_sitter_languages` Python packages for AST-backed code intelligence; regex fallback is always kept
 - optional: GitHub CLI (`gh`) if you want repo-mirror sync to resolve default branches automatically
 
@@ -72,6 +72,27 @@ Typical use cases:
 6. Generate or refresh the engineering-readiness report.
 7. Convert high-value intelligence into shippable outputs and archive completed work.
 8. Optionally add recurring automations after the first manual pass is proven.
+
+## Intelligence model defaults
+
+Full-fidelity LLM synthesis defaults to `gpt-5.5` with `xhigh` reasoning for both semantic cluster synthesis and generation shards. The workflow uses OpenAI's Responses API for these reasoning calls so the requested reasoning effort is explicit instead of silently falling back to a lower-quality chat-completions path.
+
+Keep these settings in `profile.intelligence_path` unless you are intentionally testing a different quality/cost tradeoff:
+
+```yaml
+semantic_clustering:
+  llm_model: gpt-5.5
+  reasoning_effort: xhigh
+  llm_cluster_synthesis: true
+
+generation_performance:
+  agent_shards:
+    worker_mode: llm-synthesis
+    shard_model: gpt-5.5
+    reasoning_effort: xhigh
+```
+
+The validator rejects `gpt-4.1-mini` for synthesis fields because it produces thinner intelligence and does not honor the reasoning-effort contract expected by this starter kit. If you change model or reasoning settings, run `--force` once so stale semantic, shard, and generated-note caches do not hide the change.
 
 ## Performance for large source sets
 
@@ -110,6 +131,10 @@ generation_performance:
   llm_synthesis_workers: 10
   embedding_batch_size: 512
   incremental_rebuild: true
+  agent_shards:
+    worker_mode: llm-synthesis
+    shard_model: gpt-5.5
+    reasoning_effort: xhigh
 rate_limits:
   openai_requests_per_minute: 3000
   openai_tokens_per_minute: 3000000

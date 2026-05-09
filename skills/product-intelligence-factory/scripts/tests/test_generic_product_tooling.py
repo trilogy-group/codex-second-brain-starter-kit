@@ -210,6 +210,22 @@ class GenericToolingTests(unittest.TestCase):
         self.assertIsNone(module.sanitize_url("https://hubname.acme.test/join/starter?lang=fr"))
         self.assertIsNone(module.sanitize_url("https://yourhub.acme.test/join/starter"))
 
+    def test_non_latin1_urls_are_blocked_without_fetching(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_non_latin1_url_test")
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(module, "urlopen") as mocked_urlopen:
+                result = module.fetch_url(
+                    "https://*.example.com\u201d",
+                    ["50121-article.md"],
+                    Path(tmp_dir),
+                    {"stale_doc_hosts": set()},
+                )
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("non-Latin-1", result["error"])
+        mocked_urlopen.assert_not_called()
+
     def test_fetch_url_uses_verified_ssl_context(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_ssl_context_test")
 
@@ -413,7 +429,8 @@ class GenericToolingTests(unittest.TestCase):
                         "  min_cluster_size: 3",
                         "  similarity_threshold: 0.78",
                         "  max_clusters: 40",
-                        "  llm_model: gpt-4.1-mini",
+                        "  llm_model: gpt-5.5",
+                        "  reasoning_effort: xhigh",
                         "  llm_cluster_synthesis: false",
                         "  max_llm_clusters: 0",
                         "code_intelligence:",

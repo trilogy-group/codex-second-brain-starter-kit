@@ -23,7 +23,8 @@ DEFAULT_GENERATION_PERFORMANCE: dict[str, Any] = {
         "max_concurrent_shards": 6,
         "timeout_seconds": 1800,
         "worker_mode": "llm-synthesis",
-        "shard_model": "gpt-4.1-mini",
+        "shard_model": "gpt-5.5",
+        "reasoning_effort": "xhigh",
         "max_cards_per_shard": 80,
     },
 }
@@ -65,6 +66,10 @@ ENV_OVERRIDES = {
     ),
     "agent_shards.worker_mode": ("PRODUCT_BASB_AGENT_SHARD_WORKER_MODE",),
     "agent_shards.shard_model": ("PRODUCT_BASB_AGENT_SHARD_MODEL", "TYLER_SECOND_BRAIN_AGENT_SHARD_MODEL"),
+    "agent_shards.reasoning_effort": (
+        "PRODUCT_BASB_AGENT_SHARD_REASONING_EFFORT",
+        "TYLER_SECOND_BRAIN_AGENT_SHARD_REASONING_EFFORT",
+    ),
     "agent_shards.max_cards_per_shard": ("PRODUCT_BASB_AGENT_MAX_CARDS_PER_SHARD",),
 }
 
@@ -208,7 +213,15 @@ def default_generation_config(profile: dict[str, Any] | None = None) -> dict[str
                 _configured_value(shard_config, "agent_shards.worker_mode", "llm-synthesis", config_key="worker_mode")
             ),
             "shard_model": str(
-                _configured_value(shard_config, "agent_shards.shard_model", "gpt-4.1-mini", config_key="shard_model")
+                _configured_value(shard_config, "agent_shards.shard_model", "gpt-5.5", config_key="shard_model")
+            ),
+            "reasoning_effort": str(
+                _configured_value(
+                    shard_config,
+                    "agent_shards.reasoning_effort",
+                    "xhigh",
+                    config_key="reasoning_effort",
+                )
             ),
             "max_cards_per_shard": _explicit_positive_int(
                 _configured_value(shard_config, "agent_shards.max_cards_per_shard", 80, config_key="max_cards_per_shard"),
