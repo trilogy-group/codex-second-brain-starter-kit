@@ -48,6 +48,37 @@ profile:
 #   include_tests: true
 #   include_dependency_graph: true
 #   parser_mode: ast-when-available
+# generation_performance:
+#   parallel_workers: 24
+#   source_extract_workers: 24
+#   source_fetch_workers: 40
+#   repo_analysis_workers: 6
+#   code_analysis_workers: 12
+#   note_render_workers: 32
+#   embedding_workers: 8
+#   llm_synthesis_workers: 10
+#   embedding_batch_size: 512
+#   incremental_rebuild: true
+#   agent_shards:
+#     enabled: true
+#     max_shards: 12
+#     max_concurrent_shards: 6
+#     timeout_seconds: 1800
+#     worker_mode: llm-synthesis
+#     shard_model: gpt-4.1-mini
+#     max_cards_per_shard: 80
+# rate_limits:
+#   openai_requests_per_minute: 300
+#   openai_tokens_per_minute: 200000
+#   source_fetch_requests_per_host_per_minute: 120
+#   retry_attempts: 3
+#   retry_base_seconds: 1.0
+#   retry_max_seconds: 30.0
+#   fail_fast_seconds: 120.0
+#   openai_budget_path: ""
+#   max_openai_requests_per_budget_window: 0
+#   max_openai_tokens_per_budget_window: 0
+#   max_openai_cost_usd_per_budget_window: 0.0
 
 repositories:
   local_clone_root: /absolute/path/to/workspace/_repos

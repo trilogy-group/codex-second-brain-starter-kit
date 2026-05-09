@@ -564,6 +564,47 @@ class GenericToolingTests(unittest.TestCase):
         self.assertIn(str(module.AUDIT_VAULT), command_text)
         self.assertIn(str(module.GENERATE_READINESS), command_text)
 
+    def test_wizard_refresh_force_passes_force_to_heavy_generators(self) -> None:
+        module = load_module(WIZARD_SCRIPT, "second_brain_wizard_force_refresh_test")
+        registry = {
+            "brains": [
+                {
+                    "name": "Acme",
+                    "slug": "acme",
+                    "manifest_path": "/tmp/portfolio/manifests/acme.yaml",
+                    "vault_path": "/tmp/portfolio/vaults/Acme",
+                    "audit_path": "/tmp/portfolio/vaults/Acme/80 Assets/vault-audit.md",
+                    "readiness_report_path": "/tmp/portfolio/workspaces/acme/reports/acme.md",
+                }
+            ]
+        }
+        commands: list[list[str]] = []
+
+        with (
+            mock.patch.object(module, "ensure_registry_exists", return_value=registry),
+            mock.patch.object(module, "write_yaml"),
+            mock.patch.object(module, "run", side_effect=commands.append),
+        ):
+            result = module.refresh(Path("/tmp/portfolio"), "acme", force=True)
+
+        self.assertEqual(result, 0)
+        self.assertIn("--force", commands[1])
+        self.assertIn("--force", commands[2])
+        self.assertNotIn("--force", commands[0])
+
+    def test_readme_documents_large_source_performance_guidance(self) -> None:
+        readme = TOOLS_DIR.parents[2] / "README.md"
+        body = readme.read_text(encoding="utf-8")
+
+        self.assertIn("## Performance for large source sets", body)
+        self.assertIn("500+ sources", body)
+        self.assertIn("benchmark_rebuild.py", body)
+        self.assertIn("--force", body)
+        self.assertIn("sources.mirror_path", body)
+        self.assertIn("rebuild_timings.json", body)
+        self.assertIn("rate_limit_events.json", body)
+        self.assertNotIn("support.influitive.com", body)
+
 
 if __name__ == "__main__":
     unittest.main()

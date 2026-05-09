@@ -86,6 +86,89 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                     errors.append("profile code_intelligence.max_files_per_repo must be positive.")
                 if code and code.get("parser_mode", "ast-when-available") not in {"ast-when-available", "regex-only"}:
                     errors.append("profile code_intelligence.parser_mode must be `ast-when-available` or `regex-only`.")
+                generation = profile_data.get("generation_performance") or {}
+                worker_fields = [
+                    "parallel_workers",
+                    "source_fetch_workers",
+                    "repo_analysis_workers",
+                    "code_analysis_workers",
+                    "note_render_workers",
+                    "embedding_workers",
+                    "llm_synthesis_workers",
+                    "embedding_batch_size",
+                ]
+                for field in worker_fields:
+                    if field not in generation:
+                        continue
+                    if str(generation[field]).strip().lower() == "auto":
+                        errors.append(f"profile generation_performance.{field} must be an explicit positive integer; auto mode is disabled.")
+                        continue
+                    try:
+                        value = int(generation[field])
+                    except (TypeError, ValueError):
+                        value = 0
+                    if value <= 0:
+                        errors.append(f"profile generation_performance.{field} must be positive.")
+                shard_config = generation.get("agent_shards") if isinstance(generation, dict) else {}
+                if isinstance(shard_config, dict):
+                    for field in ["max_shards", "max_concurrent_shards", "timeout_seconds"]:
+                        if field not in shard_config:
+                            continue
+                        if str(shard_config[field]).strip().lower() == "auto":
+                            errors.append(f"profile generation_performance.agent_shards.{field} must be an explicit positive integer; auto mode is disabled.")
+                            continue
+                        try:
+                            value = int(shard_config[field])
+                        except (TypeError, ValueError):
+                            value = 0
+                        if value <= 0:
+                            errors.append(f"profile generation_performance.agent_shards.{field} must be positive.")
+                    if "worker_mode" in shard_config and shard_config.get("worker_mode") not in {"llm-synthesis", "fixture"}:
+                        errors.append("profile generation_performance.agent_shards.worker_mode must be `llm-synthesis` or `fixture`.")
+                    if "shard_model" in shard_config and not str(shard_config.get("shard_model") or "").strip():
+                        errors.append("profile generation_performance.agent_shards.shard_model is required.")
+                    if "max_cards_per_shard" in shard_config:
+                        try:
+                            max_cards = int(shard_config["max_cards_per_shard"])
+                        except (TypeError, ValueError):
+                            max_cards = 0
+                        if max_cards <= 0:
+                            errors.append("profile generation_performance.agent_shards.max_cards_per_shard must be positive.")
+                rate_limits_config = profile_data.get("rate_limits") or {}
+                if isinstance(rate_limits_config, dict):
+                    for field in [
+                        "openai_requests_per_minute",
+                        "openai_tokens_per_minute",
+                        "source_fetch_requests_per_host_per_minute",
+                        "retry_attempts",
+                        "retry_base_seconds",
+                        "retry_max_seconds",
+                        "fail_fast_seconds",
+                    ]:
+                        if field not in rate_limits_config:
+                            continue
+                        if str(rate_limits_config[field]).strip().lower() == "auto":
+                            errors.append(f"profile rate_limits.{field} must be explicit; auto mode is disabled.")
+                            continue
+                        try:
+                            value = float(rate_limits_config[field])
+                        except (TypeError, ValueError):
+                            value = 0
+                        if value <= 0:
+                            errors.append(f"profile rate_limits.{field} must be positive.")
+                    for field in [
+                        "max_openai_requests_per_budget_window",
+                        "max_openai_tokens_per_budget_window",
+                        "max_openai_cost_usd_per_budget_window",
+                    ]:
+                        if field not in rate_limits_config:
+                            continue
+                        try:
+                            value = float(rate_limits_config[field])
+                        except (TypeError, ValueError):
+                            value = -1
+                        if value < 0:
+                            errors.append(f"profile rate_limits.{field} must be zero or positive.")
 
     repos = data.get("repositories")
     if not isinstance(repos, dict):

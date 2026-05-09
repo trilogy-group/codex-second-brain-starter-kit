@@ -5,14 +5,24 @@ import json
 import re
 import subprocess
 import ast
+import hashlib
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import sys
 from typing import Any
 
 try:
     import yaml
 except ImportError:  # pragma: no cover
     yaml = None
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import generation_performance
+import incremental_cache
 
 
 CODE_EXTENSIONS = {
@@ -124,12 +134,15 @@ TREE_SITTER_CALL_NODES = {
 
 def default_code_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
     configured = dict((profile or {}).get("code_intelligence") or {})
+    generation_config = generation_performance.default_generation_config(profile)
     return {
         "max_files_per_repo": int(configured.get("max_files_per_repo", 1200)),
         "include_git_history": bool(configured.get("include_git_history", True)),
         "include_tests": bool(configured.get("include_tests", True)),
         "include_dependency_graph": bool(configured.get("include_dependency_graph", True)),
         "parser_mode": str(configured.get("parser_mode", "ast-when-available")),
+        "repo_analysis_workers": generation_config["repo_analysis_workers"],
+        "code_analysis_workers": generation_config["code_analysis_workers"],
     }
 
 
@@ -758,12 +771,15 @@ def analyze_file(
 def collect_git_metrics(repo_path: Path, relative_paths: set[str]) -> dict[str, dict[str, Any]]:
     if not relative_paths or not (repo_path / ".git").exists():
         return {}
-    completed = subprocess.run(
-        ["git", "-C", str(repo_path), "log", "--name-only", "--format=__COMMIT__|%ad|%an", "--date=short", "--"],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
+    try:
+        completed = subprocess.run(
+            ["git", "-C", str(repo_path), "log", "--name-only", "--format=__COMMIT__|%ad|%an", "--date=short", "--"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
     if completed.returncode != 0:
         return {}
     churn: Counter[str] = Counter()
@@ -797,6 +813,66 @@ def collect_git_metrics(repo_path: Path, relative_paths: set[str]) -> dict[str, 
     }
 
 
+def _repo_inputs(repo_item: tuple[str, Path], config: dict[str, Any]) -> dict[str, Any]:
+    repo_name, repo_path = repo_item
+    code_files = collect_code_files(repo_path, config["max_files_per_repo"])
+    relative_paths = {path.relative_to(repo_path).as_posix() for path in code_files}
+    git_metrics = collect_git_metrics(repo_path, relative_paths) if config["include_git_history"] else {}
+    return {
+        "repo_name": repo_name,
+        "repo_path": repo_path,
+        "code_files": code_files,
+        "git_metrics": git_metrics,
+    }
+
+
+def clean_git_repo_head(repo_path: Path) -> tuple[bool, str, str]:
+    if not (repo_path / ".git").exists():
+        return False, "", "not-a-git-repo"
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        status = subprocess.run(
+            ["git", "-C", str(repo_path), "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "", f"git-check-failed:{exc}"
+    if head.returncode != 0:
+        return False, "", "head-unavailable"
+    if status.returncode != 0:
+        return False, "", "status-unavailable"
+    if status.stdout.strip():
+        return False, head.stdout.strip(), "dirty-worktree"
+    return True, head.stdout.strip(), "clean"
+
+
+def repo_cache_payload(repo_name: str, repo_path: Path, config: dict[str, Any], clean_head: str) -> dict[str, Any]:
+    return {
+        "repo": repo_name,
+        "path": str(repo_path),
+        "head": clean_head,
+        "code_intelligence": {
+            "max_files_per_repo": config["max_files_per_repo"],
+            "include_git_history": config["include_git_history"],
+            "include_tests": config["include_tests"],
+            "include_dependency_graph": config["include_dependency_graph"],
+            "parser_mode": config["parser_mode"],
+        },
+    }
+
+
+def _analyze_file_task(task: tuple[str, Path, Path, dict[str, dict[str, Any]], str]) -> dict[str, Any]:
+    repo_name, repo_path, path, git_metrics, parser_mode = task
+    return analyze_file(repo_name, repo_path, path, git_metrics=git_metrics, parser_mode=parser_mode)
+
+
 def graph_from_files(files: list[dict[str, Any]]) -> dict[str, Any]:
     dependency_edges: list[dict[str, str]] = []
     call_edges: list[dict[str, str]] = []
@@ -828,19 +904,139 @@ def graph_from_files(files: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def analyze_repositories(repo_roots: dict[str, Path], profile: dict[str, Any] | None = None) -> dict[str, Any]:
+def file_cache_payload(
+    repo_name: str,
+    repo_path: Path,
+    path: Path,
+    git_metrics: dict[str, dict[str, Any]],
+    parser_mode: str,
+) -> dict[str, Any]:
+    relative_path = path.relative_to(repo_path).as_posix()
+    try:
+        content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        content_hash = "unreadable"
+    return {
+        "repo": repo_name,
+        "relative_path": relative_path,
+        "content_sha256": content_hash,
+        "git_metrics": git_metrics.get(relative_path, {}),
+        "parser_mode": parser_mode,
+    }
+
+
+def analyze_repositories(
+    repo_roots: dict[str, Path],
+    profile: dict[str, Any] | None = None,
+    *,
+    cache_path: Path | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
     config = default_code_config(profile)
-    files: list[dict[str, Any]] = []
+    generation_config = generation_performance.default_generation_config(profile)
+    cache = incremental_cache.load_incremental_cache(cache_path) if cache_path and generation_config["incremental_rebuild"] else None
+    if cache is not None:
+        incremental_cache.reset_stats(cache)
+    repo_items = sorted(repo_roots.items())
+    repo_workers = config["repo_analysis_workers"]
+    with ThreadPoolExecutor(max_workers=repo_workers, thread_name_prefix="basb-repo-analysis") as executor:
+        repo_inputs = list(executor.map(lambda item: _repo_inputs(item, config), repo_items))
+
+    repo_inputs.sort(key=lambda item: item["repo_name"])
+    file_tasks: list[tuple[str, Path, Path, dict[str, dict[str, Any]], str]] = []
+    cached_files: list[dict[str, Any]] = []
+    file_payloads: dict[tuple[str, str], dict[str, Any]] = {}
+    repo_cache_hits = 0
+    repo_cache_misses = 0
+    repo_cache_bypassed = 0
+    repo_cache_payloads: dict[str, dict[str, Any]] = {}
+    repo_cached_names: set[str] = set()
+    for item in repo_inputs:
+        repo_name = item["repo_name"]
+        repo_path = item["repo_path"]
+        clean, clean_head, clean_reason = clean_git_repo_head(repo_path)
+        repo_payload = repo_cache_payload(repo_name, repo_path, config, clean_head)
+        repo_cache_payloads[repo_name] = repo_payload
+        repo_cached = (
+            incremental_cache.lookup(cache, "code_repo_analysis", repo_name, repo_payload)
+            if cache is not None and clean and not force
+            else None
+        )
+        if repo_cached is not None and isinstance(repo_cached.value, dict) and isinstance(repo_cached.value.get("files"), list):
+            repo_cache_hits += 1
+            repo_cached_names.add(repo_name)
+            cached_files.extend(item for item in repo_cached.value["files"] if isinstance(item, dict))
+            continue
+        if not clean or force:
+            repo_cache_bypassed += 1
+        elif cache is not None:
+            repo_cache_misses += 1
+        for path in item["code_files"]:
+            relative_path = path.relative_to(item["repo_path"]).as_posix()
+            task = (
+                repo_name,
+                item["repo_path"],
+                path,
+                item["git_metrics"],
+                config["parser_mode"],
+            )
+            payload = file_cache_payload(*task)
+            key = (repo_name, relative_path)
+            file_payloads[key] = payload
+            cached = (
+                incremental_cache.lookup(cache, "code_file_analysis", f"{repo_name}/{relative_path}", payload)
+                if cache is not None and not force
+                else None
+            )
+            if cached is not None and isinstance(cached.value, dict):
+                cached_files.append(cached.value)
+            else:
+                file_tasks.append(task)
+    file_tasks.sort(key=lambda task: (task[0], task[2].relative_to(task[1]).as_posix()))
+
+    if file_tasks:
+        with ThreadPoolExecutor(max_workers=config["code_analysis_workers"], thread_name_prefix="basb-code-analysis") as executor:
+            analyzed_files = list(executor.map(_analyze_file_task, file_tasks))
+    else:
+        analyzed_files = []
+
+    if cache is not None:
+        for item in analyzed_files:
+            payload = file_payloads[(item["repo"], item["relative_path"])]
+            incremental_cache.store(cache, "code_file_analysis", f"{item['repo']}/{item['relative_path']}", payload, item)
+        incremental_cache.write_incremental_cache(cache_path, cache)
+
+    files = [*cached_files, *analyzed_files]
+
+    files.sort(key=lambda item: (item["repo"], item["relative_path"]))
+    if cache is not None:
+        files_by_repo_for_cache: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for item in files:
+            files_by_repo_for_cache[item["repo"]].append(item)
+        for item in repo_inputs:
+            repo_name = item["repo_name"]
+            clean, clean_head, _clean_reason = clean_git_repo_head(item["repo_path"])
+            if not clean or force or repo_name in repo_cached_names:
+                continue
+            payload = {**repo_cache_payloads.get(repo_name, {}), "head": clean_head}
+            incremental_cache.store(
+                cache,
+                "code_repo_analysis",
+                repo_name,
+                payload,
+                {"files": files_by_repo_for_cache.get(repo_name, [])},
+            )
+        incremental_cache.write_incremental_cache(cache_path, cache)
+
+    files_by_repo: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in files:
+        files_by_repo[item["repo"]].append(item)
+
     repo_summaries: list[dict[str, Any]] = []
-    for repo_name, repo_path in sorted(repo_roots.items()):
-        code_files = collect_code_files(repo_path, config["max_files_per_repo"])
-        relative_paths = {path.relative_to(repo_path).as_posix() for path in code_files}
-        git_metrics = collect_git_metrics(repo_path, relative_paths) if config["include_git_history"] else {}
-        repo_files = [
-            analyze_file(repo_name, repo_path, path, git_metrics=git_metrics, parser_mode=config["parser_mode"])
-            for path in code_files
-        ]
-        files.extend(repo_files)
+    for item in repo_inputs:
+        repo_name = item["repo_name"]
+        repo_path = item["repo_path"]
+        repo_files = files_by_repo.get(repo_name, [])
         repo_summaries.append(
             {
                 "repo": repo_name,
@@ -869,6 +1065,11 @@ def analyze_repositories(repo_roots: dict[str, Path], profile: dict[str, Any] | 
         "schema_count": len(graph["schemas"]),
         "test_anchor_count": len(graph["tests"]),
         "dependency_edges": len(graph["dependencies"]),
+        "repo_cache_hits": repo_cache_hits,
+        "repo_cache_misses": repo_cache_misses,
+        "repo_cache_bypassed": repo_cache_bypassed,
+        "cache_hits": int((cache or {}).get("stats", {}).get("skipped_stages", {}).get("code_file_analysis", 0)),
+        "cache_misses": int((cache or {}).get("stats", {}).get("misses", 0)) if cache is not None else 0,
     }
     return {
         "config": config,

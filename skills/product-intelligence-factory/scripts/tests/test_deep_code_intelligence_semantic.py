@@ -13,6 +13,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[1]
 CODE_INTELLIGENCE_SCRIPT = TOOLS_DIR / "code_intelligence.py"
 SEMANTIC_SCRIPT = TOOLS_DIR / "semantic_clustering.py"
 REBUILD_SCRIPT = TOOLS_DIR / "rebuild_product_brain.py"
+GENERATION_PERFORMANCE_SCRIPT = TOOLS_DIR / "generation_performance.py"
 
 
 def load_module(module_path: Path, module_name: str):
@@ -25,6 +26,49 @@ def load_module(module_path: Path, module_name: str):
 
 
 class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
+    def test_generation_performance_defaults_are_fixed_high_concurrency(self) -> None:
+        module = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_defaults_test")
+
+        config = module.default_generation_config({})
+
+        self.assertEqual(config["parallel_workers"], 24)
+        self.assertEqual(config["source_extract_workers"], 24)
+        self.assertEqual(config["source_fetch_workers"], 40)
+        self.assertEqual(config["repo_analysis_workers"], 6)
+        self.assertEqual(config["code_analysis_workers"], 12)
+        self.assertEqual(config["note_render_workers"], 32)
+        self.assertEqual(config["embedding_workers"], 8)
+        self.assertEqual(config["llm_synthesis_workers"], 10)
+        self.assertEqual(config["embedding_batch_size"], 512)
+        self.assertTrue(config["incremental_rebuild"])
+        self.assertEqual(config["agent_shards"]["max_shards"], 12)
+        self.assertEqual(config["agent_shards"]["max_concurrent_shards"], 6)
+        self.assertEqual(config["agent_shards"]["timeout_seconds"], 1800)
+        self.assertEqual(config["agent_shards"]["worker_mode"], "llm-synthesis")
+        self.assertEqual(config["agent_shards"]["shard_model"], "gpt-4.1-mini")
+        self.assertEqual(config["agent_shards"]["max_cards_per_shard"], 80)
+
+    def test_source_extract_workers_default_to_parallel_workers_and_support_env_override(self) -> None:
+        module = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_source_extract_test")
+        original = os.environ.get("PRODUCT_BASB_SOURCE_EXTRACT_WORKERS")
+        os.environ["PRODUCT_BASB_SOURCE_EXTRACT_WORKERS"] = "7"
+        try:
+            config = module.default_generation_config({"generation_performance": {"parallel_workers": 9}})
+        finally:
+            if original is None:
+                os.environ.pop("PRODUCT_BASB_SOURCE_EXTRACT_WORKERS", None)
+            else:
+                os.environ["PRODUCT_BASB_SOURCE_EXTRACT_WORKERS"] = original
+
+        self.assertEqual(config["parallel_workers"], 9)
+        self.assertEqual(config["source_extract_workers"], 7)
+
+    def test_generation_performance_rejects_auto_mode(self) -> None:
+        module = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_auto_test")
+
+        with self.assertRaises(SystemExit):
+            module.default_generation_config({"generation_performance": {"parallel_workers": "auto"}})
+
     def test_multilanguage_code_intelligence_extracts_expected_surfaces(self) -> None:
         module = load_module(CODE_INTELLIGENCE_SCRIPT, "code_intelligence_multilang_test")
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -50,6 +94,8 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
             by_path = {item["relative_path"]: item for item in result["files"]}
 
         self.assertIn("AccountsController", by_path["app.rb"]["symbols"]["classes"])
+        self.assertEqual(result["config"]["repo_analysis_workers"], 6)
+        self.assertEqual(result["config"]["code_analysis_workers"], 12)
         self.assertIn("User", by_path["web.ts"]["symbols"]["types"])
         self.assertIn({"method": "POST", "path": "/login", "source": "service.py"}, by_path["service.py"]["routes"])
         self.assertIn("LOGIN_TOKEN", by_path["service.py"]["env_vars"])
@@ -95,6 +141,41 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
 
         self.assertGreaterEqual(service["churn_score"], 2)
         self.assertIn("Ada", service["owner_candidates"])
+
+    def test_clean_repo_cache_reuses_unchanged_repository_analysis_until_force(self) -> None:
+        module = load_module(CODE_INTELLIGENCE_SCRIPT, "code_intelligence_repo_cache_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            target = repo / "service.py"
+            target.write_text("def alpha():\n    return 1\n")
+            env = {
+                **os.environ,
+                "GIT_AUTHOR_NAME": "Ada",
+                "GIT_AUTHOR_EMAIL": "ada@example.com",
+                "GIT_COMMITTER_NAME": "Ada",
+                "GIT_COMMITTER_EMAIL": "ada@example.com",
+            }
+            subprocess.run(["git", "add", "service.py"], cwd=repo, check=True, capture_output=True, env=env)
+            subprocess.run(["git", "commit", "-m", "first"], cwd=repo, check=True, capture_output=True, env=env)
+            cache_path = Path(tmp_dir) / "rebuild_cache.json"
+            profile = {
+                "code_intelligence": {"max_files_per_repo": 20, "include_git_history": False},
+                "generation_performance": {"incremental_rebuild": True},
+            }
+
+            first = module.analyze_repositories({"sample-repo": repo}, profile, cache_path=cache_path)
+            second = module.analyze_repositories({"sample-repo": repo}, profile, cache_path=cache_path)
+            target.write_text("def alpha():\n    return 2\n\ndef beta():\n    return 3\n")
+            dirty = module.analyze_repositories({"sample-repo": repo}, profile, cache_path=cache_path)
+            forced = module.analyze_repositories({"sample-repo": repo}, profile, cache_path=cache_path, force=True)
+
+        self.assertEqual(first["summary"]["repo_cache_hits"], 0)
+        self.assertEqual(second["summary"]["repo_cache_hits"], 1)
+        self.assertEqual(dirty["summary"]["repo_cache_hits"], 0)
+        self.assertIn("beta", dirty["files"][0]["symbols"]["functions"])
+        self.assertEqual(forced["summary"]["repo_cache_hits"], 0)
 
     def test_parser_failures_are_partial_and_non_fatal(self) -> None:
         module = load_module(CODE_INTELLIGENCE_SCRIPT, "code_intelligence_parse_failure_test")
@@ -158,6 +239,9 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
                 {"id": "code-1", "kind": "code", "title": "AuthController", "summary": "Login session permissions", "capabilities": ["Identity"], "evidence_terms": ["login"], "code_terms": ["auth"]},
             ]
             config = module.default_semantic_config({"semantic_clustering": {"min_cluster_size": 3, "similarity_threshold": 0.4}})
+            self.assertEqual(config["embedding_workers"], 8)
+            self.assertEqual(config["embedding_batch_size"], 512)
+            self.assertEqual(config["llm_synthesis_workers"], 10)
             with tempfile.TemporaryDirectory() as tmp_dir:
                 cache_path = Path(tmp_dir) / "embedding_cache.json"
                 first = module.cluster_cards(cards, config, cache_path)

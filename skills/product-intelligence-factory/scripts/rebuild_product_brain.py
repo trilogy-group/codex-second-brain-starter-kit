@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date
@@ -23,6 +24,12 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import code_intelligence
+import generation_performance
+import generation_progress
+import generation_shards
+import incremental_cache
+import note_rendering
+import rate_limits
 import semantic_clustering
 
 
@@ -175,6 +182,8 @@ def load_product_profile(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
         "path": path,
         "capabilities": capabilities,
+        "generation_performance": generation_performance.default_generation_config(data),
+        "rate_limits": generation_performance.default_rate_limit_config(data),
         "semantic_clustering": semantic_clustering.default_semantic_config(data),
         "code_intelligence": code_intelligence.default_code_config(data),
     }
@@ -244,6 +253,76 @@ def read_json(path: Path) -> Any:
 def write_json(path: Path, payload: Any) -> None:
     ensure_dir(path.parent)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def write_performance_summary(paths: Paths, payload: dict[str, Any]) -> None:
+    summary_path = paths.json_dir / "performance_summary.json"
+    existing: dict[str, Any] = {}
+    if summary_path.exists():
+        try:
+            parsed = json.loads(summary_path.read_text(encoding="utf-8"))
+            existing = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            existing = {}
+    existing.update(payload)
+    write_json(summary_path, existing)
+
+
+def content_fingerprint(payload: Any) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+
+def record_timing(timings: dict[str, Any], stage: str, started: float, **metadata: Any) -> None:
+    timings.setdefault("stages", {})[stage] = {
+        "seconds": round(time.perf_counter() - started, 4),
+        **metadata,
+    }
+
+
+def build_generation_shard_inventory(
+    generation_config: dict[str, Any],
+    *,
+    repo_names: list[str],
+    support_count: int,
+    wiki_count: int,
+    semantic_card_count: int,
+) -> dict[str, Any]:
+    shard_config = generation_config["agent_shards"]
+    max_shards = int(shard_config["max_shards"])
+    shards: list[dict[str, Any]] = []
+    if not shard_config["enabled"]:
+        return {
+            "enabled": False,
+            "max_shards": max_shards,
+            "max_concurrent_shards": int(shard_config["max_concurrent_shards"]),
+            "shards": shards,
+        }
+    shard_inputs = [
+        ("repo-code", len(repo_names), repo_names),
+        ("support-evidence", support_count, []),
+        ("wiki-evidence", wiki_count, []),
+        ("semantic-synthesis", semantic_card_count, []),
+    ]
+    for kind, count, labels in shard_inputs:
+        if count <= 0 or len(shards) >= max_shards:
+            continue
+        shards.append(
+            {
+                "id": f"shard-{len(shards) + 1:02d}",
+                "kind": kind,
+                "item_count": count,
+                "labels": labels[:40],
+                "status": "deterministic-worker-shard",
+                "writes_final_vault": False,
+            }
+        )
+    return {
+        "enabled": True,
+        "max_shards": max_shards,
+        "max_concurrent_shards": int(shard_config["max_concurrent_shards"]),
+        "shards": shards,
+        "merge_strategy": "deterministic-reducer",
+    }
 
 
 def slugify(value: str) -> str:
@@ -940,7 +1019,7 @@ def is_generated_note(path: Path) -> bool:
     if not text.startswith("---\n"):
         return False
     head = text.split("---", 2)[1]
-    return bool(re.search(r"(?m)^source:\s*[\"']?generated[\"']?\s*$", head))
+    return bool(re.search(r"(?m)^source:\s*[\"']?(?:generated|scaffold)[\"']?\s*$", head))
 
 
 def clear_generated_markdown_dir(path: Path) -> None:
@@ -1942,6 +2021,7 @@ def score_packet_evidence(
     code_reference_links: list[str],
     conflict_count: int = 0,
     stale_doc_count: int = 0,
+    shard_insight_count: int = 0,
 ) -> int:
     score = 0
     if support_links:
@@ -1954,7 +2034,62 @@ def score_packet_evidence(
         score += min(2, conflict_count)
     if stale_doc_count:
         score += min(2, stale_doc_count)
+    if shard_insight_count:
+        score += min(2, shard_insight_count)
     return min(score, 10)
+
+
+def shard_insight_to_semantic_card(insight: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": f"shard-insight:{insight.get('id')}",
+        "kind": "shard-insight",
+        "title": str(insight.get("theme") or "Shard Insight"),
+        "summary": str(insight.get("summary") or ""),
+        "capabilities": [str(item) for item in insight.get("capabilities", []) if str(item).strip()],
+        "code_reference_links": [str(item) for item in insight.get("code_surfaces", []) if str(item).strip()],
+        "evidence_terms": [str(insight.get("shard_kind") or "generation-shard")],
+        "code_terms": [str(item) for item in insight.get("code_surfaces", []) if str(item).strip()],
+        "link": str(insight.get("source_shard_note") or ""),
+    }
+
+
+def _match_terms(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        if isinstance(value, list):
+            tokens.update(_match_terms(*value))
+            continue
+        for token in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", str(value).lower()):
+            if token not in {"packet", "output", "candidate", "support", "wiki", "code", "source"}:
+                tokens.add(token)
+    return tokens
+
+
+def matching_shard_insights(packet: dict[str, Any], shard_insights: list[dict[str, Any]], limit: int = 5) -> list[dict[str, Any]]:
+    packet_terms = _match_terms(
+        packet.get("title", ""),
+        packet.get("capability_key", ""),
+        packet.get("support_links", []),
+        packet.get("wiki_links", []),
+        packet.get("code_reference_links", []),
+    )
+    matches: list[tuple[int, str, dict[str, Any]]] = []
+    for insight in shard_insights:
+        insight_terms = _match_terms(
+            insight.get("theme", ""),
+            insight.get("summary", ""),
+            insight.get("capabilities", []),
+            insight.get("code_surfaces", []),
+            insight.get("evidence_ids", []),
+        )
+        score = len(packet_terms.intersection(insight_terms))
+        if packet.get("capability_key") and packet.get("capability_key") in insight.get("capabilities", []):
+            score += 4
+        if set(packet.get("card_ids", [])).intersection(set(insight.get("evidence_ids", []))):
+            score += 5
+        if score > 0:
+            matches.append((score, str(insight.get("theme") or ""), insight))
+    return [item for _, _, item in sorted(matches, key=lambda item: (-item[0], item[1]))[:limit]]
 
 
 def build_intermediate_packet_note(
@@ -1969,15 +2104,18 @@ def build_intermediate_packet_note(
     stale_doc_count: int = 0,
     evidence_score: int | None = None,
     output_candidate_links: list[str] | None = None,
+    shard_insight_links: list[str] | None = None,
 ) -> str:
     conflict_links = conflict_links or []
     output_candidate_links = output_candidate_links or []
+    shard_insight_links = shard_insight_links or []
     score = evidence_score if evidence_score is not None else score_packet_evidence(
         support_links=support_links,
         wiki_links=wiki_links,
         code_reference_links=code_reference_links,
         conflict_count=len(conflict_links),
         stale_doc_count=stale_doc_count,
+        shard_insight_count=len(shard_insight_links),
     )
     lines = [
         frontmatter(
@@ -2014,6 +2152,7 @@ def build_intermediate_packet_note(
         f"- Wiki evidence: `{len(wiki_links)}` linked note(s).",
         f"- Code evidence: `{len(code_reference_links)}` implementation anchor(s).",
         f"- Conflict or drift signals: `{len(conflict_links) + stale_doc_count}`.",
+        f"- Shard synthesis signals: `{len(shard_insight_links)}`.",
         "",
         "## Distilled takeaways",
         "",
@@ -2040,6 +2179,8 @@ def build_intermediate_packet_note(
         lines.extend(f"- {link}" for link in code_reference_links[:20])
     if conflict_links:
         lines.extend(f"- {link}" for link in conflict_links[:20])
+    if shard_insight_links:
+        lines.extend(f"- {link}" for link in shard_insight_links[:10])
     if not any((support_links, wiki_links, code_reference_links)):
         lines.append("- No source evidence was generated for this capability yet.")
     lines.extend(["", "## Implementation anchors", ""])
@@ -2054,8 +2195,9 @@ def build_intermediate_packet_note(
             "",
             "- [[Output Pipeline]]",
             "- [[Product Capability Map]]",
-            "- [[Support-to-Code Map]]",
-            *output_candidate_links[:12],
+        "- [[Support-to-Code Map]]",
+        *output_candidate_links[:12],
+        *shard_insight_links[:6],
             "",
             "## Related notes",
             "",
@@ -2146,6 +2288,7 @@ def select_output_candidates(packet_records: list[dict[str, Any]], limit: int = 
         or packet.get("code_reference_links")
         or packet.get("conflict_count", 0)
         or packet.get("stale_doc_count", 0)
+        or packet.get("shard_insight_count", 0)
     ]
     ranked = sorted(
         promotable,
@@ -2154,6 +2297,7 @@ def select_output_candidates(packet_records: list[dict[str, Any]], limit: int = 
             -float(packet.get("semantic_cluster_score", 0) or 0),
             -len(packet.get("code_reference_links", [])),
             -int(packet.get("conflict_count", 0)),
+            -int(packet.get("shard_insight_count", 0)),
             packet.get("title", ""),
         ),
     )
@@ -2170,6 +2314,7 @@ def build_output_candidate_note(packet: dict[str, Any]) -> str:
             *packet.get("wiki_links", []),
             *packet.get("code_reference_links", []),
             *packet.get("conflict_links", []),
+            *packet.get("shard_insight_links", []),
         ],
         40,
     )
@@ -2248,6 +2393,7 @@ def build_packet_note_from_spec(spec: dict[str, Any], output_candidate_links: li
         stale_doc_count=spec["stale_doc_count"],
         evidence_score=spec["evidence_score"],
         output_candidate_links=output_candidate_links,
+        shard_insight_links=spec.get("shard_insight_links", []),
     )
 
 
@@ -2703,6 +2849,10 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
         80,
     )
     output_candidate_links = output_candidate_links or []
+    shard_insight_links = unique_lines(
+        [str(link) for link in cluster.get("shard_insight_links", []) if str(link).strip()],
+        12,
+    )
     lines = [
         frontmatter(
             {
@@ -2765,6 +2915,9 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
         lines.extend(f"- {link}" for link in evidence_links[:60])
     else:
         lines.append("- No source links were attached to this semantic cluster.")
+    if shard_insight_links:
+        lines.extend(["", "## Shard synthesis inputs", ""])
+        lines.extend(f"- {link}" for link in shard_insight_links[:12])
     lines.extend(["", "## Related code surfaces", ""])
     if code_reference_links:
         lines.extend(f"- {link}" for link in code_reference_links[:40])
@@ -2791,6 +2944,7 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
             "- [[Output Pipeline]]",
             "- [[Intermediate Packet Index]]",
             "- [[Code Intelligence Hub]]",
+            *shard_insight_links[:6],
             "",
             "## Related notes",
             "",
@@ -3358,28 +3512,100 @@ def build_product_ontology(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Rebuild a product second brain with durable source and code notes.")
     parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--force", action="store_true", help="Bypass rebuild caches for a clean full-fidelity vault rebuild.")
     args = parser.parse_args()
 
     manifest = load_manifest(args.manifest)
     profile = load_product_profile(manifest)
     configure_runtime(manifest, profile)
     paths = manifest_paths(manifest)
+    paths.json_dir.mkdir(parents=True, exist_ok=True)
+    progress = generation_progress.ProgressRecorder(paths.json_dir)
+    if not progress.has_active_run():
+        progress.start_run("rebuild", planned_stages=generation_progress.default_planned_stages())
+    progress.record(
+        "rebuild",
+        "started",
+        completed_units=0,
+        total_units=2,
+        note_render_workers=profile["generation_performance"]["note_render_workers"],
+    )
+    workspace_path = Path(str(manifest.get("product", {}).get("workspace_path") or paths.mirror.parent)).expanduser()
     repo_roots = repo_lookup(manifest)
+    generation_config = profile["generation_performance"]
+    rate_limit_config = profile["rate_limits"]
+    existing_rate_inventory = rate_limits.load_rate_limit_inventory(paths.json_dir / "rate_limit_events.json")
+    rate_limiter = rate_limits.WindowRateLimiter(
+        rate_limit_config,
+        recorder=rate_limits.RateLimitRecorder(
+            existing_rate_inventory.get("events") if isinstance(existing_rate_inventory.get("events"), list) else []
+        ),
+    )
+    timings: dict[str, Any] = {
+        "generated_at": DATE,
+        "generation_performance": generation_config,
+        "rate_limits": rate_limit_config,
+        "force": bool(args.force),
+    }
     semantic_config = profile["semantic_clustering"]
     semantic_clustering.require_openai_or_fixture()
-    code_intel = code_intelligence.analyze_repositories(repo_roots, profile)
+    rebuild_cache_path = paths.json_dir / "rebuild_cache.json"
+    stage_started = time.perf_counter()
+    progress.record("code_intelligence", "running", code_analysis_workers=generation_config["code_analysis_workers"])
+    code_intel = code_intelligence.analyze_repositories(repo_roots, profile, cache_path=rebuild_cache_path, force=args.force)
+    record_timing(
+        timings,
+        "code_intelligence",
+        stage_started,
+        worker_count=generation_config["code_analysis_workers"],
+        repo_worker_count=generation_config["repo_analysis_workers"],
+        parsed_files=code_intel.get("summary", {}).get("parsed_files", 0),
+    )
     write_json(paths.json_dir / "code_intelligence.json", code_intel)
     write_json(paths.json_dir / "code_graph.json", code_intel.get("graph", {}))
+    code_file_units = max(
+        1,
+        int(code_intel.get("summary", {}).get("parsed_files", 0) or 0)
+        + int(code_intel.get("summary", {}).get("parse_failures", 0) or 0),
+    )
+    progress.record(
+        "code_intelligence",
+        "completed",
+        completed_units=code_file_units,
+        total_units=code_file_units,
+        parsed_files=code_intel.get("summary", {}).get("parsed_files", 0),
+    )
     code_intel_by_path = {
         (item["repo"], item["relative_path"]): item
         for item in code_intel.get("files", [])
     }
+    stage_started = time.perf_counter()
+    progress.record("load_source_inventories", "running")
     support_inventory = read_json(paths.json_dir / "support_articles.json")
     wiki_inventory = read_json(paths.json_dir / "wiki_pages.json")
     external_links = read_json(paths.json_dir / "external_links.json")
     repo_snapshots = read_json(paths.json_dir / "repo_snapshots.json")
     docx_extracts = read_json(paths.json_dir / "docx_extracts.json")
     links_by_source = build_links_by_source(external_links)
+    record_timing(
+        timings,
+        "load_source_inventories",
+        stage_started,
+        support_items=len(support_inventory),
+        wiki_items=len(wiki_inventory),
+        external_links=len(external_links),
+        repo_snapshots=len(repo_snapshots),
+    )
+    source_inventory_units = max(1, len(support_inventory) + len(wiki_inventory) + len(external_links) + len(repo_snapshots) + len(docx_extracts))
+    progress.record(
+        "load_source_inventories",
+        "completed",
+        completed_units=source_inventory_units,
+        total_units=source_inventory_units,
+        support_items=len(support_inventory),
+        wiki_items=len(wiki_inventory),
+        external_links=len(external_links),
+    )
 
     support_dir = paths.vault / "40 Research" / "Support Articles"
     wiki_dir = paths.vault / "40 Research" / "Wiki Pages"
@@ -3393,18 +3619,7 @@ def main() -> None:
     review_dir = paths.vault / "70 Journal" / "Reviews"
     stale_archive_dir = paths.vault / "90 Archive" / "Stale Sources"
     capability_dir = paths.vault / "20 Product" / "Capabilities"
-
-    clear_markdown_dir(support_dir)
-    clear_markdown_dir(wiki_dir)
-    clear_markdown_dir(repo_notes_dir)
-    clear_markdown_dir(code_reference_dir)
-    clear_generated_markdown_dir(code_maps_dir)
-    clear_generated_markdown_dir(code_graphs_dir)
-    clear_generated_markdown_dir(intermediate_packet_dir)
-    clear_generated_markdown_dir(output_candidate_dir)
-    clear_generated_markdown_dir(review_dir)
-    clear_generated_markdown_dir(stale_archive_dir)
-    clear_markdown_dir(capability_dir)
+    shard_note_dir = paths.vault / "80 Assets" / "Generation Shards"
 
     ensure_dir(support_dir)
     ensure_dir(wiki_dir)
@@ -3417,7 +3632,64 @@ def main() -> None:
     ensure_dir(review_dir)
     ensure_dir(stale_archive_dir)
     ensure_dir(capability_dir)
+    ensure_dir(shard_note_dir)
 
+    if generation_config["incremental_rebuild"] and args.force:
+        render_cache = incremental_cache.empty_incremental_cache()
+    elif generation_config["incremental_rebuild"]:
+        render_cache = incremental_cache.load_incremental_cache(rebuild_cache_path)
+    else:
+        render_cache = None
+    note_specs: list[note_rendering.NoteRenderSpec] = []
+    rendered_note_stats: dict[str, int] = {"written": 0, "cache_hits": 0, "cache_misses": 0}
+    generated_notes_manifest_path = paths.json_dir / "generated_notes_manifest.json"
+
+    def add_note_render(
+        path: Path,
+        *,
+        namespace: str,
+        key: str,
+        payload: Any,
+        renderer: Any,
+        generated: bool = False,
+        cacheable: bool = True,
+        dependencies: Any | None = None,
+    ) -> None:
+        if namespace in {"note_render.aggregate", "note_render.output_candidate", "note_render.review", "note_render.archive"}:
+            cacheable = False
+        if dependencies is None:
+            dependencies = {
+                "payload_hash": content_fingerprint(payload),
+                "namespace": namespace,
+            }
+        note_specs.append(
+            note_rendering.NoteRenderSpec(
+                path=path,
+                cache_namespace=namespace,
+                cache_key=key,
+                payload=payload,
+                renderer=renderer,
+                generated=generated,
+                cacheable=cacheable,
+                dependencies=dependencies,
+            )
+        )
+
+    def flush_note_renders() -> None:
+        nonlocal rendered_note_stats
+        rendered = note_rendering.render_note_specs(
+            note_specs,
+            cache=render_cache,
+            workers=generation_config["note_render_workers"],
+        )
+        rendered_note_stats = note_rendering.write_rendered_notes(
+            rendered,
+            write_note=write_note,
+            write_generated_note=write_generated_note,
+            manifest_path=generated_notes_manifest_path,
+        )
+
+    stage_started = time.perf_counter()
     article_note_stems: dict[str, str] = {}
     support_records: list[dict[str, Any]] = []
     for item in support_inventory:
@@ -3464,6 +3736,13 @@ def main() -> None:
         record["item"]["relative_path"]: record["stem"]
         for record in wiki_records
     }
+    record_timing(
+        timings,
+        "prepare_source_records",
+        stage_started,
+        support_records=len(support_records),
+        wiki_records=len(wiki_records),
+    )
 
     support_links_by_cap: dict[str, list[str]] = defaultdict(list)
     wiki_links_by_cap: dict[str, list[str]] = defaultdict(list)
@@ -3585,14 +3864,27 @@ def main() -> None:
 
     for key, entry in code_reference_registry.items():
         stem = code_reference_stems[key]
-        write_note(
+        support_links = unique_lines(entry["support_links"], 60)
+        wiki_links = unique_lines(entry["wiki_links"], 60)
+        capability_links = unique_lines(entry["capability_links"], 40)
+        code_file = code_intel_by_path.get(key)
+        add_note_render(
             code_reference_dir / f"{stem}.md",
-            build_code_reference_note(
+            namespace="note_render.code_reference",
+            key=f"{entry['hit']['repo']}/{entry['hit']['relative_path']}",
+            payload={
+                "hit": entry["hit"],
+                "support_links": support_links,
+                "wiki_links": wiki_links,
+                "capability_links": capability_links,
+                "code_file": code_file,
+            },
+            renderer=lambda entry=entry, support_links=support_links, wiki_links=wiki_links, capability_links=capability_links, code_file=code_file: build_code_reference_note(
                 entry["hit"],
-                unique_lines(entry["support_links"], 60),
-                unique_lines(entry["wiki_links"], 60),
-                unique_lines(entry["capability_links"], 40),
-                code_file=code_intel_by_path.get(key),
+                support_links,
+                wiki_links,
+                capability_links,
+                code_file=code_file,
             ),
         )
         code_reference_index[entry["hit"]["repo"]].append(note_link(stem))
@@ -3602,7 +3894,13 @@ def main() -> None:
     for snapshot in repo_snapshots:
         repo_path = repo_roots[snapshot["name"]]
         repo_stem = stem_for_repo(snapshot["name"])
-        write_note(repo_notes_dir / f"{repo_stem}.md", build_repo_note(snapshot, repo_path, repo_caps[snapshot["name"]]))
+        add_note_render(
+            repo_notes_dir / f"{repo_stem}.md",
+            namespace="note_render.repo",
+            key=snapshot["name"],
+            payload={"snapshot": snapshot, "repo_path": str(repo_path), "capabilities": repo_caps[snapshot["name"]]},
+            renderer=lambda snapshot=snapshot, repo_path=repo_path: build_repo_note(snapshot, repo_path, repo_caps[snapshot["name"]]),
+        )
 
     for record in support_records:
         repo_note_links = [note_link(stem_for_repo(repo_name)) for key in record["capabilities"] for repo_name in CAPABILITY_BY_KEY[key]["repos"]]
@@ -3636,21 +3934,33 @@ def main() -> None:
         )
         for conflict in record["conflicts"]:
             conflict_entries_by_kind[conflict["kind"]].append(f"{note_link(record['stem'])}: {conflict['message']}")
-        body = build_support_note(
-            item=record["item"],
-            raw_path=record["raw_path"],
-            stem=record["stem"],
-            capabilities=record["capabilities"],
-            repo_links=repo_note_links,
-            link_records=links_by_source.get(record["source_ref"], []),
-            article_note_stems=article_note_stems,
-            wiki_note_stems=wiki_note_stems,
-            related_support_links=related_support_links,
-            related_wiki_links=related_wiki_links,
-            code_reference_links=code_reference_links,
-            conflicts=[item["message"] for item in record["conflicts"]],
+        add_note_render(
+            support_dir / f"{record['stem']}.md",
+            namespace="note_render.support",
+            key=record["source_ref"],
+            payload={
+                "record": record,
+                "repo_note_links": repo_note_links,
+                "links": links_by_source.get(record["source_ref"], []),
+                "related_support_links": related_support_links,
+                "related_wiki_links": related_wiki_links,
+                "code_reference_links": code_reference_links,
+            },
+            renderer=lambda record=record, repo_note_links=repo_note_links, related_support_links=related_support_links, related_wiki_links=related_wiki_links, code_reference_links=code_reference_links: build_support_note(
+                item=record["item"],
+                raw_path=record["raw_path"],
+                stem=record["stem"],
+                capabilities=record["capabilities"],
+                repo_links=repo_note_links,
+                link_records=links_by_source.get(record["source_ref"], []),
+                article_note_stems=article_note_stems,
+                wiki_note_stems=wiki_note_stems,
+                related_support_links=related_support_links,
+                related_wiki_links=related_wiki_links,
+                code_reference_links=code_reference_links,
+                conflicts=[item["message"] for item in record["conflicts"]],
+            ),
         )
-        write_note(support_dir / f"{record['stem']}.md", body)
 
     for record in wiki_records:
         repo_note_links = [note_link(stem_for_repo(repo_name)) for key in record["capabilities"] for repo_name in CAPABILITY_BY_KEY[key]["repos"]]
@@ -3684,37 +3994,163 @@ def main() -> None:
         )
         for conflict in record["conflicts"]:
             conflict_entries_by_kind[conflict["kind"]].append(f"{note_link(record['stem'])}: {conflict['message']}")
-        body = build_wiki_note(
-            relative_path=record["item"]["relative_path"],
-            raw_path=record["raw_path"],
-            stem=record["stem"],
-            capabilities=record["capabilities"],
-            repo_links=repo_note_links,
-            link_records=links_by_source.get(record["source_ref"], []),
-            article_note_stems=article_note_stems,
-            wiki_note_stems=wiki_note_stems,
-            related_support_links=related_support_links,
-            related_wiki_links=related_wiki_links,
-            code_reference_links=code_reference_links,
-            conflicts=[item["message"] for item in record["conflicts"]],
-        )
         section = Path(record["item"]["relative_path"]).parts[0] if len(Path(record["item"]["relative_path"]).parts) > 1 else "root"
-        write_note(wiki_dir / section / f"{record['stem']}.md", body)
+        add_note_render(
+            wiki_dir / section / f"{record['stem']}.md",
+            namespace="note_render.wiki",
+            key=record["source_ref"],
+            payload={
+                "record": record,
+                "repo_note_links": repo_note_links,
+                "links": links_by_source.get(record["source_ref"], []),
+                "related_support_links": related_support_links,
+                "related_wiki_links": related_wiki_links,
+                "code_reference_links": code_reference_links,
+            },
+            renderer=lambda record=record, repo_note_links=repo_note_links, related_support_links=related_support_links, related_wiki_links=related_wiki_links, code_reference_links=code_reference_links: build_wiki_note(
+                relative_path=record["item"]["relative_path"],
+                raw_path=record["raw_path"],
+                stem=record["stem"],
+                capabilities=record["capabilities"],
+                repo_links=repo_note_links,
+                link_records=links_by_source.get(record["source_ref"], []),
+                article_note_stems=article_note_stems,
+                wiki_note_stems=wiki_note_stems,
+                related_support_links=related_support_links,
+                related_wiki_links=related_wiki_links,
+                code_reference_links=code_reference_links,
+                conflicts=[item["message"] for item in record["conflicts"]],
+            ),
+        )
 
-    semantic_cards = build_semantic_evidence_cards(
+    semantic_card_payload = {
+        "support_records": [
+            {
+                "stem": record["stem"],
+                "capabilities": record["capabilities"],
+                "code_reference_links": record.get("code_reference_links", []),
+                "quality": record.get("quality", {}),
+                "signals": record["signals"],
+            }
+            for record in support_records
+        ],
+        "wiki_records": [
+            {
+                "stem": record["stem"],
+                "capabilities": record["capabilities"],
+                "code_reference_links": record.get("code_reference_links", []),
+                "quality": record.get("quality", {}),
+                "signals": record["signals"],
+            }
+            for record in wiki_records
+        ],
+        "code_references": sorted(f"{repo}/{path}" for repo, path in code_reference_registry),
+        "code_summary": code_intel.get("summary", {}),
+    }
+    if render_cache is not None:
+        semantic_card_result = incremental_cache.get_or_build(
+            render_cache,
+            "semantic_evidence_cards",
+            "all",
+            semantic_card_payload,
+            lambda: build_semantic_evidence_cards(
+                support_records=support_records,
+                wiki_records=wiki_records,
+                code_reference_registry=code_reference_registry,
+                code_reference_stems=code_reference_stems,
+                code_intel_by_path=code_intel_by_path,
+            ),
+        )
+        semantic_cards = list(semantic_card_result.value)
+    else:
+        semantic_cards = build_semantic_evidence_cards(
+            support_records=support_records,
+            wiki_records=wiki_records,
+            code_reference_registry=code_reference_registry,
+            code_reference_stems=code_reference_stems,
+            code_intel_by_path=code_intel_by_path,
+        )
+    stage_started = time.perf_counter()
+    planned_shard_units = max(1, int(generation_config.get("agent_shards", {}).get("max_shards", 12) or 12))
+    progress.record(
+        "generation_shards",
+        "running",
+        completed_units=0,
+        total_units=planned_shard_units,
+        max_concurrent_shards=generation_config["agent_shards"]["max_concurrent_shards"],
+    )
+    shard_inventory = generation_shards.run_generation_shards(
+        generation_config=generation_config,
+        workspace_path=workspace_path,
+        repo_names=sorted(repo_roots),
         support_records=support_records,
         wiki_records=wiki_records,
-        code_reference_registry=code_reference_registry,
-        code_reference_stems=code_reference_stems,
-        code_intel_by_path=code_intel_by_path,
+        semantic_cards=semantic_cards,
+        rate_limiter=rate_limiter,
+        rate_limit_config=rate_limit_config,
+        cache_path=paths.json_dir / "generation_shard_cache.json",
+        force=args.force,
+    )
+    record_timing(
+        timings,
+        "generation_shards",
+        stage_started,
+        shard_count=len(shard_inventory.get("shards", [])),
+        max_concurrent_shards=shard_inventory.get("max_concurrent_shards", 0),
+        timeout_seconds=shard_inventory.get("timeout_seconds", 0),
+        status_counts=shard_inventory.get("status_counts", {}),
+    )
+    shard_insights = generation_shards.collect_shard_insights(shard_inventory)
+    if shard_insights:
+        semantic_cards.extend(shard_insight_to_semantic_card(insight) for insight in shard_insights)
+    write_json(paths.json_dir / "shard_insights.json", shard_insights)
+    progress.record(
+        "generation_shards",
+        "completed",
+        completed_units=max(1, len(shard_inventory.get("shards", []))),
+        total_units=max(1, len(shard_inventory.get("shards", []))),
+        shard_count=len(shard_inventory.get("shards", [])),
+        shard_insight_count=len(shard_insights),
+    )
+    stage_started = time.perf_counter()
+    semantic_units = max(1, len(semantic_cards))
+    progress.record(
+        "semantic_clustering",
+        "running",
+        completed_units=0,
+        total_units=semantic_units,
+        semantic_cards=len(semantic_cards),
     )
     semantic_result = semantic_clustering.cluster_cards(
         semantic_cards,
-        semantic_config,
+        {**semantic_config, **rate_limit_config},
         paths.json_dir / "embedding_cache.json",
+        limiter=rate_limiter,
+        result_cache_path=paths.json_dir / "semantic_result_cache.json",
+        force=args.force,
+    )
+    record_timing(
+        timings,
+        "semantic_clustering",
+        stage_started,
+        embedding_workers=generation_config["embedding_workers"],
+        embedding_batch_size=generation_config["embedding_batch_size"],
+        llm_synthesis_workers=generation_config["llm_synthesis_workers"],
+        semantic_cards=len(semantic_cards),
+        semantic_clusters=len(semantic_result.get("clusters", [])),
+        semantic_stats=semantic_result.get("stats", {}),
     )
     write_json(paths.json_dir / "semantic_clusters.json", semantic_result)
+    progress.record(
+        "semantic_clustering",
+        "completed",
+        completed_units=semantic_units,
+        total_units=semantic_units,
+        semantic_clusters=len(semantic_result.get("clusters", [])),
+    )
 
+    stage_started = time.perf_counter()
+    progress.record("packets_outputs", "running", completed_units=0, total_units=10)
     capability_rows: list[dict[str, Any]] = []
     packet_records: list[dict[str, Any]] = []
     packet_links: list[str] = []
@@ -3745,23 +4181,52 @@ def main() -> None:
             for record in capability_link_records.get(capability["key"], [])
             if record.get("status") == "stale-doc-reference"
         )
+        shard_matches = matching_shard_insights(
+            {
+                "title": capability["title"],
+                "capability_key": capability["key"],
+                "support_links": support_links,
+                "wiki_links": wiki_links,
+                "code_reference_links": code_reference_links,
+            },
+            shard_insights,
+        )
+        shard_insight_links = unique_lines(
+            [str(item.get("source_shard_note") or "") for item in shard_matches if item.get("source_shard_note")],
+            10,
+        )
         evidence_score = score_packet_evidence(
             support_links=support_links,
             wiki_links=wiki_links,
             code_reference_links=code_reference_links,
             conflict_count=len(conflict_links),
             stale_doc_count=stale_doc_count,
+            shard_insight_count=len(shard_matches),
         )
-        body = build_capability_note(
-            capability=capability,
-            support_links=support_links,
-            wiki_links=wiki_links,
-            repo_note_links=repo_note_links,
-            code_hits=code_hits,
-            code_reference_links=code_reference_links,
-            link_records=capability_link_records.get(capability["key"], []),
+        add_note_render(
+            capability_dir / f"{cap_stem}.md",
+            namespace="note_render.capability",
+            key=capability["key"],
+            payload={
+                "capability": capability,
+                "support_links": support_links,
+                "wiki_links": wiki_links,
+                "repo_note_links": repo_note_links,
+                "code_hits": code_hits,
+                "code_reference_links": code_reference_links,
+                "link_records": capability_link_records.get(capability["key"], []),
+            },
+            renderer=lambda capability=capability, support_links=support_links, wiki_links=wiki_links, repo_note_links=repo_note_links, code_hits=code_hits, code_reference_links=code_reference_links: build_capability_note(
+                capability=capability,
+                support_links=support_links,
+                wiki_links=wiki_links,
+                repo_note_links=repo_note_links,
+                code_hits=code_hits,
+                code_reference_links=code_reference_links,
+                link_records=capability_link_records.get(capability["key"], []),
+            ),
+            generated=True,
         )
-        write_note(capability_dir / f"{cap_stem}.md", body)
         packet_stem = safe_filename(f"Packet - {capability['title']}")
         packet_link = note_link(packet_stem)
         packet_record = {
@@ -3769,10 +4234,13 @@ def main() -> None:
             "stem": packet_stem,
             "link": packet_link,
             "packet_kind": "capability",
+            "capability_key": capability["key"],
             "support_links": support_links,
             "wiki_links": wiki_links,
             "repo_note_links": repo_note_links,
             "code_reference_links": code_reference_links,
+            "shard_insight_links": shard_insight_links,
+            "shard_insight_count": len(shard_matches),
             "conflict_links": conflict_links,
             "conflict_count": len(conflict_links),
             "stale_doc_count": stale_doc_count,
@@ -3789,20 +4257,8 @@ def main() -> None:
             "conflict_links": conflict_links,
             "stale_doc_count": stale_doc_count,
             "evidence_score": evidence_score,
+            "shard_insight_links": shard_insight_links,
         }
-        write_generated_note(
-            intermediate_packet_dir / f"{packet_stem}.md",
-            build_intermediate_packet_note(
-                capability=capability,
-                support_links=support_links,
-                wiki_links=wiki_links,
-                repo_note_links=repo_note_links,
-                code_reference_links=code_reference_links,
-                conflict_links=conflict_links,
-                stale_doc_count=stale_doc_count,
-                evidence_score=evidence_score,
-            ),
-        )
         packet_records.append(packet_record)
         packet_links.append(packet_link)
         capability_rows.append(
@@ -3845,6 +4301,12 @@ def main() -> None:
             "title": title,
             "description": f"Reusable packet for recurring {kind.replace('-', ' ')} signals found across the source corpus.",
         }
+        shard_matches = matching_shard_insights({"title": title, "conflict_links": entries}, shard_insights)
+        shard_insight_links = unique_lines(
+            [str(item.get("source_shard_note") or "") for item in shard_matches if item.get("source_shard_note")],
+            10,
+        )
+        evidence_score = min(10, evidence_score + min(2, len(shard_matches)))
         packet_record = {
             "title": title,
             "stem": packet_stem,
@@ -3858,6 +4320,8 @@ def main() -> None:
             "conflict_links": unique_lines(entries, 30),
             "conflict_count": len(entries),
             "stale_doc_count": len(entries) if kind == "documentation-drift" else 0,
+            "shard_insight_links": shard_insight_links,
+            "shard_insight_count": len(shard_matches),
             "evidence_score": evidence_score,
         }
         packet_write_specs[packet_stem] = {
@@ -3871,21 +4335,8 @@ def main() -> None:
             "conflict_links": packet_record["conflict_links"],
             "stale_doc_count": packet_record["stale_doc_count"],
             "evidence_score": evidence_score,
+            "shard_insight_links": shard_insight_links,
         }
-        write_generated_note(
-            intermediate_packet_dir / f"{packet_stem}.md",
-            build_intermediate_packet_note(
-                capability=capability,
-                support_links=[],
-                wiki_links=[],
-                repo_note_links=[],
-                code_reference_links=[],
-                packet_kind="conflict-cluster",
-                conflict_links=packet_record["conflict_links"],
-                stale_doc_count=packet_record["stale_doc_count"],
-                evidence_score=evidence_score,
-            ),
-        )
         packet_records.append(packet_record)
         packet_links.append(packet_link)
 
@@ -3915,6 +4366,20 @@ def main() -> None:
             "title": title,
             "description": "Reusable code-path packet linking repeated product evidence to one implementation anchor.",
         }
+        shard_matches = matching_shard_insights(
+            {
+                "title": title,
+                "support_links": support_links,
+                "wiki_links": wiki_links,
+                "code_reference_links": code_reference_links,
+            },
+            shard_insights,
+        )
+        shard_insight_links = unique_lines(
+            [str(item.get("source_shard_note") or "") for item in shard_matches if item.get("source_shard_note")],
+            10,
+        )
+        score = min(10, score + min(2, len(shard_matches)))
         packet_record = {
             "title": title,
             "stem": packet_stem,
@@ -3924,10 +4389,13 @@ def main() -> None:
             "wiki_links": wiki_links,
             "repo_note_links": repo_note_links,
             "code_reference_links": code_reference_links,
+            "shard_insight_links": shard_insight_links,
+            "shard_insight_count": len(shard_matches),
             "conflict_links": [],
             "conflict_count": 0,
             "stale_doc_count": 0,
             "evidence_score": score,
+            "shard_insight_links": shard_insight_links,
         }
         packet_write_specs[packet_stem] = {
             "kind": "standard",
@@ -3941,18 +4409,6 @@ def main() -> None:
             "stale_doc_count": 0,
             "evidence_score": score,
         }
-        write_generated_note(
-            intermediate_packet_dir / f"{packet_stem}.md",
-            build_intermediate_packet_note(
-                capability=capability,
-                support_links=support_links,
-                wiki_links=wiki_links,
-                repo_note_links=repo_note_links,
-                code_reference_links=code_reference_links,
-                packet_kind="code-path-cluster",
-                evidence_score=score,
-            ),
-        )
         packet_records.append(packet_record)
         packet_links.append(packet_link)
 
@@ -3974,6 +4430,22 @@ def main() -> None:
             60,
         )
         evidence_score = int(cluster.get("evidence_score", 0) or 0)
+        card_ids = [str(card.get("id")) for card in cards if card.get("id")]
+        shard_matches = matching_shard_insights(
+            {
+                "title": title,
+                "support_links": support_links,
+                "wiki_links": wiki_links,
+                "code_reference_links": code_reference_links,
+                "card_ids": card_ids,
+            },
+            shard_insights,
+        )
+        shard_insight_links = unique_lines(
+            [str(item.get("source_shard_note") or "") for item in shard_matches if item.get("source_shard_note")],
+            10,
+        )
+        evidence_score = min(10, evidence_score + min(2, len(shard_matches)))
         packet_record = {
             "title": title,
             "stem": packet_stem,
@@ -3986,17 +4458,16 @@ def main() -> None:
             "conflict_links": [],
             "conflict_count": 0,
             "stale_doc_count": 0,
+            "card_ids": card_ids,
+            "shard_insight_links": shard_insight_links,
+            "shard_insight_count": len(shard_matches),
             "semantic_cluster_score": cluster.get("similarity_score", 0),
             "evidence_score": evidence_score,
         }
         packet_write_specs[packet_stem] = {
             "kind": "semantic",
-            "cluster": cluster,
+            "cluster": {**cluster, "shard_insight_links": shard_insight_links, "evidence_score": evidence_score},
         }
-        write_generated_note(
-            intermediate_packet_dir / f"{packet_stem}.md",
-            build_semantic_packet_note(cluster),
-        )
         packet_records.append(packet_record)
         packet_links.append(packet_link)
 
@@ -4006,7 +4477,14 @@ def main() -> None:
         output_kind = infer_output_kind(packet)
         output_stem = stem_for_output_candidate(packet["title"])
         output_link = note_link(output_stem)
-        write_generated_note(output_candidate_dir / f"{output_stem}.md", build_output_candidate_note(packet))
+        add_note_render(
+            output_candidate_dir / f"{output_stem}.md",
+            namespace="note_render.output_candidate",
+            key=output_stem,
+            payload=packet,
+            renderer=lambda packet=packet: build_output_candidate_note(packet),
+            generated=True,
+        )
         output_links_by_packet[packet["link"]].append(output_link)
         output_candidate_records.append(
             {
@@ -4018,54 +4496,282 @@ def main() -> None:
                 "evidence_score": packet.get("evidence_score", 0),
             }
         )
+    progress.record(
+        "packets_outputs",
+        "completed",
+        completed_units=max(1, len(packet_records) + len(output_candidate_records)),
+        total_units=max(1, len(packet_records) + len(output_candidate_records)),
+        intermediate_packets=len(packet_records),
+        output_candidates=len(output_candidate_records),
+        shard_linked_packets=sum(1 for packet in packet_records if packet.get("shard_insight_count", 0)),
+    )
 
     for packet in packet_records:
         spec = packet_write_specs.get(packet["stem"])
         if not spec:
             continue
-        write_generated_note(
+        output_links = unique_lines(output_links_by_packet.get(packet["link"], []), 12)
+        add_note_render(
             intermediate_packet_dir / f"{packet['stem']}.md",
-            build_packet_note_from_spec(spec, unique_lines(output_links_by_packet.get(packet["link"], []), 12)),
+            namespace="note_render.intermediate_packet",
+            key=packet["stem"],
+            payload={"spec": spec, "output_links": output_links},
+            renderer=lambda spec=spec, output_links=output_links: build_packet_note_from_spec(spec, output_links),
+            generated=True,
         )
 
     stale_doc_refs = [entry for entry in external_links if entry.get("status") == "stale-doc-reference"]
     archive_records_written = 0
     if stale_doc_refs:
-        write_note(stale_archive_dir / f"Stale Sources - {DATE}.md", build_stale_sources_archive_note(stale_doc_refs))
+        add_note_render(
+            stale_archive_dir / f"Stale Sources - {DATE}.md",
+            namespace="note_render.archive",
+            key=f"stale-sources-{DATE}",
+            payload=stale_doc_refs,
+            renderer=lambda stale_doc_refs=stale_doc_refs: build_stale_sources_archive_note(stale_doc_refs),
+            generated=True,
+        )
         archive_records_written = 1
-    write_note(
+    add_note_render(
         review_dir / f"Weekly Review - {DATE}.md",
-        build_weekly_review_note(packet_records, output_candidate_records, stale_doc_refs, conflict_entries_by_kind),
+        namespace="note_render.review",
+        key=f"weekly-review-{DATE}",
+        payload={
+            "packet_records": packet_records,
+            "output_candidate_records": output_candidate_records,
+            "stale_doc_refs": stale_doc_refs,
+            "conflicts_by_kind": {key: list(value) for key, value in conflict_entries_by_kind.items()},
+        },
+        renderer=lambda: build_weekly_review_note(packet_records, output_candidate_records, stale_doc_refs, conflict_entries_by_kind),
+        generated=True,
     )
 
-    write_note(support_dir / "Support Articles Hub.md", build_support_articles_hub(support_grouped_for_hub))
-    write_note(wiki_dir / "Wiki Pages Hub.md", build_wiki_pages_hub({key: sorted(value) for key, value in section_grouped.items()}))
-    write_note(code_dir / "Code Intelligence Hub.md", build_code_intelligence_hub(repo_links, [row["link"] for row in capability_rows]))
-    write_note(code_dir / "Code Reference Index.md", build_code_reference_index({key: sorted(value) for key, value in code_reference_index.items()}))
-    write_note(code_maps_dir / "Route Map.md", build_route_map(code_intel))
-    write_note(code_maps_dir / "Schema And Data Model Map.md", build_schema_map(code_intel))
-    write_note(code_graphs_dir / "Call Graph Map.md", build_call_graph_map(code_intel))
-    write_note(code_graphs_dir / "Dependency Graph Map.md", build_dependency_graph_map(code_intel))
-    write_note(code_maps_dir / "Test Coverage Map.md", build_test_coverage_map(code_intel))
-    write_note(code_maps_dir / "Ownership And Churn Map.md", build_ownership_churn_map(code_intel))
-    write_note(intermediate_packet_dir / "Intermediate Packet Index.md", build_intermediate_packet_index(packet_links))
-    write_note(paths.vault / "20 Product" / "Product Capability Map.md", build_product_capability_map(capability_rows))
+    add_note_render(
+        support_dir / "Support Articles Hub.md",
+        namespace="note_render.aggregate",
+        key=f"support-hub-{DATE}",
+        payload={"support_grouped_for_hub": dict(support_grouped_for_hub), "force": DATE},
+        renderer=lambda: build_support_articles_hub(support_grouped_for_hub),
+        generated=True,
+    )
+    wiki_grouped = {key: sorted(value) for key, value in section_grouped.items()}
+    add_note_render(
+        wiki_dir / "Wiki Pages Hub.md",
+        namespace="note_render.aggregate",
+        key=f"wiki-hub-{DATE}",
+        payload={"wiki_grouped": wiki_grouped, "force": DATE},
+        renderer=lambda wiki_grouped=wiki_grouped: build_wiki_pages_hub(wiki_grouped),
+        generated=True,
+    )
+    add_note_render(
+        code_dir / "Code Intelligence Hub.md",
+        namespace="note_render.aggregate",
+        key=f"code-hub-{DATE}",
+        payload={"repo_links": repo_links, "capability_links": [row["link"] for row in capability_rows], "force": DATE},
+        renderer=lambda: build_code_intelligence_hub(repo_links, [row["link"] for row in capability_rows]),
+        generated=True,
+    )
+    code_reference_grouped = {key: sorted(value) for key, value in code_reference_index.items()}
+    add_note_render(
+        code_dir / "Code Reference Index.md",
+        namespace="note_render.aggregate",
+        key=f"code-reference-index-{DATE}",
+        payload={"code_reference_index": code_reference_grouped, "force": DATE},
+        renderer=lambda code_reference_grouped=code_reference_grouped: build_code_reference_index(code_reference_grouped),
+        generated=True,
+    )
+    add_note_render(code_maps_dir / "Route Map.md", namespace="note_render.aggregate", key=f"route-map-{DATE}", payload={"code_intel": code_intel, "force": DATE}, renderer=lambda: build_route_map(code_intel), generated=True)
+    add_note_render(code_maps_dir / "Schema And Data Model Map.md", namespace="note_render.aggregate", key=f"schema-map-{DATE}", payload={"code_intel": code_intel, "force": DATE}, renderer=lambda: build_schema_map(code_intel), generated=True)
+    add_note_render(code_graphs_dir / "Call Graph Map.md", namespace="note_render.aggregate", key=f"call-graph-{DATE}", payload={"code_intel": code_intel, "force": DATE}, renderer=lambda: build_call_graph_map(code_intel), generated=True)
+    add_note_render(code_graphs_dir / "Dependency Graph Map.md", namespace="note_render.aggregate", key=f"dependency-graph-{DATE}", payload={"code_intel": code_intel, "force": DATE}, renderer=lambda: build_dependency_graph_map(code_intel), generated=True)
+    add_note_render(code_maps_dir / "Test Coverage Map.md", namespace="note_render.aggregate", key=f"test-coverage-{DATE}", payload={"code_intel": code_intel, "force": DATE}, renderer=lambda: build_test_coverage_map(code_intel), generated=True)
+    add_note_render(code_maps_dir / "Ownership And Churn Map.md", namespace="note_render.aggregate", key=f"ownership-churn-{DATE}", payload={"code_intel": code_intel, "force": DATE}, renderer=lambda: build_ownership_churn_map(code_intel), generated=True)
+    add_note_render(intermediate_packet_dir / "Intermediate Packet Index.md", namespace="note_render.aggregate", key=f"packet-index-{DATE}", payload={"packet_links": packet_links, "force": DATE}, renderer=lambda: build_intermediate_packet_index(packet_links), generated=True)
+    add_note_render(paths.vault / "20 Product" / "Product Capability Map.md", namespace="note_render.aggregate", key=f"product-capability-map-{DATE}", payload={"capability_rows": capability_rows, "force": DATE}, renderer=lambda: build_product_capability_map(capability_rows), generated=True)
     total_support_articles = sum(1 for item in support_inventory if item["category"] == "support-article")
     total_reference_docs = len(support_inventory) - total_support_articles
-    write_note(paths.vault / "10 Sources" / "Support Article Index.md", build_support_article_index(total_support_articles, total_reference_docs, len(docx_extracts), support_grouped_for_hub))
-    section_counts = {section: len(links) for section, links in section_grouped.items()}
-    write_note(paths.vault / "10 Sources" / "Engineering Wiki Index.md", build_engineering_wiki_index(section_counts, {key: sorted(value) for key, value in section_grouped.items()}))
-    write_note(paths.vault / "30 Engineering" / "Repo Catalog.md", build_repo_catalog(repo_links))
-    write_note(paths.vault / "30 Engineering" / "GitHub Source Of Truth.md", build_source_of_truth_note(manifest, external_links))
-    write_note(paths.vault / "30 Engineering" / "Support-to-Code Map.md", build_support_to_code_map(capability_rows))
-    write_note(
-        paths.vault / "30 Engineering" / "Conflict Log.md",
-        build_conflict_log({key: unique_lines(value, 400) for key, value in conflict_entries_by_kind.items()}),
+    add_note_render(
+        paths.vault / "10 Sources" / "Support Article Index.md",
+        namespace="note_render.aggregate",
+        key=f"support-article-index-{DATE}",
+        payload={
+            "total_support_articles": total_support_articles,
+            "total_reference_docs": total_reference_docs,
+            "docx_extracts": len(docx_extracts),
+            "support_grouped_for_hub": dict(support_grouped_for_hub),
+            "force": DATE,
+        },
+        renderer=lambda: build_support_article_index(total_support_articles, total_reference_docs, len(docx_extracts), support_grouped_for_hub),
+        generated=True,
     )
-    write_note(paths.vault / "40 Research" / "00 Research Hub.md", build_research_hub())
+    section_counts = {section: len(links) for section, links in section_grouped.items()}
+    add_note_render(paths.vault / "10 Sources" / "Engineering Wiki Index.md", namespace="note_render.aggregate", key=f"engineering-wiki-index-{DATE}", payload={"section_counts": section_counts, "wiki_grouped": wiki_grouped, "force": DATE}, renderer=lambda: build_engineering_wiki_index(section_counts, wiki_grouped), generated=True)
+    add_note_render(paths.vault / "30 Engineering" / "Repo Catalog.md", namespace="note_render.aggregate", key=f"repo-catalog-{DATE}", payload={"repo_links": repo_links, "force": DATE}, renderer=lambda: build_repo_catalog(repo_links), generated=True)
+    add_note_render(paths.vault / "30 Engineering" / "GitHub Source Of Truth.md", namespace="note_render.aggregate", key=f"github-source-of-truth-{DATE}", payload={"manifest": manifest, "external_links": external_links, "force": DATE}, renderer=lambda: build_source_of_truth_note(manifest, external_links), generated=True)
+    add_note_render(paths.vault / "30 Engineering" / "Support-to-Code Map.md", namespace="note_render.aggregate", key=f"support-to-code-map-{DATE}", payload={"capability_rows": capability_rows, "force": DATE}, renderer=lambda: build_support_to_code_map(capability_rows), generated=True)
+    conflict_log_payload = {key: unique_lines(value, 400) for key, value in conflict_entries_by_kind.items()}
+    add_note_render(
+        paths.vault / "30 Engineering" / "Conflict Log.md",
+        namespace="note_render.aggregate",
+        key=f"conflict-log-{DATE}",
+        payload={"conflicts": conflict_log_payload, "force": DATE},
+        renderer=lambda conflict_log_payload=conflict_log_payload: build_conflict_log(conflict_log_payload),
+        generated=True,
+    )
+    add_note_render(paths.vault / "40 Research" / "00 Research Hub.md", namespace="note_render.aggregate", key=f"research-hub-{DATE}", payload={"force": DATE}, renderer=build_research_hub, generated=True)
     stale_doc_count = sum(1 for entry in external_links if entry.get("status") == "stale-doc-reference")
-    write_note(paths.vault / "00 Home" / "Intelligence Home.md", build_home_note(len(support_inventory), len(wiki_inventory), len(CAPABILITIES), len(repo_snapshots), stale_doc_count))
+    add_note_render(
+        paths.vault / "00 Home" / "Intelligence Home.md",
+        namespace="note_render.aggregate",
+        key=f"intelligence-home-{DATE}",
+        payload={
+            "support_inventory": len(support_inventory),
+            "wiki_inventory": len(wiki_inventory),
+            "capabilities": len(CAPABILITIES),
+            "repo_snapshots": len(repo_snapshots),
+            "stale_doc_count": stale_doc_count,
+            "force": DATE,
+        },
+        renderer=lambda: build_home_note(len(support_inventory), len(wiki_inventory), len(CAPABILITIES), len(repo_snapshots), stale_doc_count),
+        generated=True,
+    )
+    note_render_units = max(1, len(note_specs))
+    progress.record(
+        "note_rendering",
+        "running",
+        completed_units=0,
+        total_units=note_render_units,
+        note_count=len(note_specs),
+        note_render_workers=generation_config["note_render_workers"],
+    )
+    flush_note_renders()
+    progress.record(
+        "note_rendering",
+        "completed",
+        completed_units=note_render_units,
+        total_units=note_render_units,
+        **rendered_note_stats,
+    )
+    reducer_started = time.perf_counter()
+    progress.record("generation_shard_reducer", "running", completed_units=0, total_units=5)
+    shard_inventory = generation_shards.reduce_generation_shards(
+        shard_inventory,
+        vault_path=paths.vault,
+        known_note_titles={path.stem for path in paths.vault.rglob("*.md") if path.is_file()},
+    )
+    write_json(paths.json_dir / "generation_shards.json", shard_inventory)
+    write_json(paths.json_dir / "shard_insights.json", shard_inventory.get("shard_insights", shard_insights))
+    record_timing(
+        timings,
+        "generation_shard_reducer",
+        reducer_started,
+        merged_count=shard_inventory.get("reducer", {}).get("merged_count", 0),
+        rejected_count=shard_inventory.get("reducer", {}).get("rejected_count", 0),
+    )
+    progress.record(
+        "generation_shard_reducer",
+        "completed",
+        completed_units=max(
+            1,
+            int(shard_inventory.get("reducer", {}).get("merged_count", 0) or 0)
+            + int(shard_inventory.get("reducer", {}).get("rejected_count", 0) or 0),
+        ),
+        total_units=max(
+            1,
+            int(shard_inventory.get("reducer", {}).get("merged_count", 0) or 0)
+            + int(shard_inventory.get("reducer", {}).get("rejected_count", 0) or 0),
+        ),
+        merged_count=shard_inventory.get("reducer", {}).get("merged_count", 0),
+        rejected_count=shard_inventory.get("reducer", {}).get("rejected_count", 0),
+    )
+    progress.record("vault_validation", "running", completed_units=0, total_units=2)
     sanitize_summary = sanitize_vault_notes(paths.vault)
+    record_timing(
+        timings,
+        "vault_note_generation",
+        stage_started,
+        note_render_workers=generation_config["note_render_workers"],
+        support_notes=len(support_records),
+        wiki_notes=len(wiki_records),
+        intermediate_packets=len(packet_records),
+        output_candidates=len(output_candidate_records),
+        note_render_cache_hits=rendered_note_stats["cache_hits"],
+        note_render_cache_misses=rendered_note_stats["cache_misses"],
+    )
+    cache_metadata = {
+        "schema_version": 1,
+        "generated_at": DATE,
+        "incremental_rebuild": generation_config["incremental_rebuild"],
+        "fingerprints": {
+            "manifest": content_fingerprint(manifest),
+            "profile": content_fingerprint({
+                "capabilities": CAPABILITIES,
+                "semantic_clustering": semantic_config,
+                "code_intelligence": profile["code_intelligence"],
+                "generation_performance": generation_config,
+                "rate_limits": rate_limit_config,
+            }),
+            "source_inventories": content_fingerprint({
+                "support_articles": support_inventory,
+                "wiki_pages": wiki_inventory,
+                "external_links": external_links,
+                "repo_snapshots": repo_snapshots,
+                "docx_extracts": docx_extracts,
+            }),
+        },
+        "dependency_graph": render_cache.get("dependency_graph", {}) if render_cache is not None else {},
+        "cache_policy": "Per-source, per-code-file, semantic-card, and generated-note entries are reused by content hash; aggregate notes are regenerated with a date-scoped cache key.",
+    }
+    if render_cache is not None:
+        render_cache.update(cache_metadata)
+        incremental_cache.write_incremental_cache(rebuild_cache_path, render_cache)
+    else:
+        write_json(paths.json_dir / "rebuild_cache.json", cache_metadata)
+    rate_limit_inventory = rate_limits.write_rate_limit_inventory(
+        paths.json_dir / "rate_limit_events.json",
+        config=rate_limit_config,
+        events=rate_limiter.recorder.events(),
+    )
+    timings["rate_limit_summary"] = rate_limit_inventory.get("summary", {})
+    timings["total_seconds"] = round(sum(item["seconds"] for item in timings.get("stages", {}).values()), 4)
+    write_json(paths.json_dir / "rebuild_timings.json", timings)
+    write_performance_summary(
+        paths,
+        {
+            "rebuild": {
+                "total_seconds": timings["total_seconds"],
+                "force": bool(args.force),
+                "code_intelligence": code_intel.get("summary", {}),
+                "semantic_stats": semantic_result.get("stats", {}),
+                "generation_shards": {
+                    "cache_hits": shard_inventory.get("cache_hits", 0),
+                    "cache_misses": shard_inventory.get("cache_misses", 0),
+                    "status_counts": shard_inventory.get("status_counts", {}),
+                },
+                "note_rendering": rendered_note_stats,
+                "rate_limit_summary": rate_limit_inventory.get("summary", {}),
+                "timings_path": str(paths.json_dir / "rebuild_timings.json"),
+            }
+        },
+    )
+    progress.record(
+        "vault_validation",
+        "completed",
+        completed_units=2,
+        total_units=2,
+        vault_sanitizer=sanitize_summary,
+        rate_limit_summary=rate_limit_inventory.get("summary", {}),
+    )
+    progress.record(
+        "rebuild",
+        "completed",
+        completed_units=2,
+        total_units=2,
+        total_seconds=timings["total_seconds"],
+        intermediate_packets=len(packet_records),
+        output_candidates=len(output_candidate_records),
+        rate_limit_summary=rate_limit_inventory.get("summary", {}),
+    )
 
     print(
         json.dumps(
@@ -4081,6 +4787,8 @@ def main() -> None:
                 "code_intelligence": code_intel.get("summary", {}),
                 "semantic_clusters": len(semantic_result.get("clusters", [])),
                 "semantic_stats": semantic_result.get("stats", {}),
+                "generation_performance": generation_config,
+                "rebuild_timings": str(paths.json_dir / "rebuild_timings.json"),
                 "vault": str(paths.vault),
                 "vault_sanitizer": sanitize_summary,
             },

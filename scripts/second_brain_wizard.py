@@ -273,7 +273,7 @@ def doctor(portfolio_root: Path) -> int:
     return 1 if failures else 0
 
 
-def refresh(portfolio_root: Path, slug: str | None = None, *, metadata_only: bool = False) -> int:
+def refresh(portfolio_root: Path, slug: str | None = None, *, metadata_only: bool = False, force: bool = False) -> int:
     registry = ensure_registry_exists(portfolio_root)
     brains = registry.get("brains") or []
     selected = [brain for brain in brains if slug is None or brain.get("slug") == slug]
@@ -287,8 +287,13 @@ def refresh(portfolio_root: Path, slug: str | None = None, *, metadata_only: boo
         readiness = Path(str(brain["readiness_report_path"]))
         run([sys.executable, str(VALIDATE_MANIFEST), "--manifest", str(manifest), "--check-paths"])
         if not metadata_only:
-            run([sys.executable, str(BUILD_SOURCE_INDICES), "--manifest", str(manifest)])
-            run([sys.executable, str(REBUILD_PRODUCT_BRAIN), "--manifest", str(manifest)])
+            source_cmd = [sys.executable, str(BUILD_SOURCE_INDICES), "--manifest", str(manifest)]
+            rebuild_cmd = [sys.executable, str(REBUILD_PRODUCT_BRAIN), "--manifest", str(manifest)]
+            if force:
+                source_cmd.append("--force")
+                rebuild_cmd.append("--force")
+            run(source_cmd)
+            run(rebuild_cmd)
         run([sys.executable, str(AUDIT_VAULT), "--vault", str(vault), "--write", str(audit)])
         run([sys.executable, str(GENERATE_READINESS), "--manifest", str(manifest), "--write", str(readiness)])
         brain["status"] = "refreshed"
@@ -387,6 +392,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only regenerate audit and readiness outputs; skip source indexing and vault rebuild.",
     )
+    refresh_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Bypass source-index and vault-rebuild caches for a clean regeneration.",
+    )
 
     return parser
 
@@ -423,7 +433,7 @@ def main() -> int:
     if args.command == "doctor":
         return doctor(args.portfolio_root)
     if args.command == "refresh":
-        return refresh(args.portfolio_root, args.slug, metadata_only=args.metadata_only)
+        return refresh(args.portfolio_root, args.slug, metadata_only=args.metadata_only, force=args.force)
 
     parser.error("Unknown command.")
     return 2

@@ -133,11 +133,17 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
     semantic = load_json_if_exists(inventory_dir / "semantic_clusters.json")
     embedding_cache = load_json_if_exists(inventory_dir / "embedding_cache.json")
     llm_cache = load_json_if_exists(inventory_dir / "llm_cluster_cache.json")
-    if not code_intel and not semantic and not embedding_cache and not llm_cache:
+    rebuild_cache = load_json_if_exists(inventory_dir / "rebuild_cache.json")
+    rate_limits = load_json_if_exists(inventory_dir / "rate_limit_events.json")
+    benchmark = load_json_if_exists(inventory_dir / "benchmark_report.json")
+    if not code_intel and not semantic and not embedding_cache and not llm_cache and not rebuild_cache and not rate_limits and not benchmark:
         return {}
     summary = code_intel.get("summary") if isinstance(code_intel.get("summary"), dict) else {}
     graph = code_intel.get("graph") if isinstance(code_intel.get("graph"), dict) else {}
     semantic_stats = semantic.get("stats") if isinstance(semantic.get("stats"), dict) else {}
+    cache_stats = rebuild_cache.get("stats") if isinstance(rebuild_cache.get("stats"), dict) else {}
+    rate_summary = rate_limits.get("summary") if isinstance(rate_limits.get("summary"), dict) else {}
+    benchmark_runs = benchmark.get("runs") if isinstance(benchmark.get("runs"), list) else []
     clusters = semantic.get("clusters") if isinstance(semantic.get("clusters"), list) else []
     cache_items = embedding_cache.get("items") if isinstance(embedding_cache.get("items"), dict) else {}
     llm_cache_items = llm_cache.get("items") if isinstance(llm_cache.get("items"), dict) else {}
@@ -164,6 +170,12 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
         "llm_cache_hits": int(semantic_stats.get("llm_cache_hits", 0) or 0),
         "llm_cache_misses": int(semantic_stats.get("llm_cache_misses", 0) or 0),
         "llm_failures": int(semantic_stats.get("llm_failures", 0) or 0),
+        "rebuild_cache_hits": int(cache_stats.get("hits", 0) or 0),
+        "rebuild_cache_misses": int(cache_stats.get("misses", 0) or 0),
+        "rate_limit_events": int(rate_summary.get("event_count", 0) or 0),
+        "rate_limit_wait_seconds": str(rate_summary.get("total_wait_seconds", 0)),
+        "benchmark_runs": len(benchmark_runs),
+        "benchmark_digest_stable": "yes" if benchmark.get("digest_stable") else "no",
     }
 
 
@@ -278,6 +290,12 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
         lines.append(f"- LLM synthesis cache items: `{inventory_metrics['llm_cache_items']}`")
         lines.append(f"- LLM synthesis cache hits: `{inventory_metrics['llm_cache_hits']}`")
         lines.append(f"- LLM synthesis failures: `{inventory_metrics['llm_failures']}`")
+        lines.append(f"- Rebuild cache hits: `{inventory_metrics['rebuild_cache_hits']}`")
+        lines.append(f"- Rebuild cache misses: `{inventory_metrics['rebuild_cache_misses']}`")
+        lines.append(f"- Rate-limit events: `{inventory_metrics['rate_limit_events']}`")
+        lines.append(f"- Rate-limit wait seconds: `{inventory_metrics['rate_limit_wait_seconds']}`")
+        lines.append(f"- Benchmark runs: `{inventory_metrics['benchmark_runs']}`")
+        lines.append(f"- Benchmark digest stable: `{inventory_metrics['benchmark_digest_stable']}`")
 
     lines.extend(["", "## Readiness Categories", ""])
     for category in categories:

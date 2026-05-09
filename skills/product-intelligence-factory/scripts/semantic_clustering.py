@@ -6,18 +6,29 @@ import json
 import math
 import os
 import re
+import sys
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 
 OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"
 LLM_SYNTHESIS_PROMPT_VERSION = "product-basb-cluster-synthesis-v1"
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import generation_performance
+import rate_limits
+
 
 def default_semantic_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
     configured = dict((profile or {}).get("semantic_clustering") or {})
+    generation_config = generation_performance.default_generation_config(profile)
     return {
         "provider": configured.get("provider", "openai"),
         "embedding_model": configured.get("embedding_model", "text-embedding-3-small"),
@@ -27,6 +38,9 @@ def default_semantic_config(profile: dict[str, Any] | None = None) -> dict[str, 
         "llm_model": configured.get("llm_model", "gpt-4.1-mini"),
         "llm_cluster_synthesis": bool(configured.get("llm_cluster_synthesis", True)),
         "max_llm_clusters": int(configured.get("max_llm_clusters", 40)),
+        "embedding_workers": generation_config["embedding_workers"],
+        "embedding_batch_size": generation_config["embedding_batch_size"],
+        "llm_synthesis_workers": generation_config["llm_synthesis_workers"],
     }
 
 
@@ -85,8 +99,14 @@ class OpenAIEmbeddingClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            provider_error = rate_limits.provider_rate_limit_from_http_error(exc)
+            if provider_error is not None:
+                raise provider_error from exc
+            raise
         return [item["embedding"] for item in sorted(data["data"], key=lambda item: item["index"])]
 
 
@@ -126,8 +146,14 @@ class OpenAILLMSynthesisClient:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            provider_error = rate_limits.provider_rate_limit_from_http_error(exc)
+            if provider_error is not None:
+                raise provider_error from exc
+            raise
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         return parsed if isinstance(parsed, dict) else {}
@@ -191,13 +217,46 @@ def write_cache(path: Path, cache: dict[str, Any]) -> None:
     path.write_text(json.dumps(cache, indent=2, sort_keys=True) + "\n")
 
 
+def semantic_result_cache_key(cards: list[dict[str, Any]], config: dict[str, Any]) -> str:
+    cache_config = {
+        key: config.get(key)
+        for key in (
+            "provider",
+            "embedding_model",
+            "min_cluster_size",
+            "similarity_threshold",
+            "max_clusters",
+            "llm_model",
+            "llm_cluster_synthesis",
+            "max_llm_clusters",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "cards": cards,
+                "config": cache_config,
+                "prompt_version": LLM_SYNTHESIS_PROMPT_VERSION,
+            },
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def chunks(items: list[Any], size: int) -> list[list[Any]]:
+    return [items[index:index + size] for index in range(0, len(items), size)]
+
+
 def embed_cards(
     cards: list[dict[str, Any]],
     config: dict[str, Any],
     cache_path: Path,
     client: Any | None = None,
+    limiter: rate_limits.WindowRateLimiter | None = None,
 ) -> tuple[list[list[float]], dict[str, int]]:
-    require_openai_or_fixture()
+    if client is None:
+        require_openai_or_fixture()
     model = str(config["embedding_model"])
     cache = load_cache(cache_path)
     client = client or (FixtureEmbeddingClient() if os.environ.get("PRODUCT_BASB_EMBEDDING_FIXTURE") == "1" else OpenAIEmbeddingClient())
@@ -214,17 +273,49 @@ def embed_cards(
         else:
             misses.append((index, key, text))
     if misses:
+        batch_size = int(config.get("embedding_batch_size", 512))
+        worker_count = int(config.get("embedding_workers", 8))
+        miss_batches = chunks(misses, batch_size)
+        shared_budget = rate_limits.shared_budget_from_config(config, recorder=limiter.recorder if limiter else None)
+
+        def embed_batch(batch: list[tuple[int, str, str]]) -> list[list[float]]:
+            token_count = sum(len(text) for _, _, text in batch) // 4
+            if limiter is not None:
+                limiter.acquire_openai(
+                    stage="semantic_embedding",
+                    worker_count=worker_count,
+                    tokens=token_count,
+                    recommended_knob="embedding_workers",
+                )
+            if shared_budget is not None:
+                shared_budget.acquire(
+                    stage="semantic_embedding",
+                    worker_count=worker_count,
+                    requests=1,
+                    tokens=token_count,
+                    recommended_knob="embedding_workers",
+                )
+            return client.embed([text for _, _, text in batch], model)
+
         try:
-            embedded = client.embed([text for _, _, text in misses], model)
+            if len(miss_batches) == 1:
+                embedded_batches = [embed_batch(miss_batches[0])]
+            else:
+                with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="basb-embedding") as executor:
+                    embedded_batches = list(executor.map(embed_batch, miss_batches))
         except Exception as exc:
-            raise SystemExit(f"OpenAI semantic clustering failed before packet synthesis: {exc}") from exc
-        for (index, key, text), vector in zip(misses, embedded):
-            vectors[index] = vector
-            cache["items"][key] = {
-                "model": model,
-                "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                "embedding": vector,
-            }
+            raise SystemExit(
+                "OpenAI semantic clustering failed during embedding "
+                f"with embedding_workers={worker_count} and embedding_batch_size={batch_size}: {exc}"
+            ) from exc
+        for batch, embedded in zip(miss_batches, embedded_batches):
+            for (index, key, text), vector in zip(batch, embedded):
+                vectors[index] = vector
+                cache["items"][key] = {
+                    "model": model,
+                    "text_hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "embedding": vector,
+                }
     write_cache(cache_path, cache)
     return [vector or [] for vector in vectors], {"cache_hits": cache_hits, "cache_misses": len(misses), "openai_failures": 0}
 
@@ -300,6 +391,7 @@ def synthesize_clusters_with_llm(
     config: dict[str, Any],
     llm_cache_path: Path,
     client: Any | None = None,
+    limiter: rate_limits.WindowRateLimiter | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     if not config.get("llm_cluster_synthesis", True):
         return [
@@ -318,33 +410,66 @@ def synthesize_clusters_with_llm(
     cache_hits = 0
     cache_misses = 0
     failures = 0
-    synthesized: list[dict[str, Any]] = []
+    synthesized: list[dict[str, Any] | None] = [None] * len(clusters)
+    tasks: list[tuple[int, str, dict[str, Any]]] = []
     for index, cluster in enumerate(clusters):
         if index >= max_llm_clusters:
-            synthesized.append(apply_llm_synthesis(cluster, {}, "skipped-max-clusters", model))
+            synthesized[index] = apply_llm_synthesis(cluster, {}, "skipped-max-clusters", model)
             continue
         key = llm_cache_key(cluster, model)
         cached = cache["items"].get(key)
         if cached and cached.get("model") == model:
             cache_hits += 1
-            synthesized.append(apply_llm_synthesis(cluster, cached.get("synthesis", {}), "succeeded", model))
+            synthesized[index] = apply_llm_synthesis(cluster, cached.get("synthesis", {}), "succeeded", model)
             continue
         cache_misses += 1
+        tasks.append((index, key, cluster))
+
+    shared_budget = rate_limits.shared_budget_from_config(config, recorder=limiter.recorder if limiter else None)
+
+    def synthesize_task(task: tuple[int, str, dict[str, Any]]) -> tuple[int, str, dict[str, Any], dict[str, Any] | None, Exception | None]:
+        index, key, cluster = task
         try:
+            worker_count = int(config.get("llm_synthesis_workers", 10))
+            token_count = len(json.dumps(compact_cluster_for_llm(cluster), sort_keys=True)) // 4
+            if limiter is not None:
+                limiter.acquire_openai(
+                    stage="semantic_llm_synthesis",
+                    worker_count=worker_count,
+                    tokens=token_count,
+                    recommended_knob="llm_synthesis_workers",
+                )
+            if shared_budget is not None:
+                shared_budget.acquire(
+                    stage="semantic_llm_synthesis",
+                    worker_count=worker_count,
+                    requests=1,
+                    tokens=token_count,
+                    recommended_knob="llm_synthesis_workers",
+                )
             synthesis = client.synthesize_cluster(cluster, model)
-        except Exception:
-            failures += 1
-            synthesized.append(apply_llm_synthesis(cluster, {}, "failed", model))
-            continue
-        cache["items"][key] = {
-            "model": model,
-            "prompt_version": LLM_SYNTHESIS_PROMPT_VERSION,
-            "card_ids": sorted(str(card_id) for card_id in cluster.get("card_ids", [])),
-            "synthesis": synthesis,
-        }
-        synthesized.append(apply_llm_synthesis(cluster, synthesis, "succeeded", model))
+            return index, key, cluster, synthesis, None
+        except Exception as exc:
+            return index, key, cluster, None, exc
+
+    if tasks:
+        worker_count = int(config.get("llm_synthesis_workers", 10))
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="basb-llm-synthesis") as executor:
+            results = list(executor.map(synthesize_task, tasks))
+        for index, key, cluster, synthesis, error in sorted(results, key=lambda item: item[0]):
+            if error is not None or synthesis is None:
+                failures += 1
+                synthesized[index] = apply_llm_synthesis(cluster, {}, "failed", model)
+                continue
+            cache["items"][key] = {
+                "model": model,
+                "prompt_version": LLM_SYNTHESIS_PROMPT_VERSION,
+                "card_ids": sorted(str(card_id) for card_id in cluster.get("card_ids", [])),
+                "synthesis": synthesis,
+            }
+            synthesized[index] = apply_llm_synthesis(cluster, synthesis, "succeeded", model)
     write_cache(llm_cache_path, cache)
-    return synthesized, {"llm_cache_hits": cache_hits, "llm_cache_misses": cache_misses, "llm_failures": failures}
+    return [item for item in synthesized if item is not None], {"llm_cache_hits": cache_hits, "llm_cache_misses": cache_misses, "llm_failures": failures}
 
 
 def cluster_cards(
@@ -354,12 +479,33 @@ def cluster_cards(
     client: Any | None = None,
     llm_cache_path: Path | None = None,
     llm_client: Any | None = None,
+    limiter: rate_limits.WindowRateLimiter | None = None,
+    result_cache_path: Path | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     if str(config.get("provider", "openai")).lower() != "openai":
         raise SystemExit("semantic_clustering.provider must be `openai`; local-only semantic clustering is intentionally unsupported.")
     if not cards:
         return {"clusters": [], "stats": {"cache_hits": 0, "cache_misses": 0, "openai_failures": 0, "llm_cache_hits": 0, "llm_cache_misses": 0, "llm_failures": 0}}
-    vectors, stats = embed_cards(cards, config, cache_path, client=client)
+    result_cache: dict[str, Any] | None = None
+    result_cache_key = semantic_result_cache_key(cards, config)
+    if result_cache_path is not None:
+        result_cache = load_cache(result_cache_path)
+        cached_result = result_cache["items"].get(result_cache_key)
+        if not force and isinstance(cached_result, dict) and isinstance(cached_result.get("result"), dict):
+            result = dict(cached_result["result"])
+            result["stats"] = {
+                **(result.get("stats") or {}),
+                "result_cache_hits": 1,
+                "result_cache_misses": 0,
+                "cache_hits": len(cards),
+                "cache_misses": 0,
+                "llm_cache_hits": len(result.get("clusters", [])),
+                "llm_cache_misses": 0,
+                "cards_embedded": len(cards),
+            }
+            return result
+    vectors, stats = embed_cards(cards, config, cache_path, client=client, limiter=limiter)
     threshold = float(config["similarity_threshold"])
     min_size = int(config["min_cluster_size"])
     max_clusters = int(config["max_clusters"])
@@ -399,7 +545,22 @@ def cluster_cards(
         if len(clusters) >= max_clusters:
             break
     llm_cache_path = llm_cache_path or cache_path.with_name("llm_cluster_cache.json")
-    clusters, llm_stats = synthesize_clusters_with_llm(clusters, config, llm_cache_path, client=llm_client)
+    clusters, llm_stats = synthesize_clusters_with_llm(clusters, config, llm_cache_path, client=llm_client, limiter=limiter)
     stats.update(llm_stats)
-    stats.update({"semantic_cluster_count": len(clusters), "cards_embedded": len(cards)})
-    return {"clusters": clusters, "stats": stats}
+    stats.update(
+        {
+            "semantic_cluster_count": len(clusters),
+            "cards_embedded": len(cards),
+            "result_cache_hits": 0,
+            "result_cache_misses": 1 if result_cache_path is not None else 0,
+        }
+    )
+    result = {"clusters": clusters, "stats": stats}
+    if result_cache_path is not None:
+        assert result_cache is not None
+        result_cache["items"][result_cache_key] = {
+            "prompt_version": LLM_SYNTHESIS_PROMPT_VERSION,
+            "result": result,
+        }
+        write_cache(result_cache_path, result_cache)
+    return result

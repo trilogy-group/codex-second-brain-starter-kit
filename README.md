@@ -73,6 +73,57 @@ Typical use cases:
 7. Convert high-value intelligence into shippable outputs and archive completed work.
 8. Optionally add recurring automations after the first manual pass is proven.
 
+## Performance for large source sets
+
+The full-fidelity rebuild is designed to keep provenance, code intelligence, semantic clustering, LLM shard synthesis, audits, and readiness outputs enabled. For 500+ sources, the fastest path is to preserve the generated caches between runs and let the packaged scripts skip unchanged work.
+
+Run source indexing and vault rebuilds directly when you want the clearest performance output:
+
+```bash
+python3 skills/product-intelligence-factory/scripts/build_source_indices.py --manifest "/absolute/path/to/product.yaml"
+OPENAI_API_KEY="..." python3 skills/product-intelligence-factory/scripts/rebuild_product_brain.py --manifest "/absolute/path/to/product.yaml"
+```
+
+If you manage the product through the portfolio wizard, use the refresh command:
+
+```bash
+./scripts/second_brain_wizard.py refresh --portfolio-root "/absolute/path/to/second-brain-portfolio" --slug "product-slug"
+```
+
+Keep these paths stable between runs:
+- `sources.mirror_path`
+- `sources.mirror_path/inventories/`
+- the repository clone paths listed in the manifest
+- generated cache files such as `source_extract_cache.json`, `source_index_cache.json`, `rebuild_cache.json`, `embedding_cache.json`, `llm_cluster_cache.json`, `semantic_result_cache.json`, `generation_shard_cache.json`, and `generated_notes_manifest.json`
+
+Tune workers in `profile.intelligence_path` gradually. Start from the defaults, raise one knob at a time, and watch `source_index_timings.json`, `rebuild_timings.json`, `performance_summary.json`, and `rate_limit_events.json` before increasing concurrency again.
+
+```yaml
+generation_performance:
+  parallel_workers: 24
+  source_extract_workers: 24
+  source_fetch_workers: 40
+  repo_analysis_workers: 6
+  code_analysis_workers: 12
+  note_render_workers: 32
+  embedding_workers: 8
+  llm_synthesis_workers: 10
+  embedding_batch_size: 512
+  incremental_rebuild: true
+rate_limits:
+  openai_requests_per_minute: 300
+  openai_tokens_per_minute: 200000
+  source_fetch_requests_per_host_per_minute: 120
+```
+
+Use `--force` only when you intentionally want a clean rebuild: after changing generation logic, after deleting or repairing corrupted cache files, during a clean benchmark, or when you suspect stale generated output. A forced run is expected to be slower because it bypasses source-index, semantic, shard, and rebuild reuse.
+
+Benchmark cold and warm runs with:
+
+```bash
+python3 skills/product-intelligence-factory/scripts/benchmark_rebuild.py --manifest "/absolute/path/to/product.yaml" --runs 2 --label "large-source-baseline"
+```
+
 Existing vaults can be upgraded conservatively with a dry-run migration first:
 
 ```bash

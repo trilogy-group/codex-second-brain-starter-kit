@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import importlib.util
 import json
 import re
 import ssl
 import subprocess
+import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -20,6 +23,15 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import yaml
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+import generation_performance
+import generation_progress
+import rate_limits
+import source_index_cache
 
 
 DATE = date.today().isoformat()
@@ -49,6 +61,8 @@ PLACEHOLDER_PARTS = (
 PLACEHOLDER_HOST_LABELS = {"hubname", "yourhub", "yourdomain", "yourcompany", "example"}
 TRAILING_CHARS = ".,;:)]}`\"'"
 USER_AGENT = "ProductIntelligenceFactory/1.0 (+https://github.com/trilogy-group/codex-second-brain-starter-kit)"
+SOURCE_EXTRACT_CACHE_SCHEMA_VERSION = 1
+SOURCE_EXTRACT_CACHE_LOCK = threading.Lock()
 FETCH_RETRY_ATTEMPTS = 3
 FETCH_RETRY_BACKOFF_SECONDS = 0.25
 RETRYABLE_URL_ERROR_MARKERS = (
@@ -101,17 +115,42 @@ def load_manifest(path: Path) -> dict[str, Any]:
     return data
 
 
+def load_generation_performance(manifest: dict[str, Any]) -> dict[str, Any]:
+    profile_path = (manifest.get("profile") or {}).get("intelligence_path")
+    if not profile_path:
+        return generation_performance.default_generation_config({})
+    path = Path(str(profile_path)).expanduser()
+    if not path.exists():
+        return generation_performance.default_generation_config({})
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return generation_performance.default_generation_config(data if isinstance(data, dict) else {})
+
+
+def load_rate_limit_config(manifest: dict[str, Any]) -> dict[str, Any]:
+    profile_path = (manifest.get("profile") or {}).get("intelligence_path")
+    if not profile_path:
+        return generation_performance.default_rate_limit_config({})
+    path = Path(str(profile_path)).expanduser()
+    if not path.exists():
+        return generation_performance.default_rate_limit_config({})
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return generation_performance.default_rate_limit_config(data if isinstance(data, dict) else {})
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def product_settings(manifest: dict[str, Any]) -> dict[str, Any]:
+def product_settings(manifest: dict[str, Any], generation_config: dict[str, Any] | None = None) -> dict[str, Any]:
     product = manifest.get("product") or {}
     sources = manifest.get("sources") or {}
+    generation_config = generation_config or generation_performance.default_generation_config({})
     return {
         "product_name": str(product.get("name", "Product")),
         "product_slug": str(product.get("slug", "product")),
         "support_article_url_template": str(sources.get("support_article_url_template", "")),
+        "source_extract_workers": generation_config["source_extract_workers"],
+        "source_fetch_workers": generation_config["source_fetch_workers"],
         "stale_doc_hosts": {
             str(host).lower()
             for host in (sources.get("stale_doc_hosts") or [])
@@ -203,88 +242,282 @@ def slugify(value: str) -> str:
     return value[:120] or "item"
 
 
-def extract_docx_files(paths: Paths) -> list[dict[str, Any]]:
+def empty_source_extract_cache() -> dict[str, Any]:
+    return {
+        "schema_version": SOURCE_EXTRACT_CACHE_SCHEMA_VERSION,
+        "entries": {},
+        "stats": {"hits": 0, "misses": 0, "force_misses": 0, "invalidations": 0},
+    }
+
+
+def reset_source_extract_cache_stats(cache: dict[str, Any]) -> None:
+    cache["stats"] = {"hits": 0, "misses": 0, "force_misses": 0, "invalidations": 0}
+
+
+def load_source_extract_cache(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return empty_source_extract_cache()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"Invalid source extract cache JSON at {path}; delete it or rerun with --force.") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != SOURCE_EXTRACT_CACHE_SCHEMA_VERSION:
+        raise SystemExit(
+            f"Unsupported source extract cache schema at {path}; "
+            f"expected schema_version {SOURCE_EXTRACT_CACHE_SCHEMA_VERSION}."
+        )
+    if not isinstance(payload.get("entries"), dict):
+        payload["entries"] = {}
+    if not isinstance(payload.get("stats"), dict):
+        reset_source_extract_cache_stats(payload)
+    payload["stats"].setdefault("hits", 0)
+    payload["stats"].setdefault("misses", 0)
+    payload["stats"].setdefault("force_misses", 0)
+    payload["stats"].setdefault("invalidations", 0)
+    return payload
+
+
+def write_source_extract_cache(path: Path, cache: dict[str, Any]) -> None:
+    ensure_dir(path.parent)
+    cache["schema_version"] = SOURCE_EXTRACT_CACHE_SCHEMA_VERSION
+    cache.setdefault("entries", {})
+    cache.setdefault("stats", {})
+    path.write_text(json.dumps(cache, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
+
+def source_file_hash(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "unreadable"
+
+
+def source_extract_input_hash(path: Path, settings_fingerprint: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "path": path.as_posix(),
+                "content_sha256": source_file_hash(path),
+                "settings": settings_fingerprint,
+            },
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _source_extract_stage(cache: dict[str, Any], namespace: str) -> dict[str, Any]:
+    entries = cache.setdefault("entries", {})
+    stage = entries.setdefault(namespace, {})
+    if not isinstance(stage, dict):
+        raise SystemExit(f"Invalid source extract cache stage `{namespace}`; expected a mapping.")
+    return stage
+
+
+def cached_source_extract(
+    cache: dict[str, Any] | None,
+    namespace: str,
+    key: str,
+    path: Path,
+    settings_fingerprint: dict[str, Any],
+    builder: Any,
+    *,
+    force: bool = False,
+) -> Any:
+    if cache is None:
+        return builder()
+    input_hash = source_extract_input_hash(path, settings_fingerprint)
+    with SOURCE_EXTRACT_CACHE_LOCK:
+        stage = _source_extract_stage(cache, namespace)
+        entry = stage.get(key)
+        if not force and isinstance(entry, dict) and entry.get("input_hash") == input_hash and "value" in entry:
+            cache["stats"]["hits"] = int(cache["stats"].get("hits", 0)) + 1
+            return entry["value"]
+        if force:
+            cache["stats"]["force_misses"] = int(cache["stats"].get("force_misses", 0)) + 1
+        elif isinstance(entry, dict):
+            cache["stats"]["invalidations"] = int(cache["stats"].get("invalidations", 0)) + 1
+    value = builder()
+    with SOURCE_EXTRACT_CACHE_LOCK:
+        stage = _source_extract_stage(cache, namespace)
+        stage[key] = {"input_hash": input_hash, "value": value}
+        cache["stats"]["misses"] = int(cache["stats"].get("misses", 0)) + 1
+    return value
+
+
+def _source_extract_workers(settings: dict[str, Any] | None = None, workers: int | None = None) -> int:
+    if workers is not None:
+        return max(1, int(workers))
+    if settings is None:
+        return 1
+    return max(1, int(settings.get("source_extract_workers", 1)))
+
+
+def _run_ordered_source_tasks(items: list[Path], worker_count: int, task: Any) -> list[Any]:
+    if not items:
+        return []
+    if worker_count <= 1:
+        return [task(item) for item in items]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="basb-source-extract") as executor:
+        return list(executor.map(task, items))
+
+
+def extract_docx_files(
+    paths: Paths,
+    *,
+    source_cache: dict[str, Any] | None = None,
+    force: bool = False,
+    workers: int = 1,
+) -> list[dict[str, Any]]:
     ensure_dir(paths.docx_extract)
-    results: list[dict[str, Any]] = []
-    for docx_path in sorted(paths.corpus.rglob("*.docx")):
+    docx_paths = sorted(paths.corpus.rglob("*.docx"))
+
+    def extract_one(docx_path: Path) -> dict[str, Any]:
         rel = docx_path.relative_to(paths.corpus)
         out_path = paths.docx_extract / rel.with_suffix(".txt")
-        ensure_dir(out_path.parent)
-        try:
-            completed = subprocess.run(
-                ["textutil", "-convert", "txt", "-stdout", str(docx_path)],
-                check=True,
-                capture_output=True,
-            )
-            text = completed.stdout.decode("utf-8", errors="ignore")
-            out_path.write_text(text)
-            results.append(
-                {
+        settings_fingerprint = {"source_type": "docx", "relative_path": str(rel)}
+
+        def build() -> dict[str, Any]:
+            ensure_dir(out_path.parent)
+            try:
+                completed = subprocess.run(
+                    ["textutil", "-convert", "txt", "-stdout", str(docx_path)],
+                    check=True,
+                    capture_output=True,
+                )
+                text = completed.stdout.decode("utf-8", errors="ignore")
+                out_path.write_text(text, encoding="utf-8")
+                return {
                     "path": str(docx_path),
                     "relative_path": str(rel),
                     "extract_path": str(out_path),
                     "title": title_from_text(text, docx_path.stem),
                     "char_count": len(text),
                 }
-            )
-        except subprocess.CalledProcessError as exc:
-            results.append(
-                {
+            except subprocess.CalledProcessError as exc:
+                return {
                     "path": str(docx_path),
                     "relative_path": str(rel),
                     "extract_path": str(out_path),
                     "title": docx_path.stem,
                     "error": exc.stderr.decode("utf-8", errors="ignore") if exc.stderr else "textutil failed",
                 }
-            )
-    return results
+
+        return cached_source_extract(
+            source_cache,
+            "docx_extracts",
+            str(rel),
+            docx_path,
+            settings_fingerprint,
+            build,
+            force=force,
+        )
+
+    return _run_ordered_source_tasks(docx_paths, max(1, int(workers)), extract_one)
 
 
-def collect_support_articles(paths: Paths, settings: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+def collect_support_articles(
+    paths: Paths,
+    settings: dict[str, Any],
+    *,
+    source_cache: dict[str, Any] | None = None,
+    force: bool = False,
+) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+    md_paths = sorted(paths.corpus.rglob("*.md"))
+
+    def collect_one(md_path: Path) -> dict[str, Any]:
+        rel = md_path.relative_to(paths.corpus)
+        settings_fingerprint = {
+            "source_type": "support-markdown",
+            "support_article_url_template": settings.get("support_article_url_template", ""),
+            "relative_path": str(rel),
+        }
+
+        def build() -> dict[str, Any]:
+            text = md_path.read_text(errors="ignore")
+            article_id = support_article_id_from_path(rel)
+            source_url = support_source_url(article_id, settings)
+            title = title_from_text(text, md_path.stem)
+            urls = sorted({url for url in (sanitize_url(item) for item in URL_RE.findall(text)) if url})
+            return {
+                "article": {
+                    "article_id": article_id if article_id.isdigit() else "",
+                    "title": title,
+                    "relative_path": str(rel),
+                    "source_url": source_url,
+                    "link_count": len(urls),
+                    "category": "support-article" if article_id or rel.name.endswith("-article.md") else "reference-doc",
+                },
+                "urls": urls,
+            }
+
+        return cached_source_extract(
+            source_cache,
+            "support_markdown",
+            str(rel),
+            md_path,
+            settings_fingerprint,
+            build,
+            force=force,
+        )
+
     articles: list[dict[str, Any]] = []
     links: dict[str, set[str]] = defaultdict(set)
-    for md_path in sorted(paths.corpus.rglob("*.md")):
-        rel = md_path.relative_to(paths.corpus)
-        text = md_path.read_text(errors="ignore")
-        article_id = support_article_id_from_path(rel)
-        source_url = support_source_url(article_id, settings)
-        title = title_from_text(text, md_path.stem)
-        urls = sorted({url for url in (sanitize_url(item) for item in URL_RE.findall(text)) if url})
-        for url in urls:
-            links[url].add(str(rel))
-        articles.append(
-            {
-                "article_id": article_id if article_id.isdigit() else "",
-                "title": title,
-                "relative_path": str(rel),
-                "source_url": source_url,
-                "link_count": len(urls),
-                "category": "support-article" if article_id or rel.name.endswith("-article.md") else "reference-doc",
-            }
-        )
+    for result in _run_ordered_source_tasks(md_paths, _source_extract_workers(settings), collect_one):
+        article = result["article"]
+        articles.append(article)
+        for url in result["urls"]:
+            links[url].add(article["relative_path"])
     return articles, links
 
 
-def collect_wiki_pages(paths: Paths, manifest: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+def collect_wiki_pages(
+    paths: Paths,
+    manifest: dict[str, Any],
+    *,
+    source_cache: dict[str, Any] | None = None,
+    force: bool = False,
+    settings: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
     wiki_root = repo_path_by_role(manifest, "engineering-wiki")
+    if wiki_root is None or not wiki_root.exists():
+        return [], {}
+    md_paths = sorted(wiki_root.rglob("*.md"))
+
+    def collect_one(md_path: Path) -> dict[str, Any]:
+        rel = md_path.relative_to(wiki_root)
+        settings_fingerprint = {"source_type": "wiki-markdown", "relative_path": str(rel)}
+
+        def build() -> dict[str, Any]:
+            text = md_path.read_text(errors="ignore")
+            urls = sorted({url for url in (sanitize_url(item) for item in URL_RE.findall(text)) if url})
+            return {
+                "page": {
+                    "title": title_from_text(text, md_path.stem),
+                    "relative_path": str(rel),
+                    "section": rel.parts[0] if len(rel.parts) > 1 else "root",
+                    "link_count": len(urls),
+                },
+                "urls": urls,
+            }
+
+        return cached_source_extract(
+            source_cache,
+            "wiki_markdown",
+            str(rel),
+            md_path,
+            settings_fingerprint,
+            build,
+            force=force,
+        )
+
     pages: list[dict[str, Any]] = []
     links: dict[str, set[str]] = defaultdict(set)
-    if wiki_root is None or not wiki_root.exists():
-        return pages, links
-    for md_path in sorted(wiki_root.rglob("*.md")):
-        rel = md_path.relative_to(wiki_root)
-        text = md_path.read_text(errors="ignore")
-        urls = sorted({url for url in (sanitize_url(item) for item in URL_RE.findall(text)) if url})
-        for url in urls:
-            links[url].add(f"wiki/{rel}")
-        pages.append(
-            {
-                "title": title_from_text(text, md_path.stem),
-                "relative_path": str(rel),
-                "section": rel.parts[0] if len(rel.parts) > 1 else "root",
-                "link_count": len(urls),
-            }
-        )
+    for result in _run_ordered_source_tasks(md_paths, _source_extract_workers(settings), collect_one):
+        page = result["page"]
+        pages.append(page)
+        for url in result["urls"]:
+            links[url].add(f"wiki/{page['relative_path']}")
     return pages, links
 
 
@@ -419,8 +652,26 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
     }
     if special in {"needs-google-drive", "stale-doc-reference"}:
         return record
+    limiter = settings.get("rate_limiter")
+    if limiter is not None:
+        waited = limiter.acquire_source_fetch(
+            host=domain,
+            stage="source_fetch",
+            worker_count=int(settings.get("source_fetch_workers", 40)),
+        )
+        if waited:
+            record["rate_limit_wait_seconds"] = round(waited, 4)
 
-    request = Request(url, headers={"User-Agent": USER_AGENT})
+    request_headers = {"User-Agent": USER_AGENT}
+    cached_headers = settings.get("cached_response_headers")
+    if isinstance(cached_headers, dict):
+        headers_for_url = cached_headers.get(url)
+        if isinstance(headers_for_url, dict):
+            if headers_for_url.get("etag"):
+                request_headers["If-None-Match"] = str(headers_for_url["etag"])
+            if headers_for_url.get("last_modified"):
+                request_headers["If-Modified-Since"] = str(headers_for_url["last_modified"])
+    request = Request(url, headers=request_headers)
     for attempt in range(1, FETCH_RETRY_ATTEMPTS + 1):
         try:
             with urlopen(request, timeout=8, context=default_ssl_context()) as response:
@@ -431,6 +682,20 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
             record["retry_count"] = attempt
             break
         except HTTPError as exc:
+            if exc.code == 304:
+                record["status"] = "not-modified"
+                record["retry_count"] = attempt
+                return record
+            provider_error = rate_limits.provider_rate_limit_from_http_error(exc)
+            if provider_error is not None and limiter is not None:
+                limiter.recorder.record(
+                    stage="source_fetch",
+                    event="provider_rate_limit",
+                    worker_count=int(settings.get("source_fetch_workers", 40)),
+                    recommended_knob="source_fetch_workers",
+                    retry_after_seconds=provider_error.retry_after_seconds,
+                    http_status=exc.code,
+                )
             record["http_status"] = exc.code
             record["status"] = "auth-gated" if exc.code in {401, 403} else "blocked"
             record["error"] = str(exc)
@@ -449,6 +714,8 @@ def fetch_url(url: str, source_refs: list[str], links_dir: Path, settings: dict[
         record["http_status"] = status_code
         record["final_url"] = final_url
         record["content_type"] = content_type
+        record["etag"] = response.headers.get("ETag") if "response" in locals() else None
+        record["last_modified"] = response.headers.get("Last-Modified") if "response" in locals() else None
         parsed = urlparse(final_url)
         record["final_domain"] = (parsed.hostname or parsed.netloc).lower()
 
@@ -514,31 +781,76 @@ def build_link_inventory(
     settings: dict[str, Any],
     *,
     known_local_support_urls: set[str] | None = None,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     ensure_dir(paths.links_dir)
     results: list[dict[str, Any]] = []
     local_urls = {normalize_known_support_url(url) for url in (known_local_support_urls or set())}
     local_records: list[dict[str, Any]] = []
     remote_links: dict[str, set[str]] = {}
+    source_cache = settings.get("source_index_cache")
+    settings_fingerprint = {
+        "support_article_url_template": settings.get("support_article_url_template", ""),
+        "legacy_doc_hosts": sorted(settings.get("legacy_doc_hosts", [])),
+    }
+    cached_response_headers: dict[str, dict[str, str]] = {}
     for url, refs in sorted(source_links.items()):
         if normalize_known_support_url(url) in local_urls:
-            local_records.append(
-                {
-                    "url": url,
-                    "domain": (urlparse(url).hostname or urlparse(url).netloc).lower(),
-                    "source_refs": sorted(refs),
-                    "status": "local-support-evidence",
-                }
-            )
+            record = {
+                "url": url,
+                "domain": (urlparse(url).hostname or urlparse(url).netloc).lower(),
+                "source_refs": sorted(refs),
+                "status": "local-support-evidence",
+            }
+            local_records.append(record)
+            if isinstance(source_cache, dict):
+                source_index_cache.store(
+                    source_cache,
+                    url,
+                    source_index_cache.input_hash(url, sorted(refs), settings_fingerprint),
+                    record,
+                )
         else:
+            cache_hash = source_index_cache.input_hash(url, sorted(refs), settings_fingerprint)
+            cached = (
+                source_index_cache.lookup(source_cache, url, cache_hash)
+                if isinstance(source_cache, dict) and not force
+                else None
+            )
+            if cached is not None:
+                results.append(cached)
+                continue
+            if isinstance(source_cache, dict) and not force:
+                cached_entry = source_cache.get("entries", {}).get(url)
+                record = cached_entry.get("record") if isinstance(cached_entry, dict) else None
+                if isinstance(record, dict):
+                    cached_response_headers[url] = {
+                        key: str(record[key])
+                        for key in ("etag", "last_modified")
+                        if record.get(key)
+                    }
             remote_links[url] = refs
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+    settings["cached_response_headers"] = cached_response_headers
+    source_fetch_workers = int(settings.get("source_fetch_workers", 40))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=source_fetch_workers) as executor:
         futures = {
             executor.submit(fetch_url, url, sorted(source_refs), paths.links_dir, settings): url
             for url, source_refs in sorted(remote_links.items())
         }
         for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
+            record = future.result()
+            url = record["url"]
+            cache_hash = source_index_cache.input_hash(url, sorted(remote_links.get(url, set())), settings_fingerprint)
+            if record.get("status") == "not-modified" and isinstance(source_cache, dict):
+                cached = source_index_cache.lookup(source_cache, url, cache_hash)
+                if cached is not None:
+                    cached["conditional_not_modified"] = True
+                    source_cache["stats"]["conditional_hits"] = int(source_cache["stats"].get("conditional_hits", 0)) + 1
+                    results.append(cached)
+                    continue
+            if isinstance(source_cache, dict):
+                source_index_cache.store(source_cache, url, cache_hash, record)
+            results.append(record)
     results.extend(local_records)
     return sorted(results, key=lambda item: (item["status"], item["domain"], item["url"]))
 
@@ -551,6 +863,26 @@ def write_json(path: Path, payload: Any) -> None:
 def write_note(path: Path, body: str) -> None:
     ensure_dir(path.parent)
     path.write_text(body.rstrip() + "\n")
+
+
+def record_timing(timings: dict[str, Any], stage: str, started: float, **metadata: Any) -> None:
+    timings.setdefault("stages", {})[stage] = {
+        "seconds": round(time.perf_counter() - started, 4),
+        **metadata,
+    }
+
+
+def write_performance_summary(paths: Paths, payload: dict[str, Any]) -> None:
+    summary_path = paths.json_dir / "performance_summary.json"
+    existing: dict[str, Any] = {}
+    if summary_path.exists():
+        try:
+            parsed = json.loads(summary_path.read_text(encoding="utf-8"))
+            existing = parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            existing = {}
+    existing.update(payload)
+    write_json(summary_path, existing)
 
 
 def sanitize_vault_notes(vault_path: Path) -> dict[str, int]:
@@ -811,17 +1143,78 @@ def corpus_overview_note(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build source indices, mirrors, and vault notes from a product manifest.")
     parser.add_argument("--manifest", required=True, type=Path)
+    parser.add_argument("--force", action="store_true", help="Bypass source extraction and linked-page caches for a clean source-index rebuild.")
     args = parser.parse_args()
 
     manifest = load_manifest(args.manifest)
-    settings = product_settings(manifest)
+    generation_config = load_generation_performance(manifest)
+    rate_limit_config = load_rate_limit_config(manifest)
+    rate_limiter = rate_limits.WindowRateLimiter(rate_limit_config)
+    settings = product_settings(manifest, generation_config)
+    settings["rate_limiter"] = rate_limiter
     paths = manifest_paths(manifest)
     ensure_dir(paths.mirror)
     ensure_dir(paths.json_dir)
+    progress = generation_progress.ProgressRecorder(paths.json_dir, reset=True)
+    timings: dict[str, Any] = {
+        "generated_at": DATE,
+        "generation_performance": generation_config,
+        "rate_limits": rate_limit_config,
+        "force": bool(args.force),
+    }
+    progress.start_run(
+        "source_index",
+        planned_stages=generation_progress.default_planned_stages(),
+        source_extract_workers=generation_config["source_extract_workers"],
+        source_fetch_workers=generation_config["source_fetch_workers"],
+        force=bool(args.force),
+    )
+    source_extract_cache_path = paths.json_dir / "source_extract_cache.json"
+    source_extract_cache = load_source_extract_cache(source_extract_cache_path)
+    reset_source_extract_cache_stats(source_extract_cache)
+    source_cache_path = paths.json_dir / "source_index_cache.json"
+    source_cache = source_index_cache.load_cache(source_cache_path)
+    source_cache["stats"] = {"hits": 0, "misses": 0, "skipped_sources": 0, "conditional_hits": 0, "invalidations": 0}
+    settings["source_index_cache"] = source_cache
 
-    docx_extracts = extract_docx_files(paths)
-    articles, support_links = collect_support_articles(paths, settings)
-    wiki_pages, wiki_links = collect_wiki_pages(paths, manifest)
+    progress.record("source_extract", "running")
+    stage_started = time.perf_counter()
+    docx_extracts = extract_docx_files(
+        paths,
+        source_cache=source_extract_cache,
+        force=args.force,
+        workers=generation_config["source_extract_workers"],
+    )
+    articles, support_links = collect_support_articles(paths, settings, source_cache=source_extract_cache, force=args.force)
+    wiki_pages, wiki_links = collect_wiki_pages(
+        paths,
+        manifest,
+        source_cache=source_extract_cache,
+        force=args.force,
+        settings=settings,
+    )
+    write_source_extract_cache(source_extract_cache_path, source_extract_cache)
+    extracted_source_units = max(1, len(docx_extracts) + len(articles) + len(wiki_pages))
+    progress.record(
+        "source_extract",
+        "completed",
+        completed_units=extracted_source_units,
+        total_units=extracted_source_units,
+        docx_extracts=len(docx_extracts),
+        support_articles=len(articles),
+        wiki_pages=len(wiki_pages),
+        cache_stats=source_extract_cache.get("stats", {}),
+    )
+    record_timing(
+        timings,
+        "source_extract",
+        stage_started,
+        docx_extracts=len(docx_extracts),
+        markdown_sources=len(articles),
+        wiki_pages=len(wiki_pages),
+        cache_stats=source_extract_cache.get("stats", {}),
+        worker_count=generation_config["source_extract_workers"],
+    )
     all_links: dict[str, set[str]] = defaultdict(set)
     for url, refs in support_links.items():
         all_links[url].update(refs)
@@ -829,20 +1222,58 @@ def main() -> None:
         all_links[url].update(refs)
 
     known_local_support_urls = {item["source_url"] for item in articles if item.get("source_url")}
+    source_fetch_units = max(1, len(all_links))
+    progress.record(
+        "source_fetch",
+        "running",
+        completed_units=0,
+        total_units=source_fetch_units,
+        link_count=len(all_links),
+        cache_entries=len(source_cache.get("entries", {})),
+    )
+    stage_started = time.perf_counter()
     link_inventory = build_link_inventory(
         all_links,
         paths,
         settings,
         known_local_support_urls=known_local_support_urls,
+        force=args.force,
     )
+    source_index_cache.write_cache(source_cache_path, source_cache)
+    record_timing(
+        timings,
+        "source_fetch",
+        stage_started,
+        link_count=len(link_inventory),
+        cache_stats=source_cache.get("stats", {}),
+        worker_count=generation_config["source_fetch_workers"],
+    )
+    progress.record(
+        "source_fetch",
+        "completed",
+        completed_units=source_fetch_units,
+        total_units=source_fetch_units,
+        link_count=len(link_inventory),
+        cache_stats=source_cache.get("stats", {}),
+    )
+    stage_started = time.perf_counter()
     repo_snapshots = collect_repo_snapshots(manifest, paths)
+    record_timing(timings, "repo_snapshots", stage_started, repos=len(repo_snapshots))
 
+    stage_started = time.perf_counter()
     write_json(paths.json_dir / "docx_extracts.json", docx_extracts)
     write_json(paths.json_dir / "support_articles.json", articles)
     write_json(paths.json_dir / "wiki_pages.json", wiki_pages)
     write_json(paths.json_dir / "external_links.json", link_inventory)
     write_json(paths.json_dir / "repo_snapshots.json", repo_snapshots)
+    rate_limits.write_rate_limit_inventory(
+        paths.json_dir / "rate_limit_events.json",
+        config=rate_limit_config,
+        events=rate_limiter.recorder.events(),
+    )
+    record_timing(timings, "inventory_write", stage_started)
 
+    stage_started = time.perf_counter()
     area_key = settings["product_slug"]
     write_note(
         paths.vault / "10 Sources" / "Corpus Overview.md",
@@ -860,7 +1291,34 @@ def main() -> None:
     write_note(paths.vault / "10 Sources" / "Linked Pages Registry.md", link_registry_note(link_inventory, area_key))
     write_note(paths.vault / "30 Engineering" / "Blocked Access Registry.md", blocked_registry_note(link_inventory, area_key))
     write_note(paths.vault / "30 Engineering" / "Repo Catalog.md", repo_catalog_note(repo_snapshots, area_key))
+    record_timing(timings, "source_note_write", stage_started)
+    stage_started = time.perf_counter()
     sanitize_summary = sanitize_vault_notes(paths.vault)
+    record_timing(timings, "source_sanitize", stage_started, vault_sanitizer=sanitize_summary)
+    timings["total_seconds"] = round(sum(item["seconds"] for item in timings.get("stages", {}).values()), 4)
+    timings["source_extract_cache"] = source_extract_cache.get("stats", {})
+    timings["source_index_cache"] = source_cache.get("stats", {})
+    write_json(paths.json_dir / "source_index_timings.json", timings)
+    write_performance_summary(
+        paths,
+        {
+            "source_index": {
+                "total_seconds": timings["total_seconds"],
+                "force": bool(args.force),
+                "source_extract_cache": source_extract_cache.get("stats", {}),
+                "source_index_cache": source_cache.get("stats", {}),
+                "timings_path": str(paths.json_dir / "source_index_timings.json"),
+            }
+        },
+    )
+    progress.record(
+        "source_index",
+        "completed",
+        completed_units=5,
+        total_units=5,
+        vault_sanitizer=sanitize_summary,
+        cache_stats=source_cache.get("stats", {}),
+    )
 
     print(json.dumps(
         {
@@ -871,6 +1329,9 @@ def main() -> None:
             "repos": len(repo_snapshots),
             "mirror_dir": str(paths.links_dir),
             "inventory_dir": str(paths.json_dir),
+            "source_index_cache": source_cache.get("stats", {}),
+            "source_extract_cache": source_extract_cache.get("stats", {}),
+            "source_index_timings": str(paths.json_dir / "source_index_timings.json"),
             "vault_sanitizer": sanitize_summary,
         },
         indent=2,
