@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -465,6 +466,253 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         events = recorder.events()
         self.assertGreaterEqual(len(events), 1)
         self.assertEqual(events[0]["event"], "wait")
+
+    def test_default_rate_limits_use_openai_throughput_upgrade_without_worker_downscaling(self) -> None:
+        performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_defaults_test")
+
+        rate_config = performance.default_rate_limit_config({})
+        generation_config = performance.default_generation_config({})
+
+        self.assertEqual(rate_config["openai_requests_per_minute"], 3000)
+        self.assertEqual(rate_config["openai_tokens_per_minute"], 3000000)
+        self.assertEqual(rate_config["retry_attempts"], 6)
+        self.assertEqual(rate_config["retry_max_seconds"], 90.0)
+        self.assertEqual(generation_config["embedding_workers"], 8)
+        self.assertEqual(generation_config["llm_synthesis_workers"], 10)
+        self.assertEqual(generation_config["agent_shards"]["max_concurrent_shards"], 6)
+
+    def test_provider_rate_limit_header_parser_handles_limits_remaining_and_resets(self) -> None:
+        rate_module = load_module(RATE_LIMITS_SCRIPT, "rate_limits_header_parse_test")
+
+        observed = rate_module.parse_provider_rate_limit_headers(
+            {
+                "X-RateLimit-Limit-Requests": "1,500",
+                "x-ratelimit-limit-tokens": "2500000",
+                "x-ratelimit-remaining-requests": "1499",
+                "x-ratelimit-remaining-tokens": "2499000",
+                "x-ratelimit-reset-requests": "500ms",
+                "x-ratelimit-reset-tokens": "1m30s",
+            }
+        )
+
+        self.assertEqual(observed["limit_requests"], 1500)
+        self.assertEqual(observed["limit_tokens"], 2500000)
+        self.assertEqual(observed["remaining_requests"], 1499)
+        self.assertEqual(observed["remaining_tokens"], 2499000)
+        self.assertEqual(observed["reset_requests_seconds"], 0.5)
+        self.assertEqual(observed["reset_tokens_seconds"], 90.0)
+
+    def test_provider_ceiling_lowers_effective_openai_window_and_records_event(self) -> None:
+        rate_module = load_module(RATE_LIMITS_SCRIPT, "rate_limits_provider_ceiling_test")
+        recorder = rate_module.RateLimitRecorder()
+        limiter = rate_module.WindowRateLimiter(
+            {
+                "openai_requests_per_minute": 3000,
+                "openai_tokens_per_minute": 3000000,
+                "fail_fast_seconds": 1,
+            },
+            recorder=recorder,
+            window_seconds=0.01,
+        )
+
+        limiter.observe_openai_response_headers(
+            {
+                "x-ratelimit-limit-requests": "1",
+                "x-ratelimit-limit-tokens": "100",
+                "x-ratelimit-remaining-requests": "0",
+                "x-ratelimit-reset-requests": "10ms",
+            },
+            stage="semantic_embedding",
+            worker_count=8,
+            recommended_knob="embedding_workers",
+        )
+        limiter.acquire_openai(stage="semantic_embedding", worker_count=8, tokens=1, recommended_knob="embedding_workers")
+        limiter.acquire_openai(stage="semantic_embedding", worker_count=8, tokens=1, recommended_knob="embedding_workers")
+
+        events = recorder.events()
+        self.assertTrue(any(event["event"] == "provider_limits_observed" for event in events))
+        ceiling_events = [event for event in events if event["event"] == "provider_ceiling_applied"]
+        self.assertEqual(len(ceiling_events), 1)
+        self.assertEqual(ceiling_events[0]["effective_openai_requests_per_minute"], 1)
+        self.assertEqual(ceiling_events[0]["effective_openai_tokens_per_minute"], 100)
+        self.assertTrue(any(event["event"] == "wait" and event["budget_key"] == "openai" for event in events))
+
+    def test_default_retry_budget_uses_six_attempts_and_ninety_second_cap(self) -> None:
+        rate_module = load_module(RATE_LIMITS_SCRIPT, "rate_limits_retry_budget_test")
+        recorder = rate_module.RateLimitRecorder()
+        attempts = 0
+        sleeps: list[float] = []
+
+        def action() -> None:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("transient")
+
+        with mock.patch.object(rate_module.time, "sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+            with self.assertRaises(RuntimeError):
+                rate_module.with_retries(
+                    action=action,
+                    config={"retry_base_seconds": 50.0},
+                    recorder=recorder,
+                    stage="semantic_embedding",
+                    worker_count=8,
+                    recommended_knob="embedding_workers",
+                )
+
+        self.assertEqual(attempts, 6)
+        self.assertEqual(sleeps, [50.0, 90.0, 90.0, 90.0, 90.0])
+
+    def test_successful_openai_clients_record_provider_response_headers(self) -> None:
+        semantic = load_module(SEMANTIC_SCRIPT, "semantic_openai_header_observation_test")
+        shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_openai_header_observation_test")
+        rate_module = sys.modules["rate_limits"]
+        recorder = rate_module.RateLimitRecorder()
+        limiter = rate_module.WindowRateLimiter(
+            {
+                "openai_requests_per_minute": 3000,
+                "openai_tokens_per_minute": 3000000,
+                "fail_fast_seconds": 1,
+            },
+            recorder=recorder,
+            window_seconds=0.01,
+        )
+
+        class FakeResponse:
+            def __init__(self, payload: dict) -> None:
+                self.payload = payload
+                self.headers = {
+                    "x-ratelimit-limit-requests": "1500",
+                    "x-ratelimit-limit-tokens": "2500000",
+                    "x-ratelimit-remaining-requests": "1499",
+                    "x-ratelimit-reset-requests": "1s",
+                }
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            del timeout
+            body = json.loads(request.data.decode("utf-8"))
+            if str(request.full_url).endswith("/embeddings"):
+                return FakeResponse({"data": [{"index": 0, "embedding": [1.0, 0.0]}]})
+            if any("Product BASB shard worker" in message.get("content", "") for message in body.get("messages", [])):
+                return FakeResponse(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": json.dumps(
+                                        {
+                                            "notes": [
+                                                {
+                                                    "title": "Shard",
+                                                    "summary": "Shard summary.",
+                                                    "highlights": ["One"],
+                                                    "distilled_takeaways": ["Two"],
+                                                    "executive_use": "Use.",
+                                                    "can_feed": ["Output Pipeline"],
+                                                    "evidence_ids": ["card-1"],
+                                                }
+                                            ],
+                                            "evidence_cards": [],
+                                            "shard_insights": [],
+                                        }
+                                    )
+                                }
+                            }
+                        ]
+                    }
+                )
+            return FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "theme": "Observed",
+                                        "summary": "Observed summary.",
+                                        "why_this_cluster_exists": "Headers were observed.",
+                                        "merge_split_recommendation": "Keep.",
+                                        "output_candidate_rationale": "Use.",
+                                        "limitations": [],
+                                    }
+                                )
+                            }
+                        }
+                    ]
+                }
+            )
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            cards = [
+                {
+                    "id": "card-1",
+                    "kind": "support",
+                    "title": "Login",
+                    "summary": "Login access",
+                    "capabilities": ["identity"],
+                    "evidence_terms": ["auth"],
+                    "code_terms": ["session"],
+                }
+            ]
+            config = {
+                "embedding_model": "text-embedding-3-small",
+                "embedding_batch_size": 512,
+                "embedding_workers": 8,
+                "llm_model": "gpt-4.1-mini",
+                "llm_synthesis_workers": 10,
+                "retry_attempts": 1,
+                "retry_base_seconds": 0.01,
+                "retry_max_seconds": 0.01,
+            }
+            shard_spec = {
+                "id": "shard-01",
+                "kind": "support-evidence",
+                "model": "gpt-4.1-mini",
+                "cards": cards,
+                "input_card_count": 1,
+                "max_concurrent_shards": 6,
+            }
+
+            with mock.patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}), mock.patch.object(
+                semantic.urllib.request,
+                "urlopen",
+                side_effect=fake_urlopen,
+            ):
+                semantic.embed_cards(cards, config, root / "embedding_cache.json", limiter=limiter)
+                semantic.synthesize_clusters_with_llm(
+                    [
+                        {
+                            "id": "cluster-1",
+                            "theme": "Identity",
+                            "cards": cards,
+                            "card_ids": ["card-1"],
+                        }
+                    ],
+                    config,
+                    root / "llm_cache.json",
+                    limiter=limiter,
+                )
+                shards.llm_shard_worker(
+                    shard_spec,
+                    root / "shard",
+                    limiter=limiter,
+                    rate_config=config,
+                )
+
+        observed_events = [event for event in recorder.events() if event["event"] == "provider_limits_observed"]
+        self.assertEqual(
+            [event["stage"] for event in observed_events],
+            ["semantic_embedding", "semantic_llm_synthesis", "generation_shards"],
+        )
 
     def test_retry_after_parser_and_shared_budget_fail_clearly(self) -> None:
         rate_module = load_module(RATE_LIMITS_SCRIPT, "rate_limits_provider_budget_test")

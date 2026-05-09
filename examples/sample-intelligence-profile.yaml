@@ -38,12 +38,12 @@ generation_performance:
     shard_model: gpt-4.1-mini
     max_cards_per_shard: 80
 rate_limits:
-  openai_requests_per_minute: 300
-  openai_tokens_per_minute: 200000
+  openai_requests_per_minute: 3000
+  openai_tokens_per_minute: 3000000
   source_fetch_requests_per_host_per_minute: 120
-  retry_attempts: 3
+  retry_attempts: 6
   retry_base_seconds: 1.0
-  retry_max_seconds: 30.0
+  retry_max_seconds: 90.0
   fail_fast_seconds: 120.0
   openai_budget_path: ""
   max_openai_requests_per_budget_window: 0

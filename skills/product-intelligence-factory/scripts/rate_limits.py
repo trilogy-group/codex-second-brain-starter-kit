@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from email.utils import parsedate_to_datetime
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.error import HTTPError
 
 try:
@@ -82,6 +83,55 @@ def provider_rate_limit_from_http_error(exc: HTTPError) -> ProviderRateLimitErro
         retry_after_seconds=retry_after,
         headers=headers,
     )
+
+
+def _normalised_headers(headers: Mapping[str, Any] | Any) -> dict[str, str]:
+    items = headers.items() if hasattr(headers, "items") else []
+    return {str(key).strip().lower(): str(value).strip() for key, value in items if str(key).strip()}
+
+
+def _parse_non_negative_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    trimmed = value.strip().replace(",", "")
+    if not trimmed:
+        return None
+    try:
+        parsed = int(trimmed)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def parse_provider_reset_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    trimmed = value.strip().lower().replace(" ", "")
+    if not trimmed:
+        return None
+    try:
+        return max(0.0, round(float(trimmed), 4))
+    except ValueError:
+        pass
+    unit_seconds = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0}
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)(ms|s|m|h)", trimmed))
+    if matches:
+        seconds = sum(float(match.group(1)) * unit_seconds[match.group(2)] for match in matches)
+        return max(0.0, round(seconds, 4))
+    return parse_retry_after(value)
+
+
+def parse_provider_rate_limit_headers(headers: Mapping[str, Any] | Any) -> dict[str, Any]:
+    normalised = _normalised_headers(headers)
+    observed = {
+        "limit_requests": _parse_non_negative_int(normalised.get("x-ratelimit-limit-requests")),
+        "limit_tokens": _parse_non_negative_int(normalised.get("x-ratelimit-limit-tokens")),
+        "remaining_requests": _parse_non_negative_int(normalised.get("x-ratelimit-remaining-requests")),
+        "remaining_tokens": _parse_non_negative_int(normalised.get("x-ratelimit-remaining-tokens")),
+        "reset_requests_seconds": parse_provider_reset_seconds(normalised.get("x-ratelimit-reset-requests")),
+        "reset_tokens_seconds": parse_provider_reset_seconds(normalised.get("x-ratelimit-reset-tokens")),
+    }
+    return {key: value for key, value in observed.items() if value is not None}
 
 
 class SharedBudget:
@@ -187,6 +237,7 @@ class WindowRateLimiter:
         self.sleeper = sleeper
         self._request_windows: dict[str, deque[float]] = defaultdict(deque)
         self._token_windows: dict[str, deque[tuple[float, int]]] = defaultdict(deque)
+        self._provider_openai_limits: dict[str, Any] = {}
         self._lock = threading.Lock()
 
     def _prune(self, now: float, budget_key: str) -> None:
@@ -247,15 +298,112 @@ class WindowRateLimiter:
             waited += wait_seconds
 
     def acquire_openai(self, *, stage: str, worker_count: int, tokens: int = 0, recommended_knob: str) -> float:
+        request_limit, token_limit = self._effective_openai_limits()
         return self.acquire(
             budget_key="openai",
-            request_limit=int(self.config.get("openai_requests_per_minute", 300)),
-            token_limit=int(self.config.get("openai_tokens_per_minute", 200000)),
+            request_limit=request_limit,
+            token_limit=token_limit,
             tokens=max(1, tokens),
             stage=stage,
             worker_count=worker_count,
             recommended_knob=recommended_knob,
         )
+
+    def _configured_openai_limits(self) -> tuple[int, int]:
+        return (
+            int(self.config.get("openai_requests_per_minute", 3000)),
+            int(self.config.get("openai_tokens_per_minute", 3000000)),
+        )
+
+    def _effective_openai_limits(self) -> tuple[int, int]:
+        configured_request_limit, configured_token_limit = self._configured_openai_limits()
+        with self._lock:
+            provider_request_limit = self._provider_openai_limits.get("limit_requests")
+            provider_token_limit = self._provider_openai_limits.get("limit_tokens")
+        request_limit = configured_request_limit
+        token_limit = configured_token_limit
+        if isinstance(provider_request_limit, int) and provider_request_limit > 0:
+            request_limit = min(request_limit, provider_request_limit)
+        if isinstance(provider_token_limit, int) and provider_token_limit > 0:
+            token_limit = min(token_limit, provider_token_limit)
+        return request_limit, token_limit
+
+    def observe_openai_response_headers(
+        self,
+        headers: Mapping[str, Any] | Any,
+        *,
+        stage: str,
+        worker_count: int,
+        recommended_knob: str,
+    ) -> dict[str, Any]:
+        observed = parse_provider_rate_limit_headers(headers)
+        if not observed:
+            return {}
+        configured_request_limit, configured_token_limit = self._configured_openai_limits()
+        with self._lock:
+            previous_request_limit = self._provider_openai_limits.get("limit_requests")
+            previous_token_limit = self._provider_openai_limits.get("limit_tokens")
+            previous_effective_request_limit = (
+                min(configured_request_limit, previous_request_limit)
+                if isinstance(previous_request_limit, int) and previous_request_limit > 0
+                else configured_request_limit
+            )
+            previous_effective_token_limit = (
+                min(configured_token_limit, previous_token_limit)
+                if isinstance(previous_token_limit, int) and previous_token_limit > 0
+                else configured_token_limit
+            )
+            if observed.get("limit_requests", 0) > 0:
+                self._provider_openai_limits["limit_requests"] = (
+                    min(previous_request_limit, observed["limit_requests"])
+                    if isinstance(previous_request_limit, int) and previous_request_limit > 0
+                    else observed["limit_requests"]
+                )
+            if observed.get("limit_tokens", 0) > 0:
+                self._provider_openai_limits["limit_tokens"] = (
+                    min(previous_token_limit, observed["limit_tokens"])
+                    if isinstance(previous_token_limit, int) and previous_token_limit > 0
+                    else observed["limit_tokens"]
+                )
+            for key in ("remaining_requests", "remaining_tokens", "reset_requests_seconds", "reset_tokens_seconds"):
+                if key in observed:
+                    self._provider_openai_limits[key] = observed[key]
+            provider_limits = dict(self._provider_openai_limits)
+            effective_request_limit = (
+                min(configured_request_limit, provider_limits["limit_requests"])
+                if isinstance(provider_limits.get("limit_requests"), int) and provider_limits["limit_requests"] > 0
+                else configured_request_limit
+            )
+            effective_token_limit = (
+                min(configured_token_limit, provider_limits["limit_tokens"])
+                if isinstance(provider_limits.get("limit_tokens"), int) and provider_limits["limit_tokens"] > 0
+                else configured_token_limit
+            )
+        self.recorder.record(
+            stage=stage,
+            event="provider_limits_observed",
+            worker_count=worker_count,
+            recommended_knob=recommended_knob,
+            **observed,
+        )
+        ceiling_applied = (
+            (effective_request_limit < configured_request_limit and effective_request_limit != previous_effective_request_limit)
+            or (effective_token_limit < configured_token_limit and effective_token_limit != previous_effective_token_limit)
+        )
+        if ceiling_applied:
+            self.recorder.record(
+                stage=stage,
+                event="provider_ceiling_applied",
+                worker_count=worker_count,
+                recommended_knob=recommended_knob,
+                configured_openai_requests_per_minute=configured_request_limit,
+                configured_openai_tokens_per_minute=configured_token_limit,
+                effective_openai_requests_per_minute=effective_request_limit,
+                effective_openai_tokens_per_minute=effective_token_limit,
+                provider_openai_requests_per_minute=provider_limits.get("limit_requests"),
+                provider_openai_tokens_per_minute=provider_limits.get("limit_tokens"),
+            )
+        return observed
 
     def acquire_source_fetch(self, *, host: str, stage: str, worker_count: int) -> float:
         return self.acquire(
@@ -277,9 +425,9 @@ def with_retries(
     worker_count: int,
     recommended_knob: str,
 ) -> tuple[Any, int, float]:
-    retry_attempts = int(config.get("retry_attempts", 3))
+    retry_attempts = int(config.get("retry_attempts", 6))
     retry_base = float(config.get("retry_base_seconds", 1.0))
-    retry_max = float(config.get("retry_max_seconds", 30.0))
+    retry_max = float(config.get("retry_max_seconds", 90.0))
     total_wait = 0.0
     last_error: Exception | None = None
     for attempt in range(1, retry_attempts + 1):

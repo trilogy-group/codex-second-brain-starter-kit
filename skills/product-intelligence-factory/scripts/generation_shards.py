@@ -31,6 +31,12 @@ SHARD_PROMPT_VERSION = "product-basb-shard-agent-v1"
 SHARD_CACHE_SCHEMA_VERSION = 1
 
 
+def _response_headers(response: Any) -> dict[str, str]:
+    headers = getattr(response, "headers", {})
+    items = headers.items() if hasattr(headers, "items") else []
+    return {str(key): str(value) for key, value in items}
+
+
 def _safe_stem(value: str) -> str:
     cleaned = re.sub(r"[^A-Za-z0-9 ._-]+", "", value).strip()
     return cleaned[:120].rstrip(" .") or "Untitled"
@@ -246,8 +252,9 @@ def _frontmatter(body: str) -> dict[str, Any] | None:
 
 
 class OpenAIShardClient:
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, *, response_observer: Callable[[dict[str, str]], None] | None = None) -> None:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.response_observer = response_observer
 
     def synthesize_shard(self, spec: dict[str, Any], model: str) -> dict[str, Any]:
         if not self.api_key:
@@ -293,11 +300,14 @@ class OpenAIShardClient:
         try:
             with urllib.request.urlopen(request, timeout=90) as response:
                 data = json.loads(response.read().decode("utf-8"))
+                headers = _response_headers(response)
         except HTTPError as exc:
             provider_error = rate_limits.provider_rate_limit_from_http_error(exc)
             if provider_error is not None:
                 raise provider_error from exc
             raise
+        if self.response_observer is not None:
+            self.response_observer(headers)
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         return parsed if isinstance(parsed, dict) else {}
@@ -339,10 +349,10 @@ class FixtureShardClient:
         }
 
 
-def _shard_client() -> Any:
+def _shard_client(*, response_observer: Callable[[dict[str, str]], None] | None = None) -> Any:
     if os.environ.get("PRODUCT_BASB_SHARD_LLM_FIXTURE") == "1" or os.environ.get("PRODUCT_BASB_LLM_FIXTURE") == "1":
         return FixtureShardClient()
-    return OpenAIShardClient()
+    return OpenAIShardClient(response_observer=response_observer)
 
 
 def _validate_shard_payload(payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
@@ -451,9 +461,18 @@ def llm_shard_worker(
     rate_config = rate_config or {}
     if client is None and str(spec.get("worker_mode", "")).lower() == "fixture":
         client = FixtureShardClient()
-    client = client or _shard_client()
     waited = 0.0
     recorder = limiter.recorder if limiter is not None else rate_limits.RateLimitRecorder()
+    if client is None:
+        response_observer = None
+        if limiter is not None:
+            response_observer = lambda headers: limiter.observe_openai_response_headers(
+                headers,
+                stage="generation_shards",
+                worker_count=worker_count,
+                recommended_knob="agent_shards.max_concurrent_shards",
+            )
+        client = _shard_client(response_observer=response_observer)
     if limiter is not None:
         token_count = sum(len(json.dumps(card, sort_keys=True)) for card in spec.get("cards", [])) // 4
         waited += limiter.acquire_openai(
@@ -479,7 +498,7 @@ def llm_shard_worker(
 
     payload, retry_count, retry_wait = rate_limits.with_retries(
         action=synthesize,
-        config=rate_config or {"retry_attempts": 1, "retry_base_seconds": 0.01, "retry_max_seconds": 0.01},
+        config=rate_config,
         recorder=recorder,
         stage="generation_shards",
         worker_count=worker_count,

@@ -111,8 +111,8 @@ generation_performance:
   embedding_batch_size: 512
   incremental_rebuild: true
 rate_limits:
-  openai_requests_per_minute: 300
-  openai_tokens_per_minute: 200000
+  openai_requests_per_minute: 3000
+  openai_tokens_per_minute: 3000000
   source_fetch_requests_per_host_per_minute: 120
 ```
 

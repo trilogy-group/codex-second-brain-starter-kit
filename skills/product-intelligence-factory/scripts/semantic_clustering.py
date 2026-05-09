@@ -10,7 +10,7 @@ import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError
 
 
@@ -24,6 +24,33 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import generation_performance
 import rate_limits
+
+
+def _response_headers(response: Any) -> dict[str, str]:
+    headers = getattr(response, "headers", {})
+    items = headers.items() if hasattr(headers, "items") else []
+    return {str(key): str(value) for key, value in items}
+
+
+def _openai_response_observer(
+    limiter: rate_limits.WindowRateLimiter | None,
+    *,
+    stage: str,
+    worker_count: int,
+    recommended_knob: str,
+) -> Callable[[dict[str, str]], None] | None:
+    if limiter is None:
+        return None
+
+    def observe(headers: dict[str, str]) -> None:
+        limiter.observe_openai_response_headers(
+            headers,
+            stage=stage,
+            worker_count=worker_count,
+            recommended_knob=recommended_knob,
+        )
+
+    return observe
 
 
 def default_semantic_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -83,8 +110,9 @@ def cosine(left: list[float], right: list[float]) -> float:
 
 
 class OpenAIEmbeddingClient:
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, *, response_observer: Callable[[dict[str, str]], None] | None = None) -> None:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.response_observer = response_observer
 
     def embed(self, texts: list[str], model: str) -> list[list[float]]:
         if not self.api_key:
@@ -102,17 +130,21 @@ class OpenAIEmbeddingClient:
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 data = json.loads(response.read().decode("utf-8"))
+                headers = _response_headers(response)
         except HTTPError as exc:
             provider_error = rate_limits.provider_rate_limit_from_http_error(exc)
             if provider_error is not None:
                 raise provider_error from exc
             raise
+        if self.response_observer is not None:
+            self.response_observer(headers)
         return [item["embedding"] for item in sorted(data["data"], key=lambda item: item["index"])]
 
 
 class OpenAILLMSynthesisClient:
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, *, response_observer: Callable[[dict[str, str]], None] | None = None) -> None:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.response_observer = response_observer
 
     def synthesize_cluster(self, cluster: dict[str, Any], model: str) -> dict[str, Any]:
         if not self.api_key:
@@ -149,11 +181,14 @@ class OpenAILLMSynthesisClient:
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 data = json.loads(response.read().decode("utf-8"))
+                headers = _response_headers(response)
         except HTTPError as exc:
             provider_error = rate_limits.provider_rate_limit_from_http_error(exc)
             if provider_error is not None:
                 raise provider_error from exc
             raise
+        if self.response_observer is not None:
+            self.response_observer(headers)
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
         return parsed if isinstance(parsed, dict) else {}
@@ -259,7 +294,6 @@ def embed_cards(
         require_openai_or_fixture()
     model = str(config["embedding_model"])
     cache = load_cache(cache_path)
-    client = client or (FixtureEmbeddingClient() if os.environ.get("PRODUCT_BASB_EMBEDDING_FIXTURE") == "1" else OpenAIEmbeddingClient())
     vectors: list[list[float] | None] = [None] * len(cards)
     misses: list[tuple[int, str, str]] = []
     cache_hits = 0
@@ -275,6 +309,18 @@ def embed_cards(
     if misses:
         batch_size = int(config.get("embedding_batch_size", 512))
         worker_count = int(config.get("embedding_workers", 8))
+        client = client or (
+            FixtureEmbeddingClient()
+            if os.environ.get("PRODUCT_BASB_EMBEDDING_FIXTURE") == "1"
+            else OpenAIEmbeddingClient(
+                response_observer=_openai_response_observer(
+                    limiter,
+                    stage="semantic_embedding",
+                    worker_count=worker_count,
+                    recommended_knob="embedding_workers",
+                )
+            )
+        )
         miss_batches = chunks(misses, batch_size)
         shared_budget = rate_limits.shared_budget_from_config(config, recorder=limiter.recorder if limiter else None)
 
@@ -406,7 +452,19 @@ def synthesize_clusters_with_llm(
     model = str(config.get("llm_model", "gpt-4.1-mini"))
     max_llm_clusters = int(config.get("max_llm_clusters", 40))
     cache = load_cache(llm_cache_path)
-    client = client or (FixtureLLMSynthesisClient() if os.environ.get("PRODUCT_BASB_LLM_FIXTURE") == "1" else OpenAILLMSynthesisClient())
+    worker_count = int(config.get("llm_synthesis_workers", 10))
+    client = client or (
+        FixtureLLMSynthesisClient()
+        if os.environ.get("PRODUCT_BASB_LLM_FIXTURE") == "1"
+        else OpenAILLMSynthesisClient(
+            response_observer=_openai_response_observer(
+                limiter,
+                stage="semantic_llm_synthesis",
+                worker_count=worker_count,
+                recommended_knob="llm_synthesis_workers",
+            )
+        )
+    )
     cache_hits = 0
     cache_misses = 0
     failures = 0
@@ -430,7 +488,6 @@ def synthesize_clusters_with_llm(
     def synthesize_task(task: tuple[int, str, dict[str, Any]]) -> tuple[int, str, dict[str, Any], dict[str, Any] | None, Exception | None]:
         index, key, cluster = task
         try:
-            worker_count = int(config.get("llm_synthesis_workers", 10))
             token_count = len(json.dumps(compact_cluster_for_llm(cluster), sort_keys=True)) // 4
             if limiter is not None:
                 limiter.acquire_openai(
@@ -453,7 +510,6 @@ def synthesize_clusters_with_llm(
             return index, key, cluster, None, exc
 
     if tasks:
-        worker_count = int(config.get("llm_synthesis_workers", 10))
         with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="basb-llm-synthesis") as executor:
             results = list(executor.map(synthesize_task, tasks))
         for index, key, cluster, synthesis, error in sorted(results, key=lambda item: item[0]):
