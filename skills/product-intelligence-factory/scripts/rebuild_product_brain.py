@@ -79,6 +79,16 @@ CODE_EXTENSIONS = {
     ".sql",
     ".py",
 }
+UPSTREAM_SYNTHESIS_EVIDENCE_KINDS = {
+    "code",
+    "crawled-url",
+    "docx",
+    "pdf",
+    "repo-doc",
+    "support",
+    "uploaded-doc",
+    "wiki",
+}
 SPECIAL_CODE_FILES = {"Dockerfile", "Gemfile", "Podfile", "Fastfile", "Rakefile"}
 IGNORED_DIRS = {".git", "node_modules", "Pods", "vendor", "dist", "build", "__pycache__"}
 LOW_SIGNAL_CODE_TERMS = {
@@ -922,7 +932,7 @@ def _volatile_payload_fields(payload: Any, prefix: str = "") -> list[str]:
         for key, value in payload.items():
             key_text = str(key)
             path = f"{prefix}.{key_text}" if prefix else key_text
-            if key_text in evidence_cards.VOLATILE_KEYS or any(key_text.startswith(item) for item in evidence_cards.VOLATILE_PREFIXES):
+            if evidence_cards.is_volatile_key(key_text):
                 fields.append(path)
                 continue
             fields.extend(_volatile_payload_fields(value, path))
@@ -1108,11 +1118,15 @@ def synthesize_business_value_entities(
             entity_id = str(item["id"])
             payload = dict(item.get("payload") or {})
             inventory["warm_cache_eligible_count"] += 1
+            stable_payload_cards = evidence_cards.stable_cards(
+                payload.get("evidence_cards") or [],
+                include_generated_notes=bool(payload.get("generated_notes_feed_synthesis", False)),
+            )
             inventory["source_kind_counts"] = dict(
                 sorted(
                     (
                         Counter(inventory.get("source_kind_counts") or {})
-                        + Counter(evidence_cards.source_kind_counts(evidence_cards.stable_cards(payload.get("evidence_cards") or [])))
+                        + Counter(evidence_cards.source_kind_counts(stable_payload_cards))
                     ).items()
                 )
             )
@@ -1353,7 +1367,6 @@ def source_record_to_evidence_row(kind: str, record: dict[str, Any]) -> evidence
                 "title": title,
                 "body": body,
                 "capabilities": record.get("capabilities", []),
-                "code_refs": code_refs,
             }
         ),
         metadata={
@@ -1604,6 +1617,10 @@ def generated_note_manifest_rows(manifest_path: Path) -> list[evidence_index.Evi
             )
         )
     return rows
+
+
+def upstream_synthesis_rows(rows: list[evidence_index.EvidenceRow]) -> list[evidence_index.EvidenceRow]:
+    return [row for row in rows if row.kind in UPSTREAM_SYNTHESIS_EVIDENCE_KINDS]
 
 
 def slow_stage_recommendations(timings: dict[str, Any], cache_stats: dict[str, Any]) -> list[str]:
@@ -2010,7 +2027,7 @@ def retrieval_ranked_code_hits(
             continue
         seen.add(key)
         fallback = dict(fallback_by_key.get(key, {}))
-        sample = str(result.get("body") or "")[:240]
+        sample = normalize_code_match_sample(result.get("body"), limit=240)
         ranked.append(
             {
                 **fallback,
@@ -2863,11 +2880,33 @@ def infer_intentions(hit: dict[str, Any], artifact_kind: str, text: str, symbols
     )
     if symbol_focus:
         intentions.append(f"Named symbols indicate responsibilities around {', '.join(symbol_focus)}.")
-    if hit.get("sample"):
-        intentions.append(f"Representative match focus: `{normalize_text(str(hit['sample']))[:180]}`.")
+    sample = normalize_code_match_sample(hit.get("sample"))
+    if sample:
+        intentions.append(f"Representative match focus: `{sample}`.")
     if not intentions:
         intentions.append(f"This {artifact_kind.lower()} was selected as a likely implementation anchor based on code-search relevance and repository context.")
     return unique_lines(intentions, 6)
+
+
+def normalize_code_match_sample(value: Any, *, limit: int = 180) -> str:
+    lines = []
+    for raw_line in str(value or "").splitlines():
+        line = normalize_text(raw_line.strip())
+        if not line:
+            continue
+        lowered = line.lower()
+        if lowered.startswith(("import ", "from ", "require(", "const ", "let ", "var ")) and len(line) > 100:
+            continue
+        if re.fullmatch(r"[-:_,.{}()[\]\"'` ]+", line):
+            continue
+        lines.append(line)
+        if len(lines) >= 3:
+            break
+    sample = normalize_text(" ".join(lines))
+    if len(sample) <= limit:
+        return sample
+    truncated = sample[:limit].rsplit(" ", 1)[0].rstrip()
+    return f"{truncated}..." if truncated else sample[:limit]
 
 
 def analyze_code_reference(hit: dict[str, Any], code_file: dict[str, Any] | None = None) -> CodeReferenceAnalysis:
@@ -4061,7 +4100,7 @@ def output_candidate_business_payload(packet: dict[str, Any]) -> dict[str, Any]:
         "repo_doc_links": packet.get("repo_doc_links", [])[:20],
         "code_reference_links": packet.get("code_reference_links", [])[:20],
         "conflict_links": packet.get("conflict_links", [])[:20],
-        "shard_insight_links": packet.get("shard_insight_links", [])[:12],
+        "shard_insight_count": int(packet.get("shard_insight_count", 0) or 0),
         "evidence_cards": payload_cards,
         "source_kind_counts": evidence_cards.source_kind_counts(payload_cards),
     }
@@ -4118,7 +4157,7 @@ def packet_business_payload_from_spec(spec: dict[str, Any], packet: dict[str, An
             "evidence_cards": evidence_cards.stable_cards([card for card in cards if isinstance(card, dict)])[:30],
             "code_reference_links": code_reference_links[:20],
             "code_terms": code_terms[:20],
-            "shard_insight_links": cluster.get("shard_insight_links", [])[:12],
+            "shard_insight_count": len(cluster.get("shard_insight_links", []) or []),
         }
     capability = spec["capability"]
     payload_cards = payload_evidence_cards(
@@ -4137,7 +4176,7 @@ def packet_business_payload_from_spec(spec: dict[str, Any], packet: dict[str, An
         "repo_doc_links": spec.get("repo_doc_links", [])[:20],
         "code_reference_links": spec["code_reference_links"][:20],
         "conflict_links": spec["conflict_links"][:20],
-        "shard_insight_links": spec.get("shard_insight_links", [])[:12],
+        "shard_insight_count": len(spec.get("shard_insight_links", []) or []),
         "evidence_cards": payload_cards,
         "source_kind_counts": evidence_cards.source_kind_counts(payload_cards),
     }
@@ -4965,6 +5004,7 @@ def build_business_value_report(product_ontology: dict[str, Any], capability_row
         for record in output_records
     ]
     ontology_quality_score = round(10 * sum(1 for value in ontology_checks.values() if value) / max(1, len(ontology_checks)), 2)
+    traceability_metrics = traceability_selectivity_metrics(product_ontology, capability_rows, output_records)
     return {
         "schema_version": 1,
         "generated_at": DATE,
@@ -4980,6 +5020,8 @@ def build_business_value_report(product_ontology: dict[str, Any], capability_row
             for item in capability_value_coverage
             if not item["has_business_value"] or not item["has_user_problem"] or not item["has_source_evidence"]
         ],
+        "generated_note_synthesis_input_count": 0,
+        **traceability_metrics,
     }
 
 
@@ -5113,6 +5155,100 @@ def build_workflow_map_note(product_ontology: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _output_traceability_score(row: dict[str, Any], output: dict[str, Any], persona_name: str, problem: str) -> int:
+    row_text = " ".join(
+        str(value)
+        for value in [
+            row.get("title", ""),
+            row.get("link", ""),
+            row.get("target_persona", ""),
+            row.get("user_problem", ""),
+            row.get("business_value", ""),
+            persona_name,
+            problem,
+            *row.get("code_reference_links", []),
+        ]
+    )
+    output_text = " ".join(
+        str(value)
+        for value in [
+            output.get("title", ""),
+            output.get("stem", ""),
+            output.get("link", ""),
+            output.get("source_packet", ""),
+            output.get("source_packet_title", ""),
+            output.get("target_persona", ""),
+            output.get("user_problem", ""),
+            output.get("business_value", ""),
+            output.get("success_metric", ""),
+            *output.get("evidence_links", []),
+            *output.get("code_reference_links", []),
+        ]
+    )
+    row_tokens = text_tokens(row_text)
+    output_tokens = text_tokens(output_text)
+    overlap = len(row_tokens.intersection(output_tokens))
+    score = overlap
+    row_title = str(row.get("title") or "").casefold()
+    if row_title and row_title in output_text.casefold():
+        score += 12
+    if str(row.get("link") or "") and str(row.get("link")) in output_text:
+        score += 8
+    if str(row.get("target_persona") or persona_name).casefold() in output_text.casefold():
+        score += 4
+    if set(row.get("code_reference_links") or []).intersection(set(output.get("evidence_links") or []) | set(output.get("code_reference_links") or [])):
+        score += 6
+    try:
+        score += min(3, int(output.get("value_score") or 0) // 3)
+    except (TypeError, ValueError):
+        pass
+    return score
+
+
+def traceability_output_links_for_row(row: dict[str, Any], output_records: list[dict[str, Any]], persona_name: str, problem: str, *, limit: int = 3) -> list[str]:
+    scored = [
+        (_output_traceability_score(row, output, persona_name, problem), output)
+        for output in output_records
+    ]
+    selected = [
+        (score, output)
+        for score, output in sorted(scored, key=lambda item: (-item[0], str(item[1].get("title") or "")))
+        if score >= 10
+    ][:limit]
+    return [
+        f"{output.get('link') or output.get('title')} (relevance `{score}`)"
+        for score, output in selected
+        if output.get("link") or output.get("title")
+    ]
+
+
+def traceability_selectivity_metrics(product_ontology: dict[str, Any], capability_rows: list[dict[str, Any]], output_records: list[dict[str, Any]]) -> dict[str, Any]:
+    if not capability_rows:
+        return {
+            "overbroad_traceability_rows": 0,
+            "avg_output_links_per_traceability_row": 0.0,
+            "traceability_rows": 0,
+        }
+    personas = [item for item in product_ontology.get("target_personas", []) if isinstance(item, dict)]
+    jobs = [item for item in product_ontology.get("jobs_to_be_done", []) if isinstance(item, dict)]
+    linked_counts: list[int] = []
+    overbroad = 0
+    for index, row in enumerate(capability_rows[:24]):
+        persona = personas[index % len(personas)] if personas else {}
+        job = jobs[index % len(jobs)] if jobs else {}
+        persona_name = _structured_text(persona.get("name") or row.get("target_persona") or "Product teams", preferred_keys=("name", "title", "text"), limit=80)
+        problem = _structured_text(job.get("job") or row.get("user_problem") or row.get("business_value"), preferred_keys=("job", "problem", "text"), limit=120)
+        links = traceability_output_links_for_row(row, output_records, persona_name, problem)
+        linked_counts.append(len(links))
+        if output_records and len(links) >= len(output_records) and len(output_records) > 3:
+            overbroad += 1
+    return {
+        "overbroad_traceability_rows": overbroad,
+        "avg_output_links_per_traceability_row": round(sum(linked_counts) / max(1, len(linked_counts)), 2),
+        "traceability_rows": len(linked_counts),
+    }
+
+
 def build_value_traceability_matrix_note(product_ontology: dict[str, Any], capability_rows: list[dict[str, Any]], output_records: list[dict[str, Any]]) -> str:
     lines = [
         frontmatter({"type": "hub", "area": PRODUCT_CONTEXT["slug"], "source": "generated", "tags": ["product", "traceability", "business-value"]}),
@@ -5123,9 +5259,6 @@ def build_value_traceability_matrix_note(product_ontology: dict[str, Any], capab
     ]
     personas = [item for item in product_ontology.get("target_personas", []) if isinstance(item, dict)]
     jobs = [item for item in product_ontology.get("jobs_to_be_done", []) if isinstance(item, dict)]
-    outputs_by_title = defaultdict(list)
-    for output in output_records:
-        outputs_by_title[str(output.get("title") or "")].append(output.get("link") or output.get("title") or "")
     for index, row in enumerate(capability_rows[:24]):
         persona = personas[index % len(personas)] if personas else {}
         job = jobs[index % len(jobs)] if jobs else {}
@@ -5140,7 +5273,7 @@ def build_value_traceability_matrix_note(product_ontology: dict[str, Any], capab
                 f"{row.get('code_count', 0)} code",
             ]
         )
-        output_links = ", ".join(str(value) for values in outputs_by_title.values() for value in values[:1]) or "None proposed yet"
+        output_links = ", ".join(traceability_output_links_for_row(row, output_records, persona_name, problem)) or "No direct output candidate yet"
         lines.append(f"| {persona_name} | {problem} | {row.get('link') or row.get('title')} | {evidence} | {output_links} |")
     lines.extend(["", "## Related notes", "", "- [[Product Ontology]]", "- [[Workflow Map]]", "- [[Output Pipeline]]"])
     return "\n".join(lines)
@@ -6194,7 +6327,7 @@ def main() -> None:
             "index_path": str(evidence_index_path),
         }
     changed_scope_report = evidence_index.changed_scope_report(
-        previous_evidence_rows,
+        upstream_synthesis_rows(previous_evidence_rows),
         base_evidence_rows,
         force=bool(args.force or not generation_config.get("changed_scope_rebuild", True)),
     )
@@ -7261,6 +7394,18 @@ def main() -> None:
                 "output_kind": output_kind,
                 "source_packet": packet["link"],
                 "evidence_score": packet.get("evidence_score", 0),
+                "evidence_links": unique_lines(
+                    [
+                        packet["link"],
+                        *packet.get("support_links", []),
+                        *packet.get("wiki_links", []),
+                        *packet.get("repo_doc_links", []),
+                        *packet.get("code_reference_links", []),
+                        *packet.get("conflict_links", []),
+                    ],
+                    60,
+                ),
+                "code_reference_links": packet.get("code_reference_links", [])[:20],
                 **output_business_value,
             }
         )

@@ -267,6 +267,22 @@ class ProductBasbLifecycleTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (vault / "Value Traceability Matrix.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "type: hub",
+                        "source: generated",
+                        "---",
+                        "# Value Traceability Matrix",
+                        "",
+                        "| Persona | Job / Problem | Capability | Evidence | Output candidates |",
+                        "| --- | --- | --- | --- | --- |",
+                        "| Support | Problem | [[Capability]] | 1 support | [[Output Candidate - A]], [[Output Candidate - B]], [[Output Candidate - C]], [[Output Candidate - D]] |",
+                    ]
+                ),
+                encoding="utf-8",
+            )
             completed = subprocess.run(
                 [sys.executable, str(AUDIT_SCRIPT), "--vault", str(vault)],
                 check=True,
@@ -277,6 +293,7 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         self.assertIn("## Generated Template Residue", completed.stdout)
         self.assertIn("empty Product Ontology section", completed.stdout)
         self.assertIn("empty Product Ontology JTBD body", completed.stdout)
+        self.assertIn("overbroad traceability output links", completed.stdout)
 
     def test_readiness_reports_basb_quality_metrics(self) -> None:
         module = load_module(READINESS_SCRIPT, "readiness_basb_lifecycle_test")
@@ -305,7 +322,13 @@ class ProductBasbLifecycleTests(unittest.TestCase):
                 '{"clusters":[{"id":"semantic-cluster-1"}],"stats":{"cache_hits":8,"cache_misses":2,"openai_failures":0,"llm_cache_hits":3,"llm_cache_misses":1,"llm_failures":0}}\n'
             )
             (inventory_dir / "business_value_report.json").write_text(
-                '{"ontology_quality_score":8.5,"persona_count":2,"jobs_to_be_done_count":3,"business_value_driver_count":2,"business_evidence_gaps":["Billing"]}\n'
+                '{"ontology_quality_score":8.5,"persona_count":2,"jobs_to_be_done_count":3,"business_value_driver_count":2,"business_evidence_gaps":["Billing"],"generated_note_synthesis_input_count":0,"overbroad_traceability_rows":0,"avg_output_links_per_traceability_row":1.5}\n'
+            )
+            (inventory_dir / "business_value_synthesis.json").write_text(
+                '{"warm_cache_hit_ratio":0.96,"gpt_call_count":1,"skipped_gpt_call_count":39}\n'
+            )
+            (inventory_dir / "generation_shards.json").write_text(
+                '{"cache_reuse_ratio":1.0,"cache_hits":12,"cache_misses":0,"gpt_call_count":0}\n'
             )
             (inventory_dir / "embedding_cache.json").write_text('{"items":{"a":{},"b":{}}}\n')
             (inventory_dir / "llm_cluster_cache.json").write_text('{"items":{"cluster":{}}}\n')
@@ -335,6 +358,12 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         self.assertIn("- Personas: `2`", report)
         self.assertIn("- Jobs to be done: `3`", report)
         self.assertIn("- Business value drivers: `2`", report)
+        self.assertIn("- Business-value cache hit ratio: `0.96`", report)
+        self.assertIn("- Business-value GPT calls skipped: `39`", report)
+        self.assertIn("- Generated-note synthesis inputs: `0`", report)
+        self.assertIn("- Traceability overbroad rows: `0`", report)
+        self.assertIn("- Generation shard cache hit ratio: `1.0`", report)
+        self.assertIn("- Generation shard GPT calls: `0`", report)
         self.assertIn("- Business evidence gaps: `1`", report)
 
     def test_migration_dry_run_and_write_create_surfaces_without_overwriting_user_notes(self) -> None:

@@ -75,6 +75,9 @@ class ProgressRecorder:
         self.event_log_path = inventory_dir / "generation_progress.jsonl"
         self.events: list[dict[str, Any]] = []
         self.stages: dict[str, dict[str, Any]] = {}
+        self.max_progress_percent = 0
+        self.scope_expanded = False
+        self.discovered_total_units = 0
         self.run_id = f"generation-{_now_iso().replace(':', '').replace('-', '')}"
         self.started_at = time.time()
         if reset:
@@ -111,6 +114,9 @@ class ProgressRecorder:
                         **_new_stage(str(stage["stage"]), str(stage.get("label") or _stage_label(str(stage["stage"])))),
                         **stage,
                     }
+        self.max_progress_percent = max(0, min(int(snapshot.get("progress_percent") or 0), 100))
+        self.scope_expanded = bool(snapshot.get("scope_expanded", False))
+        self.discovered_total_units = _positive_int(snapshot.get("discovered_total_units"), 0)
 
     def start_run(
         self,
@@ -124,6 +130,9 @@ class ProgressRecorder:
             stage_id: _new_stage(stage_id, label, units)
             for stage_id, label, units in (planned_stages or DEFAULT_STAGE_PLAN)
         }
+        self.max_progress_percent = 0
+        self.scope_expanded = False
+        self.discovered_total_units = sum(_positive_int(units) for _stage_id, _label, units in (planned_stages or DEFAULT_STAGE_PLAN))
         self.run_id = f"generation-{_now_iso().replace(':', '').replace('-', '')}"
         return self.record(stage, status, **details)
 
@@ -135,7 +144,11 @@ class ProgressRecorder:
     def record(self, stage: str, status: str, **details: Any) -> dict[str, Any]:
         self.inventory_dir.mkdir(parents=True, exist_ok=True)
         stage_record = self.stages.setdefault(stage, _new_stage(stage, total_units=details.get("total_units", 1)))
+        previous_total_units = _positive_int(stage_record.get("total_units", 1))
         total_units = _positive_int(details.get("total_units", stage_record.get("total_units", 1)))
+        if total_units > previous_total_units:
+            stage_record["scope_expanded"] = True
+            self.scope_expanded = True
         completed_units = details.get("completed_units")
         if completed_units is None and status == "completed":
             completed_units = total_units
@@ -150,6 +163,16 @@ class ProgressRecorder:
                 "missing_units": max(0, total_units - completed),
             }
         )
+        if stage == "rebuild" and status == "completed" and "total_seconds" in details:
+            for record in self.stages.values():
+                final_total = _positive_int(record.get("total_units"), 1)
+                record.update(
+                    {
+                        "status": "completed",
+                        "completed_units": final_total,
+                        "missing_units": 0,
+                    }
+                )
         event = {
             "schema_version": PROGRESS_SCHEMA_VERSION,
             "run_id": self.run_id,
@@ -176,9 +199,17 @@ class ProgressRecorder:
         remaining_units = max(0, total_units - completed_units)
         progress_percent = int(round((completed_units / total_units) * 100)) if total_units else 0
         progress_percent = max(0, min(progress_percent, 100))
-        if str(event.get("status") or "") in ACTIVE_STATUSES and progress_percent >= 100:
+        status = str(event.get("status") or "")
+        if status in ACTIVE_STATUSES:
+            progress_percent = max(progress_percent, self.max_progress_percent)
+        if status in ACTIVE_STATUSES and progress_percent >= 100:
             progress_percent = 99
             remaining_units = max(1, remaining_units)
+        if status == "completed" and remaining_units == 0:
+            progress_percent = 100
+            remaining_units = 0
+        self.max_progress_percent = max(self.max_progress_percent, progress_percent)
+        self.discovered_total_units = max(self.discovered_total_units, total_units)
         current_stage = str(event["stage"])
         current_stage_record = self.stages.get(current_stage, _new_stage(current_stage))
         return {
@@ -193,6 +224,8 @@ class ProgressRecorder:
             "completed_units": completed_units,
             "total_units": total_units,
             "remaining_units": remaining_units,
+            "discovered_total_units": self.discovered_total_units,
+            "scope_expanded": self.scope_expanded or any(bool(stage.get("scope_expanded")) for stage in stages),
             "unit_label": UNIT_LABEL,
             "event_count": len(self.events),
             "stages": stages,

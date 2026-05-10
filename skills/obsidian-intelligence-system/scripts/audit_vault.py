@@ -30,6 +30,8 @@ SCAFFOLD_RESIDUE_MARKERS = (
 )
 MARKDOWN_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 EMPTY_JTBD_RE = re.compile(r"(?im)^-\s+\*\*[^*\n]+\*\*:\s*$")
+TRACEABILITY_ROW_RE = re.compile(r"^\|(?P<cells>.+)\|$", re.MULTILINE)
+OUTPUT_CANDIDATE_LINK_RE = re.compile(r"\[\[Output Candidate - [^\]]+\]\]")
 
 REQUIRED_FIELDS = {
     "intelligence-summary": ["type", "entity", "category", "status", "last_updated"],
@@ -139,6 +141,22 @@ def product_ontology_residue_markers(path: Path, text: str) -> list[str]:
             markers.append(f"empty Product Ontology section: {heading}")
     if EMPTY_JTBD_RE.search(markdown_section_body(text, "Jobs to be done")):
         markers.append("empty Product Ontology JTBD body")
+    return markers
+
+
+def traceability_residue_markers(path: Path, text: str) -> list[str]:
+    if path.stem != "Value Traceability Matrix":
+        return []
+    markers: list[str] = []
+    for match in TRACEABILITY_ROW_RE.finditer(text):
+        cells = [cell.strip() for cell in match.group("cells").split("|")]
+        if len(cells) < 5 or cells[0] in {"Persona", "---"}:
+            continue
+        output_cell = cells[-1]
+        linked_outputs = OUTPUT_CANDIDATE_LINK_RE.findall(output_cell)
+        if len(linked_outputs) > 3:
+            markers.append("overbroad traceability output links")
+            break
     return markers
 
 
@@ -368,6 +386,7 @@ def main() -> None:
             if any(marker in text for marker in SCAFFOLD_RESIDUE_MARKERS):
                 markers.append("scaffold operations text")
             markers.extend(product_ontology_residue_markers(path, text))
+            markers.extend(traceability_residue_markers(path, text))
             if markers:
                 generated_template_residue[path] = markers
 

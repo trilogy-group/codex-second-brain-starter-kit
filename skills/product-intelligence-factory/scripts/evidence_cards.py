@@ -22,18 +22,35 @@ SUPPORTED_EVIDENCE_KINDS = {
     "reducer-summary",
 }
 VOLATILE_KEYS = {
+    "batch_count",
+    "cache_hit",
+    "cache_hit_ratio",
+    "cache_hits",
+    "cache_miss_reasons",
+    "cache_misses",
     "date",
+    "elapsed_seconds",
+    "event_count",
+    "failure_count",
+    "failures",
+    "generated_note_links",
     "generated_at",
     "run_id",
     "scratch_dir",
     "scratch_root",
+    "seconds",
     "source_shard",
     "source_shard_note",
     "shard_insight_links",
+    "skipped_gpt_call_count",
+    "status_counts",
+    "timing_seconds",
+    "updated_at",
     "generated_output_candidates",
     "output_candidate_links",
+    "warm_cache_hit_ratio",
 }
-VOLATILE_PREFIXES = ("cache_", "timing_", "elapsed_")
+VOLATILE_PREFIXES = ("cache_", "timing_", "elapsed_", "runtime_", "diagnostic_")
 
 
 def compact_text(value: Any, limit: int = 700) -> str:
@@ -241,6 +258,11 @@ def source_kind_counts(cards: list[dict[str, Any]]) -> dict[str, int]:
     return dict(Counter(str(card.get("source_kind") or card.get("kind") or "generated-note") for card in cards))
 
 
+def is_volatile_key(key: Any) -> bool:
+    key_text = str(key)
+    return key_text in VOLATILE_KEYS or any(key_text.startswith(prefix) for prefix in VOLATILE_PREFIXES)
+
+
 def stable_cards(
     cards: list[dict[str, Any]],
     *,
@@ -271,18 +293,25 @@ def stable_business_payload(payload: Any) -> Any:
         return sorted((stable_business_payload(item) for item in payload), key=lambda item: json.dumps(item, sort_keys=True, default=str))
     if isinstance(payload, dict):
         if "evidence_cards" in payload and isinstance(payload["evidence_cards"], list):
+            include_generated_notes = bool(payload.get("generated_notes_feed_synthesis", False))
+            stable_evidence_cards = stable_cards(
+                payload["evidence_cards"],
+                include_generated_notes=include_generated_notes,
+            )
             payload = {
                 **payload,
-                "evidence_cards": stable_cards(
-                    payload["evidence_cards"],
-                    include_generated_notes=bool(payload.get("generated_notes_feed_synthesis", False)),
-                ),
+                "evidence_cards": stable_evidence_cards,
+                "source_kind_counts": source_kind_counts(stable_evidence_cards),
             }
         cleaned: dict[str, Any] = {}
         for key, value in payload.items():
             key_text = str(key)
-            if key_text in VOLATILE_KEYS or any(key_text.startswith(prefix) for prefix in VOLATILE_PREFIXES):
+            if is_volatile_key(key_text):
                 continue
             cleaned[key_text] = stable_business_payload(value)
         return cleaned
     return payload
+
+
+def stable_synthesis_payload(payload: Any) -> Any:
+    return stable_business_payload(payload)

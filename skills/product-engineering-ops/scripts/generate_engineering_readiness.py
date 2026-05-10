@@ -137,7 +137,9 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
     rate_limits = load_json_if_exists(inventory_dir / "rate_limit_events.json")
     benchmark = load_json_if_exists(inventory_dir / "benchmark_report.json")
     business_value = load_json_if_exists(inventory_dir / "business_value_report.json")
-    if not code_intel and not semantic and not embedding_cache and not llm_cache and not rebuild_cache and not rate_limits and not benchmark and not business_value:
+    business_synthesis = load_json_if_exists(inventory_dir / "business_value_synthesis.json")
+    generation_shards = load_json_if_exists(inventory_dir / "generation_shards.json")
+    if not code_intel and not semantic and not embedding_cache and not llm_cache and not rebuild_cache and not rate_limits and not benchmark and not business_value and not business_synthesis and not generation_shards:
         return {}
     summary = code_intel.get("summary") if isinstance(code_intel.get("summary"), dict) else {}
     graph = code_intel.get("graph") if isinstance(code_intel.get("graph"), dict) else {}
@@ -182,6 +184,16 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
         "jobs_to_be_done_count": int(business_value.get("jobs_to_be_done_count", 0) or 0),
         "business_value_driver_count": int(business_value.get("business_value_driver_count", 0) or 0),
         "business_evidence_gap_count": len(business_value.get("business_evidence_gaps", []) if isinstance(business_value.get("business_evidence_gaps"), list) else []),
+        "business_value_cache_hit_ratio": str(business_synthesis.get("warm_cache_hit_ratio", business_synthesis.get("cache_hit_ratio", 0))),
+        "business_value_gpt_calls": int(business_synthesis.get("gpt_call_count", 0) or 0),
+        "business_value_skipped_gpt_calls": int(business_synthesis.get("skipped_gpt_call_count", 0) or 0),
+        "generated_note_synthesis_input_count": int(business_value.get("generated_note_synthesis_input_count", 0) or 0),
+        "traceability_overbroad_rows": int(business_value.get("overbroad_traceability_rows", 0) or 0),
+        "traceability_avg_output_links": str(business_value.get("avg_output_links_per_traceability_row", 0)),
+        "generation_shard_cache_hit_ratio": str(generation_shards.get("cache_reuse_ratio", 0)),
+        "generation_shard_cache_hits": int(generation_shards.get("cache_hits", 0) or 0),
+        "generation_shard_cache_misses": int(generation_shards.get("cache_misses", 0) or 0),
+        "generation_shard_gpt_calls": int(generation_shards.get("gpt_call_count", 0) or 0),
     }
 
 
@@ -307,6 +319,15 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
         lines.append(f"- Jobs to be done: `{inventory_metrics['jobs_to_be_done_count']}`")
         lines.append(f"- Business value drivers: `{inventory_metrics['business_value_driver_count']}`")
         lines.append(f"- Business evidence gaps: `{inventory_metrics['business_evidence_gap_count']}`")
+        lines.append(f"- Business-value cache hit ratio: `{inventory_metrics['business_value_cache_hit_ratio']}`")
+        lines.append(f"- Business-value GPT calls: `{inventory_metrics['business_value_gpt_calls']}`")
+        lines.append(f"- Business-value GPT calls skipped: `{inventory_metrics['business_value_skipped_gpt_calls']}`")
+        lines.append(f"- Generated-note synthesis inputs: `{inventory_metrics['generated_note_synthesis_input_count']}`")
+        lines.append(f"- Traceability overbroad rows: `{inventory_metrics['traceability_overbroad_rows']}`")
+        lines.append(f"- Traceability average output links: `{inventory_metrics['traceability_avg_output_links']}`")
+        lines.append(f"- Generation shard cache hit ratio: `{inventory_metrics['generation_shard_cache_hit_ratio']}`")
+        lines.append(f"- Generation shard cache hits: `{inventory_metrics['generation_shard_cache_hits']}`")
+        lines.append(f"- Generation shard GPT calls: `{inventory_metrics['generation_shard_gpt_calls']}`")
 
     lines.extend(["", "## Readiness Categories", ""])
     for category in categories:

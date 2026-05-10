@@ -430,6 +430,62 @@ class NoteEnrichmentTests(unittest.TestCase):
         self.assertNotIn("['Fewer", note)
         self.assertNotIn("{'level'", note)
 
+    def test_value_traceability_matrix_links_only_relevant_output_candidates(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_traceability_selective_test")
+        module.configure_runtime(
+            {"product": {"name": "Acme", "slug": "acme"}, "sources": {"stale_doc_hosts": []}},
+            {"capabilities": []},
+        )
+        product_ontology = {
+            "target_personas": [{"name": "Support managers"}],
+            "jobs_to_be_done": [{"job": "Answer customers from trusted workspace evidence."}],
+        }
+        capability_rows = [
+            {
+                "title": "Workspace Intelligence",
+                "link": "[[Capability - Workspace Intelligence]]",
+                "target_persona": "Support managers",
+                "user_problem": "Need trusted workspace answers.",
+                "business_value": "Reduce escalations with cited answers.",
+                "support_count": 2,
+                "wiki_count": 1,
+                "repo_doc_count": 0,
+                "code_count": 1,
+                "code_reference_links": ["[[Code Ref - search]]"],
+            }
+        ]
+        outputs = [
+            {
+                "title": "Workspace Intelligence Output Candidate",
+                "link": "[[Output Candidate - Workspace Intelligence]]",
+                "source_packet": "[[Packet - Workspace Intelligence]]",
+                "target_persona": "Support managers",
+                "user_problem": "Need trusted workspace answers.",
+                "business_value": "Reduce escalations with cited answers.",
+                "evidence_links": ["[[Capability - Workspace Intelligence]]", "[[Code Ref - search]]"],
+                "source_packet_title": "Workspace Intelligence",
+                "value_score": 8,
+            },
+            {
+                "title": "Billing Cleanup Output Candidate",
+                "link": "[[Output Candidate - Billing Cleanup]]",
+                "target_persona": "Finance admins",
+                "user_problem": "Need invoice cleanup.",
+                "business_value": "Reduce billing risk.",
+                "evidence_links": ["[[Billing]]"],
+                "value_score": 7,
+            },
+        ]
+
+        note = module.build_value_traceability_matrix_note(product_ontology, capability_rows, outputs)
+        report = module.build_business_value_report(product_ontology, capability_rows, outputs)
+
+        self.assertIn("[[Output Candidate - Workspace Intelligence]]", note)
+        self.assertNotIn("[[Output Candidate - Billing Cleanup]]", note)
+        self.assertIn("relevance", note)
+        self.assertEqual(report["overbroad_traceability_rows"], 0)
+        self.assertLessEqual(report["avg_output_links_per_traceability_row"], 3)
+
     def test_capability_note_does_not_render_raw_status_dict_for_empty_links(self) -> None:
         module = load_module(MODULE_PATH, "rebuild_product_brain_capability_status_markdown_test")
         module.configure_runtime(

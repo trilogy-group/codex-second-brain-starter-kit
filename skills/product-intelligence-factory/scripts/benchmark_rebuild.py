@@ -69,6 +69,13 @@ def run_command(command: list[str], *, env: dict[str, str]) -> float:
 
 def render_report(report: dict[str, Any]) -> str:
     lines = [
+        "---",
+        "type: hub",
+        "source: generated",
+        "tags:",
+        "  - benchmark",
+        "  - generation-performance",
+        "---",
         f"# Benchmark Report - {report['label']}",
         "",
         f"- Manifest: `{report['manifest']}`",
@@ -98,6 +105,7 @@ def render_report(report: dict[str, Any]) -> str:
                 "",
             ]
         )
+    lines.extend(["## Related notes", "", "- [[Intelligence Home]]", "- [[CODE Dashboard]]"])
     return "\n".join(lines).rstrip() + "\n"
 
 

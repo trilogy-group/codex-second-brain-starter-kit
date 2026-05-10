@@ -366,6 +366,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             first_record = {
                 "stem": "Support Alpha",
                 "capabilities": ["core"],
+                "code_reference_links": ["[[Code Ref - repo - app.py|repo/app.py]] :: old implementation summary"],
                 "quality": {
                     "score": 9,
                     "generated_at": "2026-05-10T10:00:00Z",
@@ -376,6 +377,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             }
             second_record = {
                 **first_record,
+                "code_reference_links": ["[[Code Ref - repo - app.py|repo/app.py]] :: new generated implementation summary"],
                 "quality": {
                     **first_record["quality"],
                     "generated_at": "2026-05-10T11:00:00Z",
@@ -410,6 +412,105 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(calls, len(first["shards"]))
         self.assertEqual(second["cache_misses"], 0)
         self.assertGreaterEqual(second["cache_hits"], 1)
+        self.assertEqual(second["gpt_call_count"], 0)
+        self.assertEqual(second["cache_reuse_ratio"], 1.0)
+        self.assertTrue(second["current_shard_note_paths"])
+
+    def test_stable_synthesis_payload_ignores_generated_notes_and_runtime_diagnostics(self) -> None:
+        cards = load_module(EVIDENCE_CARDS_SCRIPT, "evidence_cards_stable_synthesis_payload_test")
+        first = {
+            "title": "Workspace Intelligence",
+            "generated_notes_feed_synthesis": False,
+            "source_kind_counts": {"repo-doc": 1, "generated-note": 99},
+            "hierarchical_reducers": {"layer_stats": {"cache_hits": 10, "elapsed_seconds": 2.5}},
+            "evidence_cards": [
+                {"id": "doc-1", "source_kind": "repo-doc", "title": "Workflow", "summary": "Support workflow evidence."},
+                {"id": "note-1", "source_kind": "generated-note", "title": "Generated Packet", "summary": "Rendered output."},
+            ],
+            "shard_insight_links": ["[[Generation Shard - old]]"],
+            "output_candidate_links": ["[[Output Candidate - old]]"],
+        }
+        second = {
+            **first,
+            "date": "2026-05-10",
+            "source_kind_counts": {"repo-doc": 1, "generated-note": 1},
+            "hierarchical_reducers": {"layer_stats": {"cache_hits": 0, "elapsed_seconds": 99.9}},
+            "shard_insight_links": ["[[Generation Shard - new]]"],
+            "output_candidate_links": ["[[Output Candidate - new]]"],
+        }
+
+        stable_first = cards.stable_synthesis_payload(first)
+        stable_second = cards.stable_synthesis_payload(second)
+
+        self.assertEqual(stable_first, stable_second)
+        self.assertEqual(stable_first["source_kind_counts"], {"repo-doc": 1})
+        self.assertNotIn("generated-note", json.dumps(stable_first))
+
+    def test_changed_scope_for_upstream_synthesis_ignores_generated_rows(self) -> None:
+        rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "rebuild_product_brain_upstream_scope_test")
+        evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_upstream_scope_test")
+        previous = [
+            evidence_index.EvidenceRow(
+                evidence_id="support:a",
+                kind="support",
+                title="Support A",
+                body="same",
+                source_ref="a",
+                path="a",
+                capabilities=["core"],
+                code_refs=[],
+                fingerprint="same",
+            ),
+            evidence_index.EvidenceRow(
+                evidence_id="generated-note:/vault/Packet.md",
+                kind="generated-note",
+                title="Packet",
+                body="old generated note",
+                source_ref="/vault/Packet.md",
+                path="/vault/Packet.md",
+                capabilities=["core"],
+                code_refs=["repo/app.py"],
+                fingerprint="old",
+            ),
+        ]
+        current = [
+            evidence_index.EvidenceRow(
+                evidence_id="support:a",
+                kind="support",
+                title="Support A",
+                body="same",
+                source_ref="a",
+                path="a",
+                capabilities=["core"],
+                code_refs=[],
+                fingerprint="same",
+            )
+        ]
+
+        report = evidence_index.changed_scope_report(rebuild.upstream_synthesis_rows(previous), current)
+
+        self.assertEqual(report["changed_evidence_ids"], [])
+        self.assertEqual(report["impacted_capabilities"], [])
+
+    def test_source_evidence_fingerprint_ignores_derived_code_refs(self) -> None:
+        rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "rebuild_product_brain_source_fingerprint_test")
+        base_record = {
+            "source_ref": "docs/workflow.md",
+            "stem": "Support - Workflow",
+            "signals": {"title": "Workflow", "headings": ["Workflow"], "bullets": ["Route work"]},
+            "text": "Support teams route work to owners.",
+            "capabilities": ["workspace-management"],
+            "code_hits": [{"repo": "repo", "relative_path": "app/workflows.py"}],
+        }
+        changed_code_refs = {
+            **base_record,
+            "code_hits": [{"repo": "repo", "relative_path": "tests/test_workflows.py"}],
+        }
+
+        first = rebuild.source_record_to_evidence_row("support", base_record)
+        second = rebuild.source_record_to_evidence_row("support", changed_code_refs)
+
+        self.assertEqual(first.fingerprint, second.fingerprint)
 
     def test_generation_shards_skip_repo_name_placeholder_specs(self) -> None:
         performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_no_repo_placeholder_test")
@@ -1286,6 +1387,21 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertGreater(snapshot["missing_percent"], 0)
         self.assertGreater(snapshot["remaining_units"], 0)
 
+    def test_generation_progress_does_not_move_backward_when_scope_expands(self) -> None:
+        progress_module = load_module(GENERATION_PROGRESS_SCRIPT, "generation_progress_monotonic_scope_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            inventories = Path(tmp_dir)
+            recorder = progress_module.ProgressRecorder(inventories, reset=True)
+            recorder.start_run("semantic_clustering", planned_stages=[("semantic_clustering", "Semantic clustering", 10)])
+            recorder.record("semantic_clustering", "running", completed_units=8, total_units=10)
+            first = json.loads((inventories / "generation_progress.json").read_text(encoding="utf-8"))
+            recorder.record("semantic_clustering", "running", completed_units=12, total_units=80)
+            second = json.loads((inventories / "generation_progress.json").read_text(encoding="utf-8"))
+
+        self.assertGreaterEqual(second["progress_percent"], first["progress_percent"])
+        self.assertTrue(second["scope_expanded"])
+        self.assertEqual(second["discovered_total_units"], 80)
+
     def test_source_fetch_progress_callback_tracks_completed_links(self) -> None:
         source_indices = load_module(BUILD_SOURCE_INDICES_SCRIPT, "build_source_indices_progress_test")
         cache_module = load_module(SOURCE_INDEX_CACHE_SCRIPT, "source_index_cache_progress_test")
@@ -1352,6 +1468,21 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(trends["entry_count"], 2)
         self.assertEqual(trends["best_total_seconds"], 6.0)
         self.assertEqual(trends["worst_total_seconds"], 10.0)
+
+    def test_benchmark_markdown_report_is_a_generated_linked_note(self) -> None:
+        benchmark_module = load_module(BENCHMARK_REBUILD_SCRIPT, "benchmark_rebuild_markdown_report_test")
+        note = benchmark_module.render_report(
+            {
+                "label": "warm-cache",
+                "manifest": "/tmp/manifest.yaml",
+                "runs": [{"run": 1, "total_seconds": 4.2, "cache_stats": {"hits": 10, "misses": 0}, "shard_summary": {"merged_count": 2}}],
+                "digest_stable": True,
+                "history": {"entry_count": 1},
+            }
+        )
+
+        self.assertTrue(note.startswith("---\ntype: hub\nsource: generated"))
+        self.assertIn("[[Intelligence Home]]", note)
 
     def test_llm_shard_worker_writes_schema_valid_note_metadata(self) -> None:
         shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_llm_worker_test")

@@ -44,6 +44,7 @@ VOLATILE_SHARD_KEYS = {
     "seconds",
     "source_shard",
     "source_shard_note",
+    "shard_insight_links",
     "timing_seconds",
     "updated_at",
 }
@@ -126,10 +127,31 @@ def _shard_cache_key(spec: dict[str, Any]) -> str:
     ).hexdigest()
 
 
+def _shard_note_paths(results: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for result in sorted(results, key=lambda item: str(item.get("id") or "")):
+        scratch_dir = Path(str(result.get("scratch_dir") or ""))
+        for note_name in _string_list(result.get("draft_notes"), 50):
+            if scratch_dir:
+                paths.append(str(scratch_dir / "draft_notes" / note_name))
+            else:
+                paths.append(note_name)
+    return paths
+
+
 def _string_list(value: Any, limit: int = 12) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value[:limit] if str(item).strip()]
+
+
+def _stable_code_reference_links(value: Any, limit: int = 12) -> list[str]:
+    links: list[str] = []
+    for item in _string_list(value, limit):
+        link = item.split(" :: ", 1)[0].strip()
+        if link:
+            links.append(link)
+    return links
 
 
 def _compact_card(kind: str, item: dict[str, Any], index: int) -> dict[str, Any]:
@@ -159,7 +181,7 @@ def _compact_card(kind: str, item: dict[str, Any], index: int) -> dict[str, Any]
         "title": title[:180],
         "summary": str(signals.get("summary") or item.get("summary") or "")[:700],
         "capabilities": _string_list(item.get("capabilities"), 10),
-        "code_reference_links": _string_list(item.get("code_reference_links"), 12),
+        "code_reference_links": _stable_code_reference_links(item.get("code_reference_links"), 12),
         "evidence_terms": _string_list(signals.get("terms") or item.get("evidence_terms"), 18),
         "quality": _stable_shard_value(item.get("quality")) if isinstance(item.get("quality"), dict) else {},
     }
@@ -785,6 +807,10 @@ def run_generation_shards(
             "shards": [],
             "cache_hits": 0,
             "cache_misses": 0,
+            "cache_miss_reasons": {},
+            "cache_reuse_ratio": 0.0,
+            "gpt_call_count": 0,
+            "current_shard_note_paths": [],
             "status_counts": {},
             "shard_insight_count": 0,
             "shard_insights": [],
@@ -796,6 +822,7 @@ def run_generation_shards(
     specs_to_run: list[dict[str, Any]] = []
     cache_hits = 0
     cache_misses = 0
+    cache_miss_reasons: dict[str, int] = {}
     for spec in specs[:max_shards]:
         cache_key = _shard_cache_key(spec)
         entry = shard_cache.get("entries", {}).get(cache_key)
@@ -805,6 +832,8 @@ def run_generation_shards(
             results.append(cached_result)
             continue
         cache_misses += 1
+        reason = "force" if force else ("cached_artifact_missing" if isinstance(entry, dict) else "new_shard")
+        cache_miss_reasons[reason] = cache_miss_reasons.get(reason, 0) + 1
         specs_to_run.append({**spec, "cache_key": cache_key})
 
     with ThreadPoolExecutor(max_workers=max_concurrent, thread_name_prefix="basb-generation-shard") as executor:
@@ -832,6 +861,7 @@ def run_generation_shards(
     results.sort(key=lambda item: item["id"])
     status_counts = Counter(item["status"] for item in results)
     shard_insights = collect_shard_insights({"shards": results})
+    cache_lookups = cache_hits + cache_misses
     return {
         "enabled": True,
         "run_id": run_id,
@@ -845,6 +875,10 @@ def run_generation_shards(
         "shards": results,
         "cache_hits": cache_hits,
         "cache_misses": cache_misses,
+        "cache_miss_reasons": dict(sorted(cache_miss_reasons.items())),
+        "cache_reuse_ratio": round(cache_hits / cache_lookups, 4) if cache_lookups else 0.0,
+        "gpt_call_count": cache_misses,
+        "current_shard_note_paths": _shard_note_paths(results),
         "status_counts": dict(status_counts),
         "shard_insight_count": len(shard_insights),
         "shard_insights": shard_insights,
