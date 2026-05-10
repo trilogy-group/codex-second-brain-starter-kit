@@ -26,6 +26,36 @@ def load_module(module_path: Path, module_name: str):
 
 
 class ProductBasbLifecycleTests(unittest.TestCase):
+    def test_product_ontology_note_renders_jobs_to_be_done_with_problem_outcome_confidence_and_evidence(self) -> None:
+        module = load_module(REBUILD_SCRIPT, "rebuild_product_ontology_markdown_test")
+        ontology = {
+            "product_purpose": "Helps product teams turn source evidence into shippable work.",
+            "target_personas": [],
+            "jobs_to_be_done": [
+                {
+                    "job": "Understand product purpose quickly",
+                    "user_problem": "Teams need the product purpose without reading every source.",
+                    "desired_outcome": "They can explain what to build, why it matters, and where it lives.",
+                    "confidence": "high",
+                    "evidence": [
+                        {"title": "README", "path": "README.md"},
+                        {"title": "Architecture", "citation_uri": "docs/architecture.md"},
+                    ],
+                }
+            ],
+            "business_value_drivers": [],
+            "capabilities_v2": [],
+        }
+
+        body = module.build_product_ontology_note(ontology, {"ontology_quality_score": 10})
+
+        self.assertIn("**Understand product purpose quickly**", body)
+        self.assertIn("Problem: Teams need the product purpose without reading every source.", body)
+        self.assertIn("Outcome: They can explain what to build, why it matters, and where it lives.", body)
+        self.assertIn("Confidence: `high`", body)
+        self.assertIn("Evidence: `README.md`, `docs/architecture.md`", body)
+        self.assertNotIn("**Understand product purpose quickly**: \n", body)
+
     def test_output_candidate_selection_is_capped_and_uses_packet_evidence(self) -> None:
         module = load_module(REBUILD_SCRIPT, "rebuild_product_brain_lifecycle_test")
         packets = [
@@ -212,6 +242,41 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         self.assertIn("## Outputs Missing Business Value", completed.stdout)
         self.assertIn("## Packets Without Forward Use", completed.stdout)
         self.assertIn("## Missing Weekly Reviews", completed.stdout)
+
+    def test_audit_flags_blank_ontology_sections_and_empty_jtbd_bodies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            vault = Path(tmp_dir) / "vault"
+            vault.mkdir()
+            (vault / "Product Ontology.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "type: hub",
+                        "source: generated",
+                        "---",
+                        "# Product Ontology",
+                        "",
+                        "## Jobs to be done",
+                        "",
+                        "- **Understand the product**: ",
+                        "",
+                        "## Business value drivers",
+                        "",
+                        "## Capabilities",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, str(AUDIT_SCRIPT), "--vault", str(vault)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertIn("## Generated Template Residue", completed.stdout)
+        self.assertIn("empty Product Ontology section", completed.stdout)
+        self.assertIn("empty Product Ontology JTBD body", completed.stdout)
 
     def test_readiness_reports_basb_quality_metrics(self) -> None:
         module = load_module(READINESS_SCRIPT, "readiness_basb_lifecycle_test")

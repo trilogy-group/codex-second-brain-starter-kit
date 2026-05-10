@@ -28,6 +28,8 @@ SCAFFOLD_RESIDUE_MARKERS = (
     "Use timestamped playbooks. Never overwrite prior strategy.",
     "Keep emails, transcripts, and tickets close to the relevant entity.",
 )
+MARKDOWN_HEADING_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+EMPTY_JTBD_RE = re.compile(r"(?im)^-\s+\*\*[^*\n]+\*\*:\s*$")
 
 REQUIRED_FIELDS = {
     "intelligence-summary": ["type", "entity", "category", "status", "last_updated"],
@@ -120,6 +122,24 @@ def build_resolution_maps(vault: Path, notes: list[Path]) -> tuple[dict[str, lis
         relative = path.relative_to(vault).with_suffix("").as_posix()
         by_relative[relative] = path
     return by_stem, by_relative
+
+
+def markdown_section_body(text: str, heading: str) -> str:
+    match = re.search(rf"(?ims)^##\s+{re.escape(heading)}\s*$\n(?P<body>.*?)(?=^##\s+|\Z)", text)
+    return match.group("body").strip() if match else ""
+
+
+def product_ontology_residue_markers(path: Path, text: str) -> list[str]:
+    if path.stem != "Product Ontology":
+        return []
+    markers: list[str] = []
+    for heading in ("Product purpose", "Jobs to be done", "Business value drivers", "Capabilities"):
+        body = markdown_section_body(text, heading)
+        if not body:
+            markers.append(f"empty Product Ontology section: {heading}")
+    if EMPTY_JTBD_RE.search(markdown_section_body(text, "Jobs to be done")):
+        markers.append("empty Product Ontology JTBD body")
+    return markers
 
 
 def render_report(
@@ -347,6 +367,7 @@ def main() -> None:
                 markers.append("raw Python-style business field")
             if any(marker in text for marker in SCAFFOLD_RESIDUE_MARKERS):
                 markers.append("scaffold operations text")
+            markers.extend(product_ontology_residue_markers(path, text))
             if markers:
                 generated_template_residue[path] = markers
 

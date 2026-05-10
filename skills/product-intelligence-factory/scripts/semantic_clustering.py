@@ -24,6 +24,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import generation_performance
 import rate_limits
 import openai_responses
+import openai_requests
 
 
 SEMANTIC_ENV_OVERRIDES = {
@@ -143,7 +144,7 @@ class OpenAIEmbeddingClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
+            with openai_requests.urlopen(request, timeout=600, opener=urllib.request.urlopen) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 headers = _response_headers(response)
         except HTTPError as exc:
@@ -186,7 +187,7 @@ class OpenAILLMSynthesisClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with openai_requests.urlopen(request, timeout=60, opener=urllib.request.urlopen) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 headers = _response_headers(response)
         except HTTPError as exc:

@@ -40,6 +40,7 @@ import hierarchical_reducers
 import incremental_cache
 import note_rendering
 import openai_responses
+import openai_requests
 import rate_limits
 import semantic_clustering
 
@@ -82,16 +83,51 @@ SPECIAL_CODE_FILES = {"Dockerfile", "Gemfile", "Podfile", "Fastfile", "Rakefile"
 IGNORED_DIRS = {".git", "node_modules", "Pods", "vendor", "dist", "build", "__pycache__"}
 LOW_SIGNAL_CODE_TERMS = {
     ".gitlab-ci",
+    ".github/workflows",
+    ".spec.",
+    ".test.",
     "package-lock.json",
+    "package.json",
+    "playwright.config",
+    "pytest.ini",
+    "tsconfig.json",
     "yarn.lock",
     "pnpm-lock",
     "jquery",
     "bootstrap",
     "react-16",
     "test-data",
+    "/test/",
+    "/tests/",
+    "test_",
+    "tests/",
+    "__tests__",
     "fake-cards",
     "graphiql/rails",
 }
+LOW_SIGNAL_ALLOWED_KEYWORDS = {
+    "ci",
+    "cd",
+    "deploy",
+    "deployment",
+    "pipeline",
+    "test",
+    "testing",
+    "coverage",
+    "qa",
+    "release",
+}
+APPLICATION_PATH_TERMS = (
+    "/app/",
+    "/apps/",
+    "/lib/",
+    "/server/",
+    "/service/",
+    "/services/",
+    "/src/",
+    "/worker/",
+    "/workers/",
+)
 TODO_RE = re.compile(r"\b(?:TODO|FIXME|XXX)\b", re.IGNORECASE)
 CONSOLE_LOG_RE = re.compile(r"\b(?:console\.(?:log|debug|warn|error)|print)\s*\(")
 SWALLOWED_ERROR_RE = re.compile(
@@ -327,7 +363,7 @@ class OpenAIBusinessValueClient:
             signal.signal(signal.SIGALRM, timeout_handler)
             signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
         try:
-            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            with openai_requests.urlopen(request, timeout=timeout_seconds, opener=urllib.request.urlopen) as response:
                 return response.headers, response.read()
         finally:
             if use_alarm:
@@ -841,8 +877,11 @@ def new_business_value_synthesis_inventory(config: dict[str, Any]) -> dict[str, 
         "failures": 0,
         "skipped_gpt_call_count": 0,
         "warm_cache_eligible_count": 0,
+        "warm_cache_hit_ratio": 0.0,
+        "cache_miss_reasons": {},
         "source_kind_counts": {},
         "unstable_payload_fields": sorted(evidence_cards.VOLATILE_KEYS),
+        "unstable_payload_fields_by_task": {},
         "tasks": {},
     }
 
@@ -862,7 +901,81 @@ def merge_business_value_synthesis_inventory(base: dict[str, Any], other: dict[s
                 merged[key] = int(merged.get(key, 0) or 0) + int(value)
             else:
                 merged[key] = value
+    for task, reasons in (other.get("cache_miss_reasons") or {}).items():
+        merged_reasons = base.setdefault("cache_miss_reasons", {}).setdefault(task, {})
+        if isinstance(reasons, dict):
+            for reason, count in reasons.items():
+                merged_reasons[reason] = int(merged_reasons.get(reason, 0) or 0) + int(count or 0)
+    for task, fields in (other.get("unstable_payload_fields_by_task") or {}).items():
+        merged_fields = set(base.setdefault("unstable_payload_fields_by_task", {}).get(task, []))
+        if isinstance(fields, list):
+            merged_fields.update(str(field) for field in fields)
+        base["unstable_payload_fields_by_task"][task] = sorted(merged_fields)
+    lookups = int(base.get("cache_hits", 0) or 0) + int(base.get("cache_misses", 0) or 0)
+    base["warm_cache_hit_ratio"] = round(int(base.get("cache_hits", 0) or 0) / lookups, 4) if lookups else 0.0
     return base
+
+
+def _volatile_payload_fields(payload: Any, prefix: str = "") -> list[str]:
+    fields: list[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            key_text = str(key)
+            path = f"{prefix}.{key_text}" if prefix else key_text
+            if key_text in evidence_cards.VOLATILE_KEYS or any(key_text.startswith(item) for item in evidence_cards.VOLATILE_PREFIXES):
+                fields.append(path)
+                continue
+            fields.extend(_volatile_payload_fields(value, path))
+    elif isinstance(payload, list):
+        for index, item in enumerate(payload[:50]):
+            fields.extend(_volatile_payload_fields(item, f"{prefix}[{index}]"))
+    return sorted(set(fields))
+
+
+def _business_cache_miss_reason(
+    cache: dict[str, Any] | None,
+    task: str,
+    entity_id: str,
+    dependencies: dict[str, Any],
+) -> str:
+    if cache is None:
+        return "cache_disabled"
+    stage = cache.get("entries", {}).get(BUSINESS_VALUE_CACHE_NAMESPACE, {})
+    if not isinstance(stage, dict):
+        return "new_entity"
+    expected_model = dependencies.get("model")
+    expected_effort = dependencies.get("reasoning_effort")
+    for entry in stage.values():
+        if not isinstance(entry, dict):
+            continue
+        existing = entry.get("dependencies") if isinstance(entry.get("dependencies"), dict) else {}
+        if existing.get("task") != task or existing.get("entity_id") != entity_id:
+            continue
+        if existing.get("model") != expected_model or existing.get("reasoning_effort") != expected_effort:
+            return "model_or_reasoning_changed"
+        if existing.get("prompt_version") != dependencies.get("prompt_version") or existing.get("output_contract_version") != dependencies.get("output_contract_version"):
+            return "prompt_or_contract_changed"
+        if existing.get("payload_hash") != dependencies.get("payload_hash"):
+            return "payload_changed"
+        return "cache_entry_changed"
+    return "new_entity"
+
+
+def _record_business_cache_miss(
+    inventory: dict[str, Any] | None,
+    *,
+    task: str,
+    reason: str,
+    payload: dict[str, Any],
+) -> None:
+    if inventory is None:
+        return
+    reason_counts = inventory.setdefault("cache_miss_reasons", {}).setdefault(task, {})
+    reason_counts[reason] = int(reason_counts.get(reason, 0) or 0) + 1
+    volatile_fields = _volatile_payload_fields(payload)
+    if volatile_fields:
+        fields_by_task = inventory.setdefault("unstable_payload_fields_by_task", {})
+        fields_by_task[task] = sorted(set(fields_by_task.get(task, []) + volatile_fields))
 
 
 def synthesize_single_business_value_cached(
@@ -895,6 +1008,12 @@ def synthesize_single_business_value_cached(
     if inventory is not None:
         inventory["cache_misses"] = int(inventory.get("cache_misses", 0) or 0) + 1
         inventory["gpt_call_count"] = int(inventory.get("gpt_call_count", 0) or 0) + 1
+        _record_business_cache_miss(
+            inventory,
+            task=task,
+            reason=_business_cache_miss_reason(cache, task, entity_id, dependencies),
+            payload=payload,
+        )
         if task_stats is not None:
             task_stats["cache_misses"] = int(task_stats.get("cache_misses", 0) or 0) + 1
             task_stats["batch_count"] = int(task_stats.get("batch_count", 0) or 0) + 1
@@ -1013,6 +1132,12 @@ def synthesize_business_value_entities(
                 misses[task].append({**item, "id": entity_id, "payload": payload, "cache_key": cache_key, "cache_input": input_payload, "cache_dependencies": dependencies})
                 inventory["cache_misses"] += 1
                 task_stats["cache_misses"] += 1
+                _record_business_cache_miss(
+                    inventory,
+                    task=task,
+                    reason=_business_cache_miss_reason(cache, task, entity_id, dependencies),
+                    payload=payload,
+                )
 
     batches: list[tuple[str, list[dict[str, Any]]]] = []
     for task, items in sorted(misses.items()):
@@ -1058,6 +1183,7 @@ def synthesize_business_value_entities(
     inventory["elapsed_seconds"] = round(time.perf_counter() - started, 4)
     total_cache_lookups = int(inventory.get("cache_hits", 0) or 0) + int(inventory.get("cache_misses", 0) or 0)
     inventory["cache_hit_ratio"] = round((int(inventory.get("cache_hits", 0) or 0) / total_cache_lookups), 4) if total_cache_lookups else 0.0
+    inventory["warm_cache_hit_ratio"] = inventory["cache_hit_ratio"]
     return BusinessValueSynthesisResult(values=values, inventory=inventory)
 
 
@@ -1654,9 +1780,14 @@ def rank_code_hits_for_keywords(
         )
         score = hit.get("score", 0)
         score += len(keyword_tokens.intersection(text_tokens(haystack)))
-        if is_low_signal_code_hit(hit):
-            score -= 4
-        ranked.append((score, hit))
+        low_signal = is_low_signal_code_hit(hit)
+        if low_signal and not _keyword_tokens_allow_low_signal(keyword_tokens):
+            score -= 100
+        if _is_application_code_hit(hit):
+            score += 50
+        ranked_hit = dict(hit)
+        ranked_hit["low_signal_allowed"] = bool(low_signal and _keyword_tokens_allow_low_signal(keyword_tokens))
+        ranked.append((score, ranked_hit))
     ranked.sort(key=lambda item: (-item[0], item[1].get("relative_path", "")))
     return prune_code_hits([hit for _, hit in ranked], limit)
 
@@ -1722,7 +1853,13 @@ def code_intelligence_hits_for_capability(
             + int(item.get("test_anchor_count") or 0)
             + min(int(item.get("dependency_count") or 0), 10)
         )
+        low_signal = is_low_signal_code_hit({"repo": repo, "relative_path": relative_path, "sample": haystack})
+        allow_low_signal = _keyword_tokens_allow_low_signal(query_tokens)
         score = len(matched_tokens) * 10 + min(richness, 30)
+        if low_signal and not allow_low_signal:
+            score -= 100
+        if _is_application_path(relative_path):
+            score += 50
         sample_terms = unique_lines(
             [
                 *sorted(matched_tokens),
@@ -1741,6 +1878,7 @@ def code_intelligence_hits_for_capability(
                     "score": score,
                     "sample": ", ".join(sample_terms),
                     "retrieval_source": "code-intelligence",
+                    "low_signal_allowed": bool(low_signal and allow_low_signal),
                 },
             )
         )
@@ -1748,7 +1886,27 @@ def code_intelligence_hits_for_capability(
     return prune_code_hits([hit for _, hit in ranked], limit)
 
 
+def _keyword_tokens_allow_low_signal(keyword_tokens: set[str]) -> bool:
+    return bool(keyword_tokens.intersection(LOW_SIGNAL_ALLOWED_KEYWORDS))
+
+
+def _is_application_path(relative_path: str) -> bool:
+    normalized = "/" + relative_path.strip("/").lower()
+    if any(term in normalized for term in APPLICATION_PATH_TERMS):
+        return True
+    suffix = Path(relative_path).suffix.lower()
+    if suffix in {".py", ".rb", ".go", ".ts", ".tsx", ".js", ".jsx", ".swift", ".m", ".mm"}:
+        return not any(term in normalized for term in LOW_SIGNAL_CODE_TERMS)
+    return False
+
+
+def _is_application_code_hit(hit: dict[str, Any]) -> bool:
+    return _is_application_path(str(hit.get("relative_path", "")))
+
+
 def is_low_signal_code_hit(hit: dict[str, Any]) -> bool:
+    if hit.get("low_signal_allowed"):
+        return False
     haystack = " ".join(
         [
             str(hit.get("repo", "")),
@@ -4826,6 +4984,22 @@ def build_business_value_report(product_ontology: dict[str, Any], capability_row
 
 
 def build_product_ontology_note(product_ontology: dict[str, Any], business_report: dict[str, Any]) -> str:
+    def evidence_refs(value: Any) -> str:
+        items = value if isinstance(value, list) else []
+        refs: list[str] = []
+        for item in items[:6]:
+            if isinstance(item, dict):
+                ref = _structured_text(
+                    item.get("path") or item.get("citation_uri") or item.get("source_uri") or item.get("title"),
+                    preferred_keys=("path", "citation_uri", "source_uri", "title", "text"),
+                    limit=160,
+                )
+            else:
+                ref = _structured_text(item, preferred_keys=("path", "citation_uri", "source_uri", "title", "text"), limit=160)
+            if ref:
+                refs.append(f"`{ref}`")
+        return ", ".join(unique_lines(refs, 6))
+
     lines = [
         frontmatter({"type": "hub", "area": PRODUCT_CONTEXT["slug"], "source": "generated", "tags": ["product", "ontology", "business-value"]}),
         "# Product Ontology",
@@ -4848,8 +5022,32 @@ def build_product_ontology_note(product_ontology: dict[str, Any], business_repor
     for job in product_ontology.get("jobs_to_be_done", [])[:12]:
         if isinstance(job, dict):
             job_title = _structured_text(job.get("job") or "Job", preferred_keys=("job", "title", "text"), limit=160)
-            outcome = _structured_text(job.get("outcome"), preferred_keys=("outcome", "business_value", "summary", "text"), limit=260)
-            lines.append(f"- **{job_title or 'Job'}**: {outcome}")
+            problem = _structured_text(
+                job.get("user_problem") or job.get("problem"),
+                preferred_keys=("user_problem", "problem", "need", "summary", "text"),
+                limit=260,
+            )
+            outcome = _structured_text(
+                job.get("desired_outcome") or job.get("outcome"),
+                preferred_keys=("desired_outcome", "outcome", "business_value", "summary", "text"),
+                limit=260,
+            )
+            confidence = _structured_text(
+                job.get("confidence") or job.get("evidence_confidence"),
+                preferred_keys=("confidence", "evidence_confidence", "level", "summary", "text", "rationale"),
+                limit=120,
+            )
+            evidence = evidence_refs(job.get("evidence") or job.get("citations") or job.get("source_evidence"))
+            details = []
+            if problem:
+                details.append(f"Problem: {problem}")
+            if outcome:
+                details.append(f"Outcome: {outcome}")
+            if confidence:
+                details.append(f"Confidence: `{confidence}`")
+            if evidence:
+                details.append(f"Evidence: {evidence}")
+            lines.append(f"- **{job_title or 'Job'}**: {' '.join(details) if details else 'No synthesized body.'}")
     lines.extend(["", "## Business value drivers", ""])
     for driver in product_ontology.get("business_value_drivers", [])[:12]:
         if isinstance(driver, dict):

@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import evidence_cards
 import incremental_cache
 import openai_responses
+import openai_requests
 import rate_limits
 
 
@@ -292,7 +293,7 @@ class OpenAIHierarchicalReducerClient:
 
         def send_request() -> dict[str, Any]:
             try:
-                with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                with openai_requests.urlopen(request, timeout=timeout_seconds, opener=urllib.request.urlopen) as response:
                     raw_response = json.loads(response.read().decode("utf-8"))
                     if self.rate_limiter is not None:
                         self.rate_limiter.observe_openai_response_headers(

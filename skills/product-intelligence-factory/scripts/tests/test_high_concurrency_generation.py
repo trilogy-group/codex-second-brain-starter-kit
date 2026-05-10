@@ -21,6 +21,7 @@ CODE_INTELLIGENCE_SCRIPT = TOOLS_DIR / "code_intelligence.py"
 RATE_LIMITS_SCRIPT = TOOLS_DIR / "rate_limits.py"
 SOURCE_INDEX_CACHE_SCRIPT = TOOLS_DIR / "source_index_cache.py"
 GENERATION_PROGRESS_SCRIPT = TOOLS_DIR / "generation_progress.py"
+OPENAI_REQUESTS_SCRIPT = TOOLS_DIR / "openai_requests.py"
 PROMOTE_OUTPUT_CANDIDATE_SCRIPT = TOOLS_DIR / "promote_output_candidate.py"
 BENCHMARK_REBUILD_SCRIPT = TOOLS_DIR / "benchmark_rebuild.py"
 BUILD_SOURCE_INDICES_SCRIPT = TOOLS_DIR / "build_source_indices.py"
@@ -347,6 +348,68 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(calls, len(first["shards"]))
         self.assertGreaterEqual(second["cache_hits"], 1)
         self.assertTrue(all(item.get("cache_hit") for item in second["shards"]))
+
+    def test_generation_shards_cache_ignores_volatile_card_metadata(self) -> None:
+        performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_shard_volatile_cache_test")
+        shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_volatile_cache_test")
+        calls = 0
+
+        def worker(spec: dict, scratch_dir: Path) -> dict:
+            nonlocal calls
+            calls += 1
+            return shards.default_shard_worker(spec, scratch_dir)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir) / "workspace"
+            cache_path = Path(tmp_dir) / "generation_shard_cache.json"
+            config = performance.default_generation_config({})
+            first_record = {
+                "stem": "Support Alpha",
+                "capabilities": ["core"],
+                "quality": {
+                    "score": 9,
+                    "generated_at": "2026-05-10T10:00:00Z",
+                    "run_id": "job-a",
+                    "scratch_dir": "/tmp/job-a/shard-01",
+                    "source_shard_note": "[[Generation Shard - shard-01]]",
+                },
+            }
+            second_record = {
+                **first_record,
+                "quality": {
+                    **first_record["quality"],
+                    "generated_at": "2026-05-10T11:00:00Z",
+                    "run_id": "job-b",
+                    "scratch_dir": "/tmp/job-b/shard-01",
+                    "source_shard_note": "[[Generation Shard - shard-99]]",
+                },
+            }
+            first = shards.run_generation_shards(
+                generation_config=config,
+                workspace_path=workspace,
+                repo_names=["repo"],
+                support_records=[first_record],
+                wiki_records=[],
+                semantic_cards=[],
+                run_id="first",
+                worker=worker,
+                cache_path=cache_path,
+            )
+            second = shards.run_generation_shards(
+                generation_config=config,
+                workspace_path=workspace,
+                repo_names=["repo"],
+                support_records=[second_record],
+                wiki_records=[],
+                semantic_cards=[],
+                run_id="second",
+                worker=worker,
+                cache_path=cache_path,
+            )
+
+        self.assertEqual(calls, len(first["shards"]))
+        self.assertEqual(second["cache_misses"], 0)
+        self.assertGreaterEqual(second["cache_hits"], 1)
 
     def test_generation_shards_skip_repo_name_placeholder_specs(self) -> None:
         performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_no_repo_placeholder_test")
@@ -896,6 +959,49 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(result["business_value"], "Retryable synthesis succeeded.")
         self.assertEqual(attempts, [240.0, 240.0])
 
+    def test_openai_request_helper_uses_certifi_when_default_ca_is_missing(self) -> None:
+        helper = load_module(OPENAI_REQUESTS_SCRIPT, "openai_requests_certifi_test")
+        contexts: list[object] = []
+
+        class FakeDefaultPaths:
+            cafile = "/missing/default.pem"
+            openssl_cafile = "/missing/openssl.pem"
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_context(*, cafile=None):
+            contexts.append(cafile)
+            return {"cafile": cafile}
+
+        def fake_opener(request, timeout, context=None):
+            del request, timeout
+            contexts.append(context)
+            return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            certifi_path = Path(tmp_dir) / "cacert.pem"
+            certifi_path.write_text("test certificate bundle", encoding="utf-8")
+            request = helper.urllib.request.Request("https://api.openai.test/v1/responses")
+            with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+                helper.ssl,
+                "get_default_verify_paths",
+                return_value=FakeDefaultPaths(),
+            ), mock.patch.object(
+                helper.ssl,
+                "create_default_context",
+                side_effect=fake_context,
+            ), mock.patch.object(helper.certifi, "where", return_value=str(certifi_path)):
+                with helper.urlopen(request, timeout=10, opener=fake_opener):
+                    pass
+
+        self.assertEqual(contexts[0], str(certifi_path))
+        self.assertEqual(contexts[1], {"cafile": str(certifi_path)})
+
     def test_business_value_synthesis_batches_misses_and_reuses_cache(self) -> None:
         rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_batch_cache_test")
         cache = rebuild.incremental_cache.empty_incremental_cache()
@@ -979,6 +1085,41 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             rebuild.business_value_cache_key("packet", "workspace-intelligence", first_payload, config),
             rebuild.business_value_cache_key("packet", "workspace-intelligence", second_payload, config),
         )
+
+    def test_business_value_inventory_reports_cache_miss_reasons_and_warm_ratio(self) -> None:
+        rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_cache_miss_reason_test")
+        cache = rebuild.incremental_cache.empty_incremental_cache()
+
+        class FakeClient:
+            def synthesize_batch(self, task, items, model, reasoning_effort):
+                del task, model, reasoning_effort
+                return {
+                    "items": [
+                        {
+                            "id": item["id"],
+                            "target_persona": "Product teams",
+                            "user_problem": f"Problem for {item['payload']['title']}",
+                            "business_value": f"Value for {item['payload']['title']}",
+                            "success_metric": "Metric",
+                            "value_score": 8,
+                            "evidence_confidence": "medium",
+                            "implementation_leverage": "Use linked evidence.",
+                        }
+                        for item in items
+                    ]
+                }
+
+        config = {**rebuild.default_business_value_config({}), "cache_enabled": True, "batch_size": 4}
+        first = {"capability": [{"id": "capability-a", "payload": {"title": "Alpha"}}]}
+        changed = {"capability": [{"id": "capability-a", "payload": {"title": "Alpha changed"}}]}
+
+        rebuild.synthesize_business_value_entities(first, cache=cache, config=config, client=FakeClient())
+        second = rebuild.synthesize_business_value_entities(changed, cache=cache, config=config, client=FakeClient())
+
+        self.assertEqual(second.inventory["cache_misses"], 1)
+        self.assertEqual(second.inventory["warm_cache_hit_ratio"], 0.0)
+        self.assertIn("capability", second.inventory["cache_miss_reasons"])
+        self.assertIn("payload_changed", second.inventory["cache_miss_reasons"]["capability"])
 
     def test_business_value_synthesis_repairs_malformed_batch_by_splitting_items(self) -> None:
         rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_batch_repair_test")
@@ -1126,6 +1267,25 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(snapshot["missing_percent"], 75)
         self.assertEqual(len(events), 2)
 
+    def test_generation_progress_terminal_snapshot_is_not_active_and_running_is_never_100(self) -> None:
+        progress_module = load_module(GENERATION_PROGRESS_SCRIPT, "generation_progress_terminal_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            inventories = Path(tmp_dir)
+            first = progress_module.ProgressRecorder(inventories, reset=True)
+            first.start_run("rebuild", planned_stages=[("rebuild", "Vault rebuild", 1)])
+            first.record("rebuild", "completed", completed_units=1, total_units=1)
+
+            continued = progress_module.ProgressRecorder(inventories)
+            self.assertFalse(continued.has_active_run())
+            continued.start_run("generation_shards", planned_stages=[("generation_shards", "Shard synthesis", 1)])
+            continued.record("generation_shards", "running", completed_units=1, total_units=1)
+            snapshot = json.loads((inventories / "generation_progress.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(snapshot["current_status"], "running")
+        self.assertLess(snapshot["progress_percent"], 100)
+        self.assertGreater(snapshot["missing_percent"], 0)
+        self.assertGreater(snapshot["remaining_units"], 0)
+
     def test_source_fetch_progress_callback_tracks_completed_links(self) -> None:
         source_indices = load_module(BUILD_SOURCE_INDICES_SCRIPT, "build_source_indices_progress_test")
         cache_module = load_module(SOURCE_INDEX_CACHE_SCRIPT, "source_index_cache_progress_test")
@@ -1231,6 +1391,44 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertIn("basb_stage: distill", body)
         self.assertIn("llm_reasoning_effort: \"high\"", body)
         self.assertIn("## Distilled Takeaways", body)
+
+    def test_reducer_prunes_only_stale_generated_shard_notes(self) -> None:
+        shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_prune_generated_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            vault = root / "vault"
+            shard_dir = vault / "80 Assets" / "Generation Shards"
+            shard_dir.mkdir(parents=True)
+            stale_generated = shard_dir / "Generation Shard - stale.md"
+            stale_generated.write_text("---\ntype: shard-record\nsource: generated\n---\n# Stale\n", encoding="utf-8")
+            user_authored = shard_dir / "Generation Shard - user.md"
+            user_authored.write_text("---\ntype: shard-record\nsource: manual\n---\n# User\n", encoding="utf-8")
+            scratch = root / "scratch" / "shard-01" / "draft_notes"
+            scratch.mkdir(parents=True)
+            draft = scratch / "Generation Shard - shard-01 - Support.md"
+            draft.write_text(
+                "---\ntype: shard-record\nsource: generated\n---\n# Support\n\n- [[Intelligence Home]]\n",
+                encoding="utf-8",
+            )
+            inventory = {
+                "shards": [
+                    {
+                        "id": "shard-01",
+                        "kind": "support-evidence",
+                        "status": "succeeded",
+                        "scratch_dir": str(scratch.parent),
+                        "draft_notes": [draft.name],
+                    }
+                ],
+                "reducer": {"status": "pending"},
+            }
+
+            result = shards.reduce_generation_shards(inventory, vault_path=vault, known_note_titles={"Intelligence Home"})
+            self.assertFalse(stale_generated.exists())
+            self.assertTrue(user_authored.exists())
+            self.assertTrue((shard_dir / draft.name).exists())
+
+        self.assertEqual(result["reducer"]["pruned_generated_note_count"], 1)
 
     def test_shard_insights_are_collected_for_reducer_inputs(self) -> None:
         shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_insight_collect_test")

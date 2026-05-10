@@ -123,6 +123,37 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertEqual(ranked[0]["retrieval_source"], "sqlite-fts")
         self.assertEqual(fallback, fallback_hits)
 
+    def test_capability_code_ranking_prefers_application_files_over_tests_and_config(self) -> None:
+        rebuild = load_module(REBUILD_SCRIPT, "rebuild_product_brain_code_anchor_quality_test")
+        hits = [
+            {
+                "repo": "repo",
+                "relative_path": "tests/test_billing.py",
+                "absolute_path": "/repo/tests/test_billing.py",
+                "sample": "billing invoice payment",
+                "score": 100,
+            },
+            {
+                "repo": "repo",
+                "relative_path": ".github/workflows/deploy.yml",
+                "absolute_path": "/repo/.github/workflows/deploy.yml",
+                "sample": "billing deploy",
+                "score": 90,
+            },
+            {
+                "repo": "repo",
+                "relative_path": "services/billing/invoice_service.py",
+                "absolute_path": "/repo/services/billing/invoice_service.py",
+                "sample": "billing invoice payment workflow",
+                "score": 10,
+            },
+        ]
+
+        ranked = rebuild.rank_code_hits_for_keywords(hits, ["billing invoice payment"], limit=3)
+
+        self.assertEqual(ranked[0]["relative_path"], "services/billing/invoice_service.py")
+        self.assertEqual(ranked[-1]["relative_path"], ".github/workflows/deploy.yml")
+
     def test_source_extract_workers_default_to_parallel_workers_and_support_env_override(self) -> None:
         module = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_source_extract_test")
         original = os.environ.get("PRODUCT_BASB_SOURCE_EXTRACT_WORKERS")

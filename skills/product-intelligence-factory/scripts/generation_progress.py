@@ -9,6 +9,8 @@ from typing import Any
 
 PROGRESS_SCHEMA_VERSION = 2
 UNIT_LABEL = "current refresh work units"
+ACTIVE_STATUSES = {"queued", "started", "running"}
+TERMINAL_STATUSES = {"completed", "failed", "cancelled", "canceled"}
 
 DEFAULT_STAGE_PLAN: tuple[tuple[str, str, int], ...] = (
     ("source_index", "Source indexing", 5),
@@ -126,7 +128,9 @@ class ProgressRecorder:
         return self.record(stage, status, **details)
 
     def has_active_run(self) -> bool:
-        return bool(self.stages)
+        if not self.stages:
+            return False
+        return any(str(stage.get("status") or "queued") not in TERMINAL_STATUSES for stage in self.stages.values())
 
     def record(self, stage: str, status: str, **details: Any) -> dict[str, Any]:
         self.inventory_dir.mkdir(parents=True, exist_ok=True)
@@ -136,6 +140,8 @@ class ProgressRecorder:
         if completed_units is None and status == "completed":
             completed_units = total_units
         completed = max(0, min(_positive_int(completed_units, stage_record.get("completed_units", 0)), total_units))
+        if status in ACTIVE_STATUSES and completed >= total_units:
+            completed = max(0, total_units - 1)
         stage_record.update(
             {
                 "status": status,
@@ -170,6 +176,9 @@ class ProgressRecorder:
         remaining_units = max(0, total_units - completed_units)
         progress_percent = int(round((completed_units / total_units) * 100)) if total_units else 0
         progress_percent = max(0, min(progress_percent, 100))
+        if str(event.get("status") or "") in ACTIVE_STATUSES and progress_percent >= 100:
+            progress_percent = 99
+            remaining_units = max(1, remaining_units)
         current_stage = str(event["stage"])
         current_stage_record = self.stages.get(current_stage, _new_stage(current_stage))
         return {

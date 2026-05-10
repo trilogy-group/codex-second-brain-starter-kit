@@ -23,12 +23,31 @@ if str(SCRIPT_DIR) not in sys.path:
 
 import rate_limits
 import openai_responses
+import openai_requests
 
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
 VALID_SHARD_STATUSES = {"queued", "running", "succeeded", "failed", "rejected", "merged"}
 SHARD_PROMPT_VERSION = "product-basb-shard-agent-v1"
 SHARD_CACHE_SCHEMA_VERSION = 1
+VOLATILE_SHARD_KEYS = {
+    "cache_hit",
+    "date",
+    "draft_notes",
+    "generated_at",
+    "generated_output_candidates",
+    "merged_notes",
+    "output_candidate_links",
+    "run_id",
+    "scratch_dir",
+    "scratch_root",
+    "seconds",
+    "source_shard",
+    "source_shard_note",
+    "timing_seconds",
+    "updated_at",
+}
+VOLATILE_SHARD_PREFIXES = ("cache_", "elapsed_", "timing_")
 
 
 def _response_headers(response: Any) -> dict[str, str]:
@@ -75,6 +94,20 @@ def _write_shard_cache(path: Path | None, cache: dict[str, Any]) -> None:
     path.write_text(json.dumps(cache, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
 
 
+def _stable_shard_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return sorted((_stable_shard_value(item) for item in value), key=lambda item: json.dumps(item, sort_keys=True, default=str))
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if key_text in VOLATILE_SHARD_KEYS or any(key_text.startswith(prefix) for prefix in VOLATILE_SHARD_PREFIXES):
+                continue
+            cleaned[key_text] = _stable_shard_value(item)
+        return cleaned
+    return value
+
+
 def _shard_cache_key(spec: dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -84,8 +117,8 @@ def _shard_cache_key(spec: dict[str, Any]) -> str:
                 "worker_mode": spec.get("worker_mode"),
                 "model": spec.get("model"),
                 "reasoning_effort": spec.get("reasoning_effort"),
-                "cards": spec.get("cards", []),
-                "card_ids": spec.get("card_ids", []),
+                "cards": _stable_shard_value(spec.get("cards", [])),
+                "card_ids": sorted(str(card_id) for card_id in spec.get("card_ids", [])),
             },
             sort_keys=True,
             default=str,
@@ -128,7 +161,7 @@ def _compact_card(kind: str, item: dict[str, Any], index: int) -> dict[str, Any]
         "capabilities": _string_list(item.get("capabilities"), 10),
         "code_reference_links": _string_list(item.get("code_reference_links"), 12),
         "evidence_terms": _string_list(signals.get("terms") or item.get("evidence_terms"), 18),
-        "quality": item.get("quality") if isinstance(item.get("quality"), dict) else {},
+        "quality": _stable_shard_value(item.get("quality")) if isinstance(item.get("quality"), dict) else {},
     }
 
 
@@ -298,7 +331,7 @@ class OpenAIShardClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=600) as response:
+            with openai_requests.urlopen(request, timeout=600, opener=urllib.request.urlopen) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 headers = _response_headers(response)
         except HTTPError as exc:
@@ -630,6 +663,67 @@ def _run_one_shard(
         return failure
 
 
+def _read_json_file(path: Path, default: Any) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _cached_shard_artifacts(result: dict[str, Any]) -> dict[str, Any]:
+    scratch_dir = Path(str(result.get("scratch_dir", "")))
+    draft_dir = scratch_dir / "draft_notes"
+    draft_notes: dict[str, str] = {}
+    for note_name in _string_list(result.get("draft_notes"), 50):
+        note_path = draft_dir / note_name
+        if note_path.exists():
+            draft_notes[note_name] = note_path.read_text(encoding="utf-8", errors="ignore")
+    return {
+        "draft_notes": draft_notes,
+        "evidence_cards": _read_json_file(scratch_dir / "evidence_cards.json", []),
+        "shard_insights": _read_json_file(scratch_dir / "shard_insights.json", []),
+        "unresolved_links": _read_json_file(scratch_dir / "unresolved_links.json", []),
+    }
+
+
+def _materialize_cached_shard(
+    *,
+    entry: dict[str, Any],
+    spec: dict[str, Any],
+    scratch_root: Path,
+) -> dict[str, Any] | None:
+    result = entry.get("result") if isinstance(entry.get("result"), dict) else None
+    if result is None:
+        return None
+    scratch_dir = scratch_root / str(spec["id"])
+    draft_dir = scratch_dir / "draft_notes"
+    artifacts = entry.get("artifacts") if isinstance(entry.get("artifacts"), dict) else None
+    if artifacts is not None:
+        draft_dir.mkdir(parents=True, exist_ok=True)
+        draft_notes = artifacts.get("draft_notes") if isinstance(artifacts.get("draft_notes"), dict) else {}
+        for note_name, body in sorted(draft_notes.items()):
+            (draft_dir / str(note_name)).write_text(str(body).rstrip() + "\n", encoding="utf-8")
+        for file_name, value in (
+            ("evidence_cards.json", artifacts.get("evidence_cards") if isinstance(artifacts.get("evidence_cards"), list) else []),
+            ("shard_insights.json", artifacts.get("shard_insights") if isinstance(artifacts.get("shard_insights"), list) else []),
+            ("unresolved_links.json", artifacts.get("unresolved_links") if isinstance(artifacts.get("unresolved_links"), list) else []),
+        ):
+            (scratch_dir / file_name).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        cached_result = {
+            **result,
+            "scratch_dir": str(scratch_dir),
+            "cache_hit": True,
+            "status": "succeeded" if result.get("status") in {"succeeded", "merged"} else result.get("status", "succeeded"),
+        }
+        (scratch_dir / "shard_result.json").write_text(json.dumps(cached_result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return cached_result
+
+    legacy_scratch = Path(str(result.get("scratch_dir", "")))
+    if legacy_scratch.exists():
+        return {**result, "cache_hit": True}
+    return None
+
+
 def run_generation_shards(
     *,
     generation_config: dict[str, Any],
@@ -705,11 +799,10 @@ def run_generation_shards(
     for spec in specs[:max_shards]:
         cache_key = _shard_cache_key(spec)
         entry = shard_cache.get("entries", {}).get(cache_key)
-        cached_result = entry.get("result") if isinstance(entry, dict) else None
-        scratch_dir = Path(str(cached_result.get("scratch_dir", ""))) if isinstance(cached_result, dict) else Path()
-        if not force and isinstance(cached_result, dict) and scratch_dir.exists():
+        cached_result = _materialize_cached_shard(entry=entry, spec=spec, scratch_root=scratch_root) if not force and isinstance(entry, dict) else None
+        if cached_result is not None:
             cache_hits += 1
-            results.append({**cached_result, "cache_hit": True})
+            results.append(cached_result)
             continue
         cache_misses += 1
         specs_to_run.append({**spec, "cache_key": cache_key})
@@ -725,7 +818,8 @@ def run_generation_shards(
                 if result.get("status") == "succeeded" and int(result.get("shard_insight_count", 0) or 0) >= 0:
                     shard_cache.setdefault("entries", {})[cache_key] = {
                         "prompt_version": SHARD_PROMPT_VERSION,
-                        "result": result,
+                        "result": {key: value for key, value in result.items() if key not in {"cache_key", "cache_hit"}},
+                        "artifacts": _cached_shard_artifacts(result),
                     }
         except FuturesTimeoutError as exc:
             raise RuntimeError(
@@ -871,6 +965,18 @@ def reduce_generation_shards(
         draft_paths_by_shard[shard["id"]] = draft_paths
         all_draft_names.extend(path.name for path in draft_paths)
 
+    target_dir = vault_path / "80 Assets" / "Generation Shards"
+    planned_names = set(all_draft_names)
+    pruned_generated_note_count = 0
+    if target_dir.exists():
+        for path in sorted(target_dir.glob("*.md")):
+            if path.name in planned_names:
+                continue
+            if _is_generated_note(path):
+                path.unlink()
+                known.discard(path.stem)
+                pruned_generated_note_count += 1
+
     duplicates = {name for name, count in Counter(all_draft_names).items() if count > 1}
     merged_count = 0
     rejected_count = 0
@@ -915,15 +1021,22 @@ def reduce_generation_shards(
 
     status_counts = Counter(item["status"] for item in reduced_shards)
     shard_insights = collect_shard_insights({**inventory, "shards": reduced_shards})
+    current_shard_note_paths = sorted(
+        str(path.relative_to(vault_path))
+        for path in (vault_path / "80 Assets" / "Generation Shards").glob("*.md")
+        if _is_generated_note(path)
+    ) if (vault_path / "80 Assets" / "Generation Shards").exists() else []
     return {
         **inventory,
         "shards": reduced_shards,
         "status_counts": dict(status_counts),
         "shard_insight_count": len(shard_insights),
         "shard_insights": shard_insights,
+        "current_shard_note_paths": current_shard_note_paths,
         "reducer": {
             "status": "completed",
             "merged_count": merged_count,
             "rejected_count": rejected_count,
+            "pruned_generated_note_count": pruned_generated_note_count,
         },
     }
