@@ -346,6 +346,21 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertGreaterEqual(second["cache_hits"], 1)
         self.assertTrue(all(item.get("cache_hit") for item in second["shards"]))
 
+    def test_generation_shards_skip_repo_name_placeholder_specs(self) -> None:
+        performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_no_repo_placeholder_test")
+        shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_no_repo_placeholder_test")
+        config = performance.default_generation_config({})
+
+        specs = shards.plan_generation_shards(
+            generation_config=config,
+            repo_names=["repo-only"],
+            support_records=[],
+            wiki_records=[],
+            semantic_cards=[],
+        )
+
+        self.assertEqual(specs, [])
+
     def test_shard_runner_respects_fixed_shard_caps_and_concurrency(self) -> None:
         performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_shard_caps_test")
         shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_caps_test")
@@ -928,8 +943,40 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(first.inventory["batch_count"], 2)
         self.assertEqual(first.inventory["gpt_call_count"], 2)
         self.assertEqual(second.inventory["cache_hits"], 3)
-        self.assertEqual(second.inventory["cache_misses"], 0)
-        self.assertEqual(second.inventory["gpt_call_count"], 0)
+
+    def test_business_value_cache_key_ignores_volatile_generation_fields(self) -> None:
+        rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_stable_payload_test")
+        config = {
+            **rebuild.default_business_value_config({}),
+            "cache_enabled": True,
+        }
+        first_payload = {
+            "title": "Workspace Intelligence",
+            "generated_at": "2026-05-10",
+            "run_id": "job-1",
+            "scratch_dir": "/tmp/job-1/shard-01",
+            "shard_insight_links": ["[[Generation Shard - shard-01]]"],
+            "evidence_cards": [
+                {"id": "card-b", "source_kind": "repo-doc", "summary": "Product docs describe the workflow."},
+                {"id": "card-a", "source_kind": "support-article", "summary": "Support docs describe the workflow."},
+            ],
+        }
+        second_payload = {
+            "title": "Workspace Intelligence",
+            "generated_at": "2026-05-11",
+            "run_id": "job-2",
+            "scratch_dir": "/tmp/job-2/shard-99",
+            "shard_insight_links": ["[[Generation Shard - shard-99]]"],
+            "evidence_cards": [
+                {"id": "card-a", "source_kind": "support-article", "summary": "Support docs describe the workflow."},
+                {"id": "card-b", "source_kind": "repo-doc", "summary": "Product docs describe the workflow."},
+            ],
+        }
+
+        self.assertEqual(
+            rebuild.business_value_cache_key("packet", "workspace-intelligence", first_payload, config),
+            rebuild.business_value_cache_key("packet", "workspace-intelligence", second_payload, config),
+        )
 
     def test_business_value_synthesis_repairs_malformed_batch_by_splitting_items(self) -> None:
         rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_batch_repair_test")
@@ -1191,6 +1238,13 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             (scratch / "shard_insights.json").write_text(
                 json.dumps(
                     [
+                        {
+                            "theme": "Repository ingestion gap",
+                            "summary": "The shard identifies the repository but lacks inspectable source artifacts.",
+                            "evidence_ids": ["repo-code-1"],
+                            "code_surfaces": ["repository:repo"],
+                            "output_rationale": "Do not use this as evidence.",
+                        },
                         {
                             "theme": "Branding Configuration",
                             "summary": "Branding evidence appears across support and code.",

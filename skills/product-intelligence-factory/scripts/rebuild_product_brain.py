@@ -31,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import code_intelligence
+import evidence_cards
 import evidence_index
 import generation_performance
 import generation_progress
@@ -777,6 +778,7 @@ def normalized_business_value_fields(synthesis: dict[str, Any], *, require_user_
 
 
 def business_value_cache_key(task: str, entity_id: str, payload: dict[str, Any], config: dict[str, Any]) -> str:
+    stable_payload = evidence_cards.stable_business_payload(payload)
     key_payload = {
         "task": task,
         "entity_id": entity_id,
@@ -784,12 +786,13 @@ def business_value_cache_key(task: str, entity_id: str, payload: dict[str, Any],
         "output_contract_version": BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION,
         "model": config["llm_model"],
         "reasoning_effort": config["reasoning_effort"],
-        "payload_hash": incremental_cache.stable_hash(payload),
+        "payload_hash": incremental_cache.stable_hash(stable_payload),
     }
     return incremental_cache.stable_hash(key_payload)
 
 
 def _business_value_cache_input(task: str, entity_id: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    stable_payload = evidence_cards.stable_business_payload(payload)
     return {
         "task": task,
         "entity_id": entity_id,
@@ -797,15 +800,16 @@ def _business_value_cache_input(task: str, entity_id: str, payload: dict[str, An
         "output_contract_version": BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION,
         "model": config["llm_model"],
         "reasoning_effort": config["reasoning_effort"],
-        "payload": payload,
+        "payload": stable_payload,
     }
 
 
 def _business_value_cache_dependencies(task: str, entity_id: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    stable_payload = evidence_cards.stable_business_payload(payload)
     return {
         "task": task,
         "entity_id": entity_id,
-        "payload_hash": incremental_cache.stable_hash(payload),
+        "payload_hash": incremental_cache.stable_hash(stable_payload),
         "prompt_version": BUSINESS_VALUE_BATCH_PROMPT_VERSION,
         "output_contract_version": BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION,
         "model": config["llm_model"],
@@ -834,13 +838,20 @@ def new_business_value_synthesis_inventory(config: dict[str, Any]) -> dict[str, 
         "gpt_call_count": 0,
         "repair_count": 0,
         "failures": 0,
+        "skipped_gpt_call_count": 0,
+        "warm_cache_eligible_count": 0,
+        "source_kind_counts": {},
+        "unstable_payload_fields": sorted(evidence_cards.VOLATILE_KEYS),
         "tasks": {},
     }
 
 
 def merge_business_value_synthesis_inventory(base: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
-    for key in ("cache_hits", "cache_misses", "batch_count", "gpt_call_count", "repair_count", "failures"):
+    for key in ("cache_hits", "cache_misses", "batch_count", "gpt_call_count", "repair_count", "failures", "skipped_gpt_call_count", "warm_cache_eligible_count"):
         base[key] = int(base.get(key, 0) or 0) + int(other.get(key, 0) or 0)
+    source_counts = Counter(base.get("source_kind_counts") or {})
+    source_counts.update(other.get("source_kind_counts") or {})
+    base["source_kind_counts"] = dict(sorted(source_counts.items()))
     base["elapsed_seconds"] = round(float(base.get("elapsed_seconds", 0) or 0) + float(other.get("elapsed_seconds", 0) or 0), 4)
     base_tasks = base.setdefault("tasks", {})
     for task, task_stats in (other.get("tasks") or {}).items():
@@ -976,6 +987,15 @@ def synthesize_business_value_entities(
         for item in items:
             entity_id = str(item["id"])
             payload = dict(item.get("payload") or {})
+            inventory["warm_cache_eligible_count"] += 1
+            inventory["source_kind_counts"] = dict(
+                sorted(
+                    (
+                        Counter(inventory.get("source_kind_counts") or {})
+                        + Counter(evidence_cards.source_kind_counts(evidence_cards.stable_cards(payload.get("evidence_cards") or [])))
+                    ).items()
+                )
+            )
             cache_key = business_value_cache_key(task, entity_id, payload, active_config)
             input_payload = _business_value_cache_input(task, entity_id, payload, active_config)
             dependencies = _business_value_cache_dependencies(task, entity_id, payload, active_config)
@@ -983,6 +1003,7 @@ def synthesize_business_value_entities(
             if cached is not None:
                 values[task][entity_id] = dict(cached.value)
                 inventory["cache_hits"] += 1
+                inventory["skipped_gpt_call_count"] += 1
                 task_stats["cache_hits"] += 1
                 completed_items += 1
                 if progress_callback is not None:
@@ -1034,6 +1055,8 @@ def synthesize_business_value_entities(
                         progress_callback(completed_items, max(1, total_items))
 
     inventory["elapsed_seconds"] = round(time.perf_counter() - started, 4)
+    total_cache_lookups = int(inventory.get("cache_hits", 0) or 0) + int(inventory.get("cache_misses", 0) or 0)
+    inventory["cache_hit_ratio"] = round((int(inventory.get("cache_hits", 0) or 0) / total_cache_lookups), 4) if total_cache_lookups else 0.0
     return BusinessValueSynthesisResult(values=values, inventory=inventory)
 
 
@@ -1209,6 +1232,68 @@ def source_record_to_evidence_row(kind: str, record: dict[str, Any]) -> evidence
             "stem": record.get("stem", ""),
             "note_link": note_link(record.get("stem", "")) if record.get("stem") else "",
             "quality": record.get("quality", {}),
+        },
+    )
+
+
+def repo_document_to_evidence_row(record: dict[str, Any]) -> evidence_index.EvidenceRow:
+    item = record.get("item", {})
+    source_ref = str(record.get("source_ref") or item.get("source_uri") or item.get("relative_path") or record.get("stem") or "")
+    title = str(item.get("title") or source_ref)
+    body = "\n".join([title, str(item.get("summary") or ""), str(record.get("text") or "")[:3000]])
+    return evidence_index.EvidenceRow(
+        evidence_id=f"repo-doc:{source_ref}",
+        kind="repo-doc",
+        title=title,
+        body=body,
+        source_ref=source_ref,
+        path=str(item.get("absolute_path") or item.get("relative_path") or source_ref),
+        capabilities=[str(value) for value in record.get("capabilities", [])],
+        code_refs=[],
+        fingerprint=evidence_fingerprint(
+            {
+                "kind": "repo-doc",
+                "source_ref": source_ref,
+                "sha256": item.get("sha256", ""),
+                "capabilities": record.get("capabilities", []),
+            }
+        ),
+        metadata={
+            "stem": record.get("stem", ""),
+            "note_link": note_link(record.get("stem", "")) if record.get("stem") else "",
+            "source_kind": "repo-doc",
+            "repo": item.get("repo", ""),
+        },
+    )
+
+
+def uploaded_document_to_evidence_row(record: dict[str, Any]) -> evidence_index.EvidenceRow:
+    item = record.get("item", {})
+    source_kind = str(item.get("source_kind") or "uploaded-doc")
+    source_ref = str(record.get("source_ref") or item.get("relative_path") or item.get("path") or record.get("stem") or "")
+    title = str(item.get("title") or source_ref)
+    body = "\n".join([title, str(item.get("summary") or ""), str(record.get("text") or "")[:3000]])
+    return evidence_index.EvidenceRow(
+        evidence_id=f"{source_kind}:{source_ref}",
+        kind=source_kind,
+        title=title,
+        body=body,
+        source_ref=source_ref,
+        path=str(item.get("path") or item.get("relative_path") or source_ref),
+        capabilities=[str(value) for value in record.get("capabilities", [])],
+        code_refs=[],
+        fingerprint=evidence_fingerprint(
+            {
+                "kind": source_kind,
+                "source_ref": source_ref,
+                "char_count": item.get("char_count", 0),
+                "capabilities": record.get("capabilities", []),
+            }
+        ),
+        metadata={
+            "stem": record.get("stem", ""),
+            "note_link": note_link(record.get("stem", "")) if record.get("stem") else "",
+            "source_kind": source_kind,
         },
     )
 
@@ -1955,6 +2040,12 @@ def source_link_summary(link_records: list[dict[str, Any]]) -> tuple[dict[str, i
     counts = Counter(record["status"] for record in link_records)
     domains = Counter(record["domain"] for record in link_records)
     return dict(counts), domains.most_common(8)
+
+
+def format_status_counts(status_counts: dict[str, int] | Counter[str]) -> str:
+    if not status_counts:
+        return "None observed"
+    return ", ".join(f"{status}: {count}" for status, count in sorted(dict(status_counts).items()))
 
 
 def capture_quality_score(
@@ -2738,7 +2829,7 @@ def build_support_note(
         f"- Raw source: `{raw_path}`",
         f"- Source URL: {item.get('source_url') or '(local-only)'}",
         f"- Relative corpus path: `{item['relative_path']}`",
-        f"- Linked page statuses: `{status_counts or {'none': 0}}`",
+        f"- Linked page statuses: `{format_status_counts(status_counts)}`",
         "",
         "## Summary",
         "",
@@ -2827,6 +2918,112 @@ def build_support_note(
     return "\n".join(lines)
 
 
+def build_repo_document_note(
+    item: dict[str, Any],
+    stem: str,
+    capabilities: list[str],
+    source_text: str,
+) -> str:
+    title = str(item.get("title") or Path(str(item.get("relative_path") or stem)).stem)
+    summary = str(item.get("summary") or source_text[:700]).strip()
+    related_caps = [note_link(stem_for_capability(CAPABILITY_BY_KEY[key]["title"])) for key in capabilities if key in CAPABILITY_BY_KEY]
+    lines = [
+        frontmatter(
+            {
+                "type": "concept",
+                "area": PRODUCT_CONTEXT["slug"],
+                "source": "repo-doc",
+                "source_kind": "repo-doc",
+                "source_path": item.get("source_uri") or item.get("relative_path") or "",
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="distilled",
+                    actionability="reference",
+                ),
+                "evidence_confidence": item.get("confidence") or "medium",
+                "tags": ["repo-doc", *capabilities],
+            }
+        ),
+        f"# {title}",
+        "",
+        f"- Repository: `{item.get('repo') or ''}`",
+        f"- Source path: `{item.get('relative_path') or ''}`",
+        f"- Source URI: `{item.get('source_uri') or ''}`",
+        "",
+        "## Essence",
+        "",
+        f"- {summary or 'This repository document was captured as product evidence.'}",
+        "",
+        "## Use in current project",
+        "",
+        "- Use this document as product or workflow evidence, even when no implementation code is available.",
+        "- Link it to capabilities, packets, and output candidates that need source-backed business context.",
+        "",
+        "## Extracted source text",
+        "",
+        evidence_cards.compact_text(source_text or summary, 2400),
+    ]
+    if related_caps:
+        lines.extend(["", "## Related capabilities", ""])
+        lines.extend(f"- {link}" for link in related_caps[:20])
+    lines.extend(["", "## Related notes", "", "- [[Product Ontology]]", "- [[Value Traceability Matrix]]", "- [[Workflow Map]]"])
+    return "\n".join(lines)
+
+
+def build_uploaded_document_note(
+    item: dict[str, Any],
+    stem: str,
+    capabilities: list[str],
+    source_text: str,
+) -> str:
+    source_kind = str(item.get("source_kind") or "uploaded-doc")
+    title = str(item.get("title") or Path(str(item.get("relative_path") or stem)).stem)
+    summary = str(item.get("summary") or source_text[:700]).strip()
+    related_caps = [note_link(stem_for_capability(CAPABILITY_BY_KEY[key]["title"])) for key in capabilities if key in CAPABILITY_BY_KEY]
+    lines = [
+        frontmatter(
+            {
+                "type": "concept",
+                "area": PRODUCT_CONTEXT["slug"],
+                "source": "uploaded-doc",
+                "source_kind": source_kind,
+                "source_path": item.get("relative_path") or item.get("path") or "",
+                **basb_frontmatter(
+                    stage="distill",
+                    para="resource",
+                    distillation="distilled",
+                    actionability="reference",
+                ),
+                "evidence_confidence": item.get("confidence") or "medium",
+                "tags": ["uploaded-doc", source_kind, *capabilities],
+            }
+        ),
+        f"# {title}",
+        "",
+        f"- Source kind: `{source_kind}`",
+        f"- Source path: `{item.get('relative_path') or item.get('path') or ''}`",
+        "",
+        "## Essence",
+        "",
+        f"- {summary or 'This uploaded document was captured as product evidence.'}",
+        "",
+        "## Use in current project",
+        "",
+        "- Use this document as business, process, policy, or workflow evidence when code anchors are not the primary source of truth.",
+        "- Link it to capabilities, packets, and output candidates that need source-backed product context.",
+        "",
+        "## Extracted source text",
+        "",
+        evidence_cards.compact_text(source_text or summary, 2400),
+    ]
+    if related_caps:
+        lines.extend(["", "## Related capabilities", ""])
+        lines.extend(f"- {link}" for link in related_caps[:20])
+    lines.extend(["", "## Related notes", "", "- [[Product Ontology]]", "- [[Value Traceability Matrix]]", "- [[Workflow Map]]"])
+    return "\n".join(lines)
+
+
 def build_wiki_note(
     relative_path: str,
     raw_path: Path,
@@ -2887,7 +3084,7 @@ def build_wiki_note(
         "",
         f"- Raw wiki path: `{raw_path}`",
         f"- Relative wiki path: `{relative_path}`",
-        f"- Linked page statuses: `{status_counts or {'none': 0}}`",
+        f"- Linked page statuses: `{format_status_counts(status_counts)}`",
         "",
         "## Summary",
         "",
@@ -3247,10 +3444,12 @@ def build_capability_note(
     code_hits: list[dict[str, Any]],
     code_reference_links: list[str],
     link_records: list[dict[str, Any]],
+    repo_doc_links: list[str] | None = None,
     business_value: dict[str, Any] | None = None,
 ) -> str:
     status_counts = Counter(record["status"] for record in link_records)
     domain_counts = Counter(record["domain"] for record in link_records)
+    repo_doc_links = repo_doc_links or []
     if business_value is None:
         raise SystemExit("Capability note rendering requires precomputed business-value synthesis.")
     business_value = normalized_business_value_fields(business_value)
@@ -3285,9 +3484,10 @@ def build_capability_note(
         "",
         f"- Support notes: `{len(support_links)}`",
         f"- Wiki notes: `{len(wiki_links)}`",
+        f"- Repo docs: `{len(repo_doc_links)}`",
         f"- Repo notes: `{len(repo_note_links)}`",
         f"- Code hits: `{len(code_hits)}`",
-        f"- Linked pages by status: `{dict(status_counts) if status_counts else {'none': 0}}`",
+        f"- Linked pages by status: `{format_status_counts(status_counts)}`",
     ]
     lines.extend(["", "## Essence", ""])
     lines.append(f"- {business_value['business_value']}")
@@ -3309,6 +3509,9 @@ def build_capability_note(
     if repo_note_links:
         lines.extend(["", "## Primary repositories", ""])
         lines.extend(f"- {link}" for link in repo_note_links)
+    if repo_doc_links:
+        lines.extend(["", "## Representative repository documents", ""])
+        lines.extend(f"- {link}" for link in repo_doc_links[:20])
     lines.extend(["", "## Representative code paths", ""])
     if code_reference_links:
         lines.extend(f"- {link}" for link in code_reference_links[:20])
@@ -3342,6 +3545,7 @@ def score_packet_evidence(
     *,
     support_links: list[str],
     wiki_links: list[str],
+    repo_doc_links: list[str] | None = None,
     code_reference_links: list[str],
     conflict_count: int = 0,
     stale_doc_count: int = 0,
@@ -3352,6 +3556,8 @@ def score_packet_evidence(
         score += min(3, len(support_links))
     if wiki_links:
         score += min(2, len(wiki_links))
+    if repo_doc_links:
+        score += min(3, len(repo_doc_links))
     if code_reference_links:
         score += 3
     if conflict_count:
@@ -3423,6 +3629,7 @@ def build_intermediate_packet_note(
     repo_note_links: list[str],
     code_reference_links: list[str],
     *,
+    repo_doc_links: list[str] | None = None,
     packet_kind: str = "capability",
     conflict_links: list[str] | None = None,
     stale_doc_count: int = 0,
@@ -3432,11 +3639,13 @@ def build_intermediate_packet_note(
     business_value: dict[str, Any] | None = None,
 ) -> str:
     conflict_links = conflict_links or []
+    repo_doc_links = repo_doc_links or []
     output_candidate_links = output_candidate_links or []
     shard_insight_links = shard_insight_links or []
     score = evidence_score if evidence_score is not None else score_packet_evidence(
         support_links=support_links,
         wiki_links=wiki_links,
+        repo_doc_links=repo_doc_links,
         code_reference_links=code_reference_links,
         conflict_count=len(conflict_links),
         stale_doc_count=stale_doc_count,
@@ -3477,7 +3686,7 @@ def build_intermediate_packet_note(
         "## Essence",
         "",
         f"- {capability['description']}",
-        f"- Evidence coverage: `{len(support_links)}` support notes, `{len(wiki_links)}` wiki notes, `{len(code_reference_links)}` code references.",
+        f"- Evidence coverage: `{len(support_links)}` support notes, `{len(wiki_links)}` wiki notes, `{len(repo_doc_links)}` repo docs, `{len(code_reference_links)}` code references.",
         f"- Evidence score: `{score}/10`.",
         f"- Business value: {business_value['business_value']}",
         "",
@@ -3485,6 +3694,7 @@ def build_intermediate_packet_note(
         "",
         f"- Support evidence: `{len(support_links)}` linked note(s).",
         f"- Wiki evidence: `{len(wiki_links)}` linked note(s).",
+        f"- Repo-doc evidence: `{len(repo_doc_links)}` linked note(s).",
         f"- Code evidence: `{len(code_reference_links)}` implementation anchor(s).",
         f"- Conflict or drift signals: `{len(conflict_links) + stale_doc_count}`.",
         f"- Shard synthesis signals: `{len(shard_insight_links)}`.",
@@ -3512,13 +3722,15 @@ def build_intermediate_packet_note(
         lines.extend(f"- {link}" for link in support_links[:20])
     if wiki_links:
         lines.extend(f"- {link}" for link in wiki_links[:20])
+    if repo_doc_links:
+        lines.extend(f"- {link}" for link in repo_doc_links[:20])
     if code_reference_links:
         lines.extend(f"- {link}" for link in code_reference_links[:20])
     if conflict_links:
         lines.extend(f"- {link}" for link in conflict_links[:20])
     if shard_insight_links:
         lines.extend(f"- {link}" for link in shard_insight_links[:10])
-    if not any((support_links, wiki_links, code_reference_links)):
+    if not any((support_links, wiki_links, repo_doc_links, code_reference_links)):
         lines.append("- No source evidence was generated for this capability yet.")
     lines.extend(["", "## Implementation anchors", ""])
     if repo_note_links:
@@ -3641,7 +3853,44 @@ def select_output_candidates(packet_records: list[dict[str, Any]], limit: int = 
     return ranked[:limit]
 
 
+def payload_evidence_cards(
+    *,
+    support_links: list[str] | None = None,
+    wiki_links: list[str] | None = None,
+    repo_doc_links: list[str] | None = None,
+    code_reference_links: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for source_kind, links in (
+        ("support-article", support_links or []),
+        ("wiki-page", wiki_links or []),
+        ("repo-doc", repo_doc_links or []),
+        ("repo-code", code_reference_links or []),
+    ):
+        for link in links[:30]:
+            title = str(link or "").strip("[]") or source_kind
+            cards.append(
+                evidence_cards.normalize_card(
+                    {
+                        "id": f"{source_kind}:{title}",
+                        "source_kind": source_kind,
+                        "title": title,
+                        "summary": title,
+                        "source_uri": str(link or ""),
+                        "confidence": "medium",
+                    }
+                )
+            )
+    return evidence_cards.stable_cards(cards)
+
+
 def output_candidate_business_payload(packet: dict[str, Any]) -> dict[str, Any]:
+    payload_cards = payload_evidence_cards(
+        support_links=packet.get("support_links", []),
+        wiki_links=packet.get("wiki_links", []),
+        repo_doc_links=packet.get("repo_doc_links", []),
+        code_reference_links=packet.get("code_reference_links", []),
+    )
     return {
         "title": packet.get("title", ""),
         "packet_kind": packet.get("packet_kind", ""),
@@ -3649,9 +3898,12 @@ def output_candidate_business_payload(packet: dict[str, Any]) -> dict[str, Any]:
         "source_packet": packet.get("link", ""),
         "support_links": packet.get("support_links", [])[:20],
         "wiki_links": packet.get("wiki_links", [])[:20],
+        "repo_doc_links": packet.get("repo_doc_links", [])[:20],
         "code_reference_links": packet.get("code_reference_links", [])[:20],
         "conflict_links": packet.get("conflict_links", [])[:20],
         "shard_insight_links": packet.get("shard_insight_links", [])[:12],
+        "evidence_cards": payload_cards,
+        "source_kind_counts": evidence_cards.source_kind_counts(payload_cards),
     }
 
 
@@ -3660,19 +3912,29 @@ def capability_business_payload(
     capability: dict[str, Any],
     support_links: list[str],
     wiki_links: list[str],
+    repo_doc_links: list[str] | None = None,
     repo_note_links: list[str],
     code_reference_links: list[str],
     linked_domains: dict[str, int],
 ) -> dict[str, Any]:
+    payload_cards = payload_evidence_cards(
+        support_links=support_links,
+        wiki_links=wiki_links,
+        repo_doc_links=repo_doc_links,
+        code_reference_links=code_reference_links,
+    )
     return {
         "title": capability["title"],
         "key": capability["key"],
         "description": capability.get("description", ""),
         "support_links": support_links[:20],
         "wiki_links": wiki_links[:20],
+        "repo_doc_links": (repo_doc_links or [])[:20],
         "repo_note_links": repo_note_links[:12],
         "code_reference_links": code_reference_links[:20],
         "linked_domains": linked_domains,
+        "evidence_cards": payload_cards,
+        "source_kind_counts": evidence_cards.source_kind_counts(payload_cards),
     }
 
 
@@ -3692,11 +3954,19 @@ def packet_business_payload_from_spec(spec: dict[str, Any], packet: dict[str, An
             "packet_kind": "semantic-cluster",
             "evidence_score": cluster.get("evidence_score", packet.get("evidence_score", 0)),
             "evidence_links": evidence_links[:30],
+            "source_kind_counts": evidence_cards.source_kind_counts([card for card in cards if isinstance(card, dict)]),
+            "evidence_cards": evidence_cards.stable_cards([card for card in cards if isinstance(card, dict)])[:30],
             "code_reference_links": code_reference_links[:20],
             "code_terms": code_terms[:20],
             "shard_insight_links": cluster.get("shard_insight_links", [])[:12],
         }
     capability = spec["capability"]
+    payload_cards = payload_evidence_cards(
+        support_links=spec["support_links"],
+        wiki_links=spec["wiki_links"],
+        repo_doc_links=spec.get("repo_doc_links", []),
+        code_reference_links=spec["code_reference_links"],
+    )
     return {
         "title": capability["title"],
         "description": capability.get("description", ""),
@@ -3704,9 +3974,12 @@ def packet_business_payload_from_spec(spec: dict[str, Any], packet: dict[str, An
         "evidence_score": spec["evidence_score"],
         "support_links": spec["support_links"][:20],
         "wiki_links": spec["wiki_links"][:20],
+        "repo_doc_links": spec.get("repo_doc_links", [])[:20],
         "code_reference_links": spec["code_reference_links"][:20],
         "conflict_links": spec["conflict_links"][:20],
         "shard_insight_links": spec.get("shard_insight_links", [])[:12],
+        "evidence_cards": payload_cards,
+        "source_kind_counts": evidence_cards.source_kind_counts(payload_cards),
     }
 
 
@@ -3718,6 +3991,7 @@ def build_output_candidate_note(packet: dict[str, Any], output_synthesis: dict[s
             packet["link"],
             *packet.get("support_links", []),
             *packet.get("wiki_links", []),
+            *packet.get("repo_doc_links", []),
             *packet.get("code_reference_links", []),
             *packet.get("conflict_links", []),
             *packet.get("shard_insight_links", []),
@@ -3834,6 +4108,7 @@ def build_packet_note_from_spec(spec: dict[str, Any], output_candidate_links: li
         wiki_links=spec["wiki_links"],
         repo_note_links=spec["repo_note_links"],
         code_reference_links=spec["code_reference_links"],
+        repo_doc_links=spec.get("repo_doc_links", []),
         packet_kind=spec["packet_kind"],
         conflict_links=spec["conflict_links"],
         stale_doc_count=spec["stale_doc_count"],
@@ -4231,6 +4506,8 @@ def semantic_terms_from_record(record: dict[str, Any]) -> list[str]:
 def build_semantic_evidence_cards(
     support_records: list[dict[str, Any]],
     wiki_records: list[dict[str, Any]],
+    repo_document_records: list[dict[str, Any]] | None,
+    uploaded_document_records: list[dict[str, Any]] | None,
     code_reference_registry: dict[tuple[str, str], dict[str, Any]],
     code_reference_stems: dict[tuple[str, str], str],
     code_intel_by_path: dict[tuple[str, str], dict[str, Any]],
@@ -4256,6 +4533,41 @@ def build_semantic_evidence_cards(
                     "source_links": [note_link(record["stem"])],
                 }
             )
+    for record in repo_document_records or []:
+        item = record.get("item", {})
+        cards.append(
+            {
+                "id": f"repo-doc:{record.get('source_ref')}",
+                "kind": "repo-doc",
+                "source_kind": "repo-doc",
+                "title": item.get("title") or record.get("source_ref"),
+                "summary": item.get("summary") or evidence_cards.compact_text(record.get("text", ""), 700),
+                "link": note_link(record["stem"]),
+                "capabilities": [CAPABILITY_BY_KEY[key]["title"] for key in record.get("capabilities", []) if key in CAPABILITY_BY_KEY],
+                "evidence_terms": item.get("terms") or evidence_cards.extracted_terms(" ".join([str(item.get("title") or ""), str(item.get("summary") or "")])),
+                "code_terms": [],
+                "code_reference_links": [],
+                "source_links": [note_link(record["stem"])],
+            }
+        )
+    for record in uploaded_document_records or []:
+        item = record.get("item", {})
+        source_kind = str(item.get("source_kind") or "uploaded-doc")
+        cards.append(
+            {
+                "id": f"{source_kind}:{record.get('source_ref')}",
+                "kind": source_kind,
+                "source_kind": source_kind,
+                "title": item.get("title") or record.get("source_ref"),
+                "summary": item.get("summary") or evidence_cards.compact_text(record.get("text", ""), 700),
+                "link": note_link(record["stem"]),
+                "capabilities": [CAPABILITY_BY_KEY[key]["title"] for key in record.get("capabilities", []) if key in CAPABILITY_BY_KEY],
+                "evidence_terms": item.get("terms") or evidence_cards.extracted_terms(" ".join([str(item.get("title") or ""), str(item.get("summary") or "")])),
+                "code_terms": [],
+                "code_reference_links": [],
+                "source_links": [note_link(record["stem"])],
+            }
+        )
     for key, entry in code_reference_registry.items():
         hit = entry["hit"]
         code_file = code_intel_by_path.get(key)
@@ -4438,6 +4750,8 @@ def build_product_capability_map(capability_rows: list[dict[str, Any]]) -> str:
         lines.append(f"- Note: {row['link']}")
         lines.append(f"- Support notes: `{row['support_count']}`")
         lines.append(f"- Wiki notes: `{row['wiki_count']}`")
+        if row.get("repo_doc_count"):
+            lines.append(f"- Repo docs: `{row['repo_doc_count']}`")
         lines.append(f"- Repositories: {', '.join(f'`{repo}`' for repo in row['repos'])}")
         lines.append(f"- Code hits: `{row['code_count']}`")
         if row.get("target_persona"):
@@ -4475,6 +4789,7 @@ def build_business_value_report(product_ontology: dict[str, Any], capability_row
             "has_business_value": bool(row.get("business_value")),
             "has_user_problem": bool(row.get("user_problem")),
             "has_code_references": bool(row.get("code_reference_links")),
+            "has_source_evidence": any((row.get("support_count"), row.get("wiki_count"), row.get("repo_doc_count"), row.get("code_reference_links"))),
             "value_score": int(row.get("value_score") or 0),
         }
         for row in capability_rows
@@ -4503,7 +4818,7 @@ def build_business_value_report(product_ontology: dict[str, Any], capability_row
         "business_evidence_gaps": [
             item["title"]
             for item in capability_value_coverage
-            if not item["has_business_value"] or not item["has_user_problem"] or not item["has_code_references"]
+            if not item["has_business_value"] or not item["has_user_problem"] or not item["has_source_evidence"]
         ],
     }
 
@@ -4566,6 +4881,68 @@ def build_product_ontology_note(product_ontology: dict[str, Any], business_repor
             "- [[Intelligence Home]]",
         ]
     )
+    return "\n".join(lines)
+
+
+def build_workflow_map_note(product_ontology: dict[str, Any]) -> str:
+    lines = [
+        frontmatter({"type": "hub", "area": PRODUCT_CONTEXT["slug"], "source": "generated", "tags": ["product", "workflow-map", "business-value"]}),
+        "# Workflow Map",
+        "",
+        "This map turns synthesized product workflows into source-backed operating paths.",
+        "",
+    ]
+    workflows = [item for item in product_ontology.get("workflows", []) if isinstance(item, dict)]
+    if not workflows:
+        lines.append("- No source-backed workflows were synthesized yet.")
+    for workflow in workflows[:20]:
+        name = _structured_text(workflow.get("name") or "Workflow", preferred_keys=("name", "title", "text"), limit=160)
+        actor = _structured_text(workflow.get("actor"), preferred_keys=("actor", "persona", "name", "text"), limit=160)
+        trigger = _structured_text(workflow.get("start_trigger"), preferred_keys=("start_trigger", "trigger", "summary", "text"), limit=220)
+        outcome = _structured_text(workflow.get("outcome"), preferred_keys=("outcome", "business_value", "summary", "text"), limit=260)
+        lines.extend(["", f"## {name or 'Workflow'}", "", f"- Actor: {actor or 'Unspecified'}", f"- Trigger: {trigger or 'Unspecified'}", f"- Outcome: {outcome or 'Unspecified'}"])
+        steps = workflow.get("key_steps") if isinstance(workflow.get("key_steps"), list) else []
+        if steps:
+            lines.extend(["", "### Steps", ""])
+            lines.extend(f"- {evidence_cards.compact_text(step, 220)}" for step in steps[:12])
+        code_surfaces = workflow.get("code_surfaces") if isinstance(workflow.get("code_surfaces"), list) else []
+        if code_surfaces:
+            lines.extend(["", "### Implementation anchors", ""])
+            lines.extend(f"- `{surface}`" for surface in code_surfaces[:12])
+    lines.extend(["", "## Related notes", "", "- [[Product Ontology]]", "- [[Value Traceability Matrix]]", "- [[Product Capability Map]]"])
+    return "\n".join(lines)
+
+
+def build_value_traceability_matrix_note(product_ontology: dict[str, Any], capability_rows: list[dict[str, Any]], output_records: list[dict[str, Any]]) -> str:
+    lines = [
+        frontmatter({"type": "hub", "area": PRODUCT_CONTEXT["slug"], "source": "generated", "tags": ["product", "traceability", "business-value"]}),
+        "# Value Traceability Matrix",
+        "",
+        "| Persona | Job / Problem | Capability | Evidence | Output candidates |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    personas = [item for item in product_ontology.get("target_personas", []) if isinstance(item, dict)]
+    jobs = [item for item in product_ontology.get("jobs_to_be_done", []) if isinstance(item, dict)]
+    outputs_by_title = defaultdict(list)
+    for output in output_records:
+        outputs_by_title[str(output.get("title") or "")].append(output.get("link") or output.get("title") or "")
+    for index, row in enumerate(capability_rows[:24]):
+        persona = personas[index % len(personas)] if personas else {}
+        job = jobs[index % len(jobs)] if jobs else {}
+        persona_name = _structured_text(persona.get("name") or row.get("target_persona") or "Product teams", preferred_keys=("name", "title", "text"), limit=80)
+        problem = _structured_text(job.get("job") or row.get("user_problem") or row.get("business_value"), preferred_keys=("job", "problem", "text"), limit=120)
+        evidence = ", ".join(
+            str(item)
+            for item in [
+                f"{row.get('support_count', 0)} support",
+                f"{row.get('wiki_count', 0)} wiki",
+                f"{row.get('repo_doc_count', 0)} repo docs",
+                f"{row.get('code_count', 0)} code",
+            ]
+        )
+        output_links = ", ".join(str(value) for values in outputs_by_title.values() for value in values[:1]) or "None proposed yet"
+        lines.append(f"| {persona_name} | {problem} | {row.get('link') or row.get('title')} | {evidence} | {output_links} |")
+    lines.extend(["", "## Related notes", "", "- [[Product Ontology]]", "- [[Workflow Map]]", "- [[Output Pipeline]]"])
     return "\n".join(lines)
 
 
@@ -4905,11 +5282,15 @@ def product_business_evidence_cards(
     support_records: list[dict[str, Any]],
     wiki_records: list[dict[str, Any]],
     repo_snapshots: list[dict[str, Any]],
+    repo_documents: list[dict[str, Any]],
     capability_rows: list[dict[str, Any]],
     code_intel: dict[str, Any],
+    external_links: list[dict[str, Any]] | None = None,
+    docx_extracts: list[dict[str, Any]] | None = None,
+    uploaded_documents: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
-    for source_type, records in (("support", support_records), ("wiki", wiki_records)):
+    for source_type, source_kind, records in (("support", "support-article", support_records), ("wiki", "wiki-page", wiki_records)):
         for record in records[:60]:
             signals = record.get("signals") or {}
             summary = " ".join(str(item) for item in [*(signals.get("paragraphs") or [])[:2], *(signals.get("bullets") or [])[:3]] if str(item).strip())
@@ -4918,12 +5299,26 @@ def product_business_evidence_cards(
             cards.append(
                 {
                     "id": str(record.get("source_ref") or signals.get("title") or len(cards)),
-                    "kind": source_type,
+                    "kind": source_kind,
+                    "source_kind": source_kind,
                     "title": str(signals.get("title") or (record.get("item") or {}).get("title") or ""),
                     "summary": _compact_text(summary, 700),
                     "citation": source_record_citation(record, source_type),
                 }
             )
+    for card in evidence_cards.cards_from_repo_documents(repo_documents):
+        cards.append(
+            {
+                **card,
+                "kind": "repo-doc",
+                "citation": ontology_citation(
+                    title=card["title"],
+                    path=str(card.get("path") or card.get("source_uri") or ""),
+                    citation_uri=str(card.get("source_uri") or ""),
+                    source_type="repo-doc",
+                ),
+            }
+        )
     for snapshot in repo_snapshots[:20]:
         summary = _compact_text(snapshot.get("readme_summary") or snapshot.get("readme_title") or snapshot.get("name") or "", 700)
         if _looks_like_placeholder_intelligence(summary):
@@ -4945,6 +5340,9 @@ def product_business_evidence_cards(
                 ),
             }
         )
+    cards.extend(evidence_cards.cards_from_external_links(external_links or [])[:40])
+    cards.extend(evidence_cards.cards_from_docx_extracts(docx_extracts or [])[:40])
+    cards.extend(evidence_cards.cards_from_uploaded_documents(uploaded_documents or [])[:40])
     graph = code_intel.get("graph") or {}
     code_summary = {
         "routes": [edge.get("to", "") for edge in graph.get("routes", [])[:20] if edge.get("to")],
@@ -4976,7 +5374,8 @@ def product_business_evidence_cards(
                 "citation": ontology_citation(title=str(row.get("title") or "Capability"), path=str(row.get("link") or ""), source_type="capability"),
             }
         )
-    return [card for card in cards if card.get("summary")][:120]
+    normalized = [evidence_cards.normalize_card(card) for card in cards if card.get("summary")]
+    return normalized[:160]
 
 
 def build_product_ontology(
@@ -4985,10 +5384,12 @@ def build_product_ontology(
     support_records: list[dict[str, Any]],
     wiki_records: list[dict[str, Any]],
     repo_snapshots: list[dict[str, Any]],
+    repo_documents: list[dict[str, Any]] | None = None,
     capability_rows: list[dict[str, Any]],
     code_intel: dict[str, Any],
     external_links: list[dict[str, Any]],
     docx_extracts: list[dict[str, Any]],
+    uploaded_documents: list[dict[str, Any]] | None = None,
     business_cache: dict[str, Any] | None = None,
     business_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -4997,7 +5398,17 @@ def build_product_ontology(
     product_slug = str(product.get("slug") or PRODUCT_CONTEXT["slug"])
     graph = code_intel.get("graph", {})
     files = code_intel.get("files", [])
-    evidence_cards = product_business_evidence_cards(support_records, wiki_records, repo_snapshots, capability_rows, code_intel)
+    evidence_cards_list = product_business_evidence_cards(
+        support_records,
+        wiki_records,
+        repo_snapshots,
+        repo_documents or [],
+        capability_rows,
+        code_intel,
+        external_links,
+        docx_extracts,
+        uploaded_documents or [],
+    )
     repo_citations = [
         ontology_citation(
             title=f"Repo - {snapshot.get('name', 'repository')}",
@@ -5018,7 +5429,7 @@ def build_product_ontology(
     ]
     ontology_payload = {
         "product": {"name": product_name, "slug": product_slug},
-        "evidence_cards": evidence_cards,
+        "evidence_cards": evidence_cards_list,
         "capability_rows": capability_rows[:30],
         "code_summary": code_intel.get("summary", {}),
         "code_graph": {
@@ -5136,7 +5547,7 @@ def build_product_ontology(
         [
             json.dumps(item, sort_keys=True)
             for item in [
-                *_business_citations_from_cards(evidence_cards, 20),
+                *_business_citations_from_cards(evidence_cards_list, 20),
                 *repo_citations,
                 *code_citations,
             ]
@@ -5290,7 +5701,11 @@ def main() -> None:
     wiki_inventory = read_json(paths.json_dir / "wiki_pages.json")
     external_links = read_json(paths.json_dir / "external_links.json")
     repo_snapshots = read_json(paths.json_dir / "repo_snapshots.json")
+    repo_documents_path = paths.json_dir / "repo_documents.json"
+    repo_documents = read_json(repo_documents_path) if repo_documents_path.exists() else []
     docx_extracts = read_json(paths.json_dir / "docx_extracts.json")
+    uploaded_documents_path = paths.json_dir / "uploaded_documents.json"
+    uploaded_documents = read_json(uploaded_documents_path) if uploaded_documents_path.exists() else []
     links_by_source = build_links_by_source(external_links)
     record_timing(
         timings,
@@ -5300,8 +5715,10 @@ def main() -> None:
         wiki_items=len(wiki_inventory),
         external_links=len(external_links),
         repo_snapshots=len(repo_snapshots),
+        repo_documents=len(repo_documents),
+        uploaded_documents=len(uploaded_documents),
     )
-    source_inventory_units = max(1, len(support_inventory) + len(wiki_inventory) + len(external_links) + len(repo_snapshots) + len(docx_extracts))
+    source_inventory_units = max(1, len(support_inventory) + len(wiki_inventory) + len(external_links) + len(repo_snapshots) + len(repo_documents) + len(docx_extracts) + len(uploaded_documents))
     progress.record(
         "load_source_inventories",
         "completed",
@@ -5310,12 +5727,16 @@ def main() -> None:
         support_items=len(support_inventory),
         wiki_items=len(wiki_inventory),
         external_links=len(external_links),
+        repo_documents=len(repo_documents),
+        uploaded_documents=len(uploaded_documents),
     )
 
     support_dir = paths.vault / "40 Research" / "Support Articles"
     wiki_dir = paths.vault / "40 Research" / "Wiki Pages"
     code_dir = paths.vault / "40 Research" / "Code Intelligence"
     repo_notes_dir = code_dir / "Repos"
+    repo_docs_dir = paths.vault / "40 Research" / "Repo Documents"
+    uploaded_docs_dir = paths.vault / "40 Research" / "Uploaded Documents"
     code_reference_dir = code_dir / "References"
     code_maps_dir = code_dir / "Maps"
     code_graphs_dir = code_dir / "Graphs"
@@ -5329,6 +5750,8 @@ def main() -> None:
     ensure_dir(support_dir)
     ensure_dir(wiki_dir)
     ensure_dir(repo_notes_dir)
+    ensure_dir(repo_docs_dir)
+    ensure_dir(uploaded_docs_dir)
     ensure_dir(code_reference_dir)
     ensure_dir(code_maps_dir)
     ensure_dir(code_graphs_dir)
@@ -5449,16 +5872,50 @@ def main() -> None:
         record["item"]["relative_path"]: record["stem"]
         for record in wiki_records
     }
+    repo_document_records: list[dict[str, Any]] = []
+    repo_document_stems: dict[str, str] = {}
+    for item in repo_documents:
+        absolute_path = Path(str(item.get("absolute_path") or ""))
+        text = absolute_path.read_text(encoding="utf-8", errors="ignore") if absolute_path.exists() else str(item.get("summary") or "")
+        title = str(item.get("title") or item.get("relative_path") or "Repository Document")
+        stem = safe_filename(f"Repo Doc - {item.get('repo', 'repo')} - {item.get('relative_path', title)}", limit=180)
+        repo_document_stems[str(item.get("id") or item.get("source_uri") or item.get("relative_path") or stem)] = stem
+        repo_document_records.append(
+            {
+                "item": item,
+                "text": text,
+                "stem": stem,
+                "capabilities": classify_capabilities(title, " ".join([title, str(item.get("summary") or ""), text]), str(item.get("relative_path") or "")),
+                "source_ref": item.get("source_uri") or item.get("relative_path") or stem,
+            }
+        )
+    uploaded_document_records: list[dict[str, Any]] = []
+    for item in uploaded_documents:
+        title = str(item.get("title") or item.get("relative_path") or "Uploaded Document")
+        text = str(item.get("text_excerpt") or item.get("summary") or "")
+        stem = safe_filename(f"Uploaded Doc - {item.get('relative_path', title)}", limit=180)
+        uploaded_document_records.append(
+            {
+                "item": item,
+                "text": text,
+                "stem": stem,
+                "capabilities": classify_capabilities(title, " ".join([title, str(item.get("summary") or ""), text]), str(item.get("relative_path") or "")),
+                "source_ref": item.get("relative_path") or item.get("path") or stem,
+            }
+        )
     record_timing(
         timings,
         "prepare_source_records",
         stage_started,
         support_records=len(support_records),
         wiki_records=len(wiki_records),
+        repo_document_records=len(repo_document_records),
+        uploaded_document_records=len(uploaded_document_records),
     )
 
     support_links_by_cap: dict[str, list[str]] = defaultdict(list)
     wiki_links_by_cap: dict[str, list[str]] = defaultdict(list)
+    repo_doc_links_by_cap: dict[str, list[str]] = defaultdict(list)
     capability_link_records: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for record in support_records:
@@ -5474,6 +5931,14 @@ def main() -> None:
             wiki_links_by_cap[key].append(note_link(record["stem"]))
             capability_link_records[key].extend(links_by_source.get(record["source_ref"], []))
 
+    for record in repo_document_records:
+        for key in record["capabilities"]:
+            repo_doc_links_by_cap[key].append(note_link(record["stem"]))
+
+    for record in uploaded_document_records:
+        for key in record["capabilities"]:
+            repo_doc_links_by_cap[key].append(note_link(record["stem"]))
+
     repo_links = [note_link(stem_for_repo(snapshot["name"])) for snapshot in repo_snapshots]
 
     evidence_index_path = paths.json_dir / "evidence_index.sqlite"
@@ -5483,6 +5948,8 @@ def main() -> None:
     base_evidence_rows = [
         *(source_record_to_evidence_row("support", record) for record in support_records),
         *(source_record_to_evidence_row("wiki", record) for record in wiki_records),
+        *(repo_document_to_evidence_row(record) for record in repo_document_records),
+        *(uploaded_document_to_evidence_row(record) for record in uploaded_document_records),
         *(code_file_to_evidence_row(item) for item in code_intel.get("files", [])),
     ]
     if retrieval_config.get("enabled", True):
@@ -5585,6 +6052,19 @@ def main() -> None:
             code_hits=record["code_hits"],
             repo_names=repo_names,
         )
+
+    for record in repo_document_records:
+        record["repo_names"] = []
+        record["code_hits"] = []
+        record["conflicts"] = []
+        record["quality"] = {
+            "score": 5,
+            "relevance": 1,
+            "freshness": 1,
+            "confidence": 1,
+            "product_impact": 1,
+            "actionability": 1,
+        }
 
     code_reference_registry: dict[tuple[str, str], dict[str, Any]] = {}
     capability_note_links = {
@@ -5800,6 +6280,40 @@ def main() -> None:
             ),
         )
 
+    for record in repo_document_records:
+        add_note_render(
+            repo_docs_dir / f"{record['stem']}.md",
+            namespace="note_render.repo_document",
+            key=record["source_ref"],
+            payload={
+                "record": record,
+                "source_kind": "repo-doc",
+            },
+            renderer=lambda record=record: build_repo_document_note(
+                item=record["item"],
+                stem=record["stem"],
+                capabilities=record["capabilities"],
+                source_text=record["text"],
+            ),
+        )
+
+    for record in uploaded_document_records:
+        add_note_render(
+            uploaded_docs_dir / f"{record['stem']}.md",
+            namespace="note_render.uploaded_document",
+            key=record["source_ref"],
+            payload={
+                "record": record,
+                "source_kind": record["item"].get("source_kind") or "uploaded-doc",
+            },
+            renderer=lambda record=record: build_uploaded_document_note(
+                item=record["item"],
+                stem=record["stem"],
+                capabilities=record["capabilities"],
+                source_text=record["text"],
+            ),
+        )
+
     semantic_card_payload = {
         "support_records": [
             {
@@ -5821,6 +6335,22 @@ def main() -> None:
             }
             for record in wiki_records
         ],
+        "repo_documents": [
+            {
+                "stem": record["stem"],
+                "capabilities": record["capabilities"],
+                "item": record["item"],
+            }
+            for record in repo_document_records
+        ],
+        "uploaded_documents": [
+            {
+                "stem": record["stem"],
+                "capabilities": record["capabilities"],
+                "item": record["item"],
+            }
+            for record in uploaded_document_records
+        ],
         "code_references": sorted(f"{repo}/{path}" for repo, path in code_reference_registry),
         "code_summary": code_intel.get("summary", {}),
     }
@@ -5833,6 +6363,8 @@ def main() -> None:
             lambda: build_semantic_evidence_cards(
                 support_records=support_records,
                 wiki_records=wiki_records,
+                repo_document_records=repo_document_records,
+                uploaded_document_records=uploaded_document_records,
                 code_reference_registry=code_reference_registry,
                 code_reference_stems=code_reference_stems,
                 code_intel_by_path=code_intel_by_path,
@@ -5843,10 +6375,33 @@ def main() -> None:
         semantic_cards = build_semantic_evidence_cards(
             support_records=support_records,
             wiki_records=wiki_records,
+            repo_document_records=repo_document_records,
+            uploaded_document_records=uploaded_document_records,
             code_reference_registry=code_reference_registry,
             code_reference_stems=code_reference_stems,
             code_intel_by_path=code_intel_by_path,
         )
+    unified_evidence_cards = evidence_cards.stable_cards(
+        [
+            *evidence_cards.cards_from_source_records(support_records, "support-article"),
+            *evidence_cards.cards_from_source_records(wiki_records, "wiki-page"),
+            *evidence_cards.cards_from_repo_documents(repo_documents),
+            *evidence_cards.cards_from_external_links(external_links),
+            *evidence_cards.cards_from_docx_extracts(docx_extracts),
+            *evidence_cards.cards_from_uploaded_documents(uploaded_documents),
+            *evidence_cards.cards_from_code_intelligence(code_intel),
+            *semantic_cards,
+        ]
+    )
+    write_json(
+        paths.json_dir / "evidence_cards.json",
+        {
+            "schema_version": evidence_cards.SCHEMA_VERSION,
+            "source_kind_counts": evidence_cards.source_kind_counts(unified_evidence_cards),
+            "card_count": len(unified_evidence_cards),
+            "cards": unified_evidence_cards,
+        },
+    )
     stage_started = time.perf_counter()
     planned_shard_units = max(1, int(generation_config.get("agent_shards", {}).get("max_shards", 12) or 12))
     progress.record(
@@ -5942,6 +6497,7 @@ def main() -> None:
         cap_stem = stem_for_capability(capability["title"])
         support_links = sorted(support_links_by_cap.get(capability["key"], []))
         wiki_links = sorted(wiki_links_by_cap.get(capability["key"], []))
+        repo_doc_links = sorted(repo_doc_links_by_cap.get(capability["key"], []))
         repo_note_links = [note_link(stem_for_repo(repo_name)) for repo_name in capability["repos"]]
         code_hits = code_hits_by_cap.get(capability["key"], [])
         code_reference_links = [code_reference_link(hit, code_reference_stems) for hit in code_hits]
@@ -5977,6 +6533,7 @@ def main() -> None:
         evidence_score = score_packet_evidence(
             support_links=support_links,
             wiki_links=wiki_links,
+            repo_doc_links=repo_doc_links,
             code_reference_links=code_reference_links,
             conflict_count=len(conflict_links),
             stale_doc_count=stale_doc_count,
@@ -5989,6 +6546,7 @@ def main() -> None:
                 "support_links": support_links,
                 "wiki_links": wiki_links,
                 "repo_note_links": repo_note_links,
+                "repo_doc_links": repo_doc_links,
                 "code_hits": code_hits,
                 "code_reference_links": code_reference_links,
                 "link_records": capability_link_records.get(capability["key"], []),
@@ -6005,6 +6563,7 @@ def main() -> None:
             "support_links": support_links,
             "wiki_links": wiki_links,
             "repo_note_links": repo_note_links,
+            "repo_doc_links": repo_doc_links,
             "code_reference_links": code_reference_links,
             "shard_insight_links": shard_insight_links,
             "shard_insight_count": len(shard_matches),
@@ -6019,6 +6578,7 @@ def main() -> None:
             "support_links": support_links,
             "wiki_links": wiki_links,
             "repo_note_links": repo_note_links,
+            "repo_doc_links": repo_doc_links,
             "code_reference_links": code_reference_links,
             "packet_kind": "capability",
             "conflict_links": conflict_links,
@@ -6034,6 +6594,7 @@ def main() -> None:
                 "link": note_link(cap_stem),
                 "support_count": len(support_links),
                 "wiki_count": len(wiki_links),
+                "repo_doc_count": len(repo_doc_links),
                 "repos": capability["repos"],
                 "code_count": len(code_reference_links),
                 "code_reference_links": code_reference_links[:20],
@@ -6057,10 +6618,12 @@ def main() -> None:
         support_records=support_records,
         wiki_records=wiki_records,
         repo_snapshots=repo_snapshots,
+        repo_documents=repo_documents,
         capability_rows=capability_rows,
         code_intel=code_intel,
         external_links=external_links,
         docx_extracts=docx_extracts,
+        uploaded_documents=uploaded_documents,
         business_cache=render_cache,
         business_inventory=business_inventory,
     )
@@ -6303,6 +6866,7 @@ def main() -> None:
                     capability=item["capability"],
                     support_links=item["support_links"],
                     wiki_links=item["wiki_links"],
+                    repo_doc_links=item.get("repo_doc_links", []),
                     repo_note_links=item["repo_note_links"],
                     code_reference_links=item["code_reference_links"],
                     linked_domains=dict(domain_counts),
@@ -6389,6 +6953,7 @@ def main() -> None:
                 code_hits=item["code_hits"],
                 code_reference_links=item["code_reference_links"],
                 link_records=item["link_records"],
+                repo_doc_links=item.get("repo_doc_links", []),
                 business_value=capability_business_value,
             ),
             generated=True,
@@ -6429,6 +6994,22 @@ def main() -> None:
         key=f"product-ontology-{DATE}",
         payload={"product_ontology": product_ontology, "business_value_report": business_value_report, "force": DATE},
         renderer=lambda: build_product_ontology_note(product_ontology, business_value_report),
+        generated=True,
+    )
+    add_note_render(
+        paths.vault / "20 Product" / "Workflow Map.md",
+        namespace="note_render.aggregate",
+        key=f"workflow-map-{DATE}",
+        payload={"product_ontology": product_ontology, "force": DATE},
+        renderer=lambda: build_workflow_map_note(product_ontology),
+        generated=True,
+    )
+    add_note_render(
+        paths.vault / "20 Product" / "Value Traceability Matrix.md",
+        namespace="note_render.aggregate",
+        key=f"value-traceability-matrix-{DATE}",
+        payload={"product_ontology": product_ontology, "capability_rows": capability_rows, "output_candidate_records": output_candidate_records, "force": DATE},
+        renderer=lambda: build_value_traceability_matrix_note(product_ontology, capability_rows, output_candidate_records),
         generated=True,
     )
 
@@ -6629,6 +7210,8 @@ def main() -> None:
     final_evidence_rows = [
         *(source_record_to_evidence_row("support", record) for record in support_records),
         *(source_record_to_evidence_row("wiki", record) for record in wiki_records),
+        *(repo_document_to_evidence_row(record) for record in repo_document_records),
+        *(uploaded_document_to_evidence_row(record) for record in uploaded_document_records),
         *(code_file_to_evidence_row(item) for item in code_intel.get("files", [])),
         *(semantic_card_to_evidence_row(card) for card in semantic_cards),
         *(shard_insight_to_evidence_row(insight, index) for index, insight in enumerate(shard_inventory.get("shard_insights", shard_insights))),
@@ -6694,7 +7277,9 @@ def main() -> None:
                 "wiki_pages": wiki_inventory,
                 "external_links": external_links,
                 "repo_snapshots": repo_snapshots,
+                "repo_documents": repo_documents,
                 "docx_extracts": docx_extracts,
+                "uploaded_documents": uploaded_documents,
             }),
         },
         "dependency_graph": render_cache.get("dependency_graph", {}) if render_cache is not None else {},

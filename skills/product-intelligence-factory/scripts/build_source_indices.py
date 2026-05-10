@@ -33,6 +33,8 @@ import generation_performance
 import generation_progress
 import rate_limits
 import source_index_cache
+import code_intelligence
+import evidence_cards
 
 
 DATE = date.today().isoformat()
@@ -428,6 +430,67 @@ def extract_docx_files(
     return _run_ordered_source_tasks(docx_paths, max(1, int(workers)), extract_one)
 
 
+def _read_document_excerpt(path: Path, *, limit: int = 8000) -> str:
+    try:
+        return path.read_text(encoding="utf-8", errors="ignore")[:limit]
+    except OSError:
+        try:
+            return path.read_bytes()[:limit].decode("utf-8", errors="ignore")
+        except OSError:
+            return ""
+
+
+def collect_uploaded_documents(
+    paths: Paths,
+    *,
+    source_cache: dict[str, Any] | None = None,
+    force: bool = False,
+    workers: int = 1,
+) -> list[dict[str, Any]]:
+    suffix_to_kind = {
+        ".pdf": "pdf",
+        ".txt": "uploaded-doc",
+        ".html": "uploaded-doc",
+        ".htm": "uploaded-doc",
+    }
+    document_paths = sorted(
+        path for path in paths.corpus.rglob("*")
+        if path.is_file() and path.suffix.casefold() in suffix_to_kind
+    )
+
+    def collect_one(document_path: Path) -> dict[str, Any]:
+        rel = document_path.relative_to(paths.corpus)
+        source_kind = suffix_to_kind[document_path.suffix.casefold()]
+        settings_fingerprint = {"source_type": source_kind, "relative_path": str(rel)}
+
+        def build() -> dict[str, Any]:
+            text = _read_document_excerpt(document_path)
+            title = title_from_text(text, document_path.stem)
+            summary = WHITESPACE_RE.sub(" ", text).strip()[:900]
+            return {
+                "path": str(document_path),
+                "relative_path": str(rel),
+                "source_kind": source_kind,
+                "title": title,
+                "summary": summary,
+                "text_excerpt": text[:2000],
+                "char_count": len(text),
+                "confidence": "medium" if text.strip() else "low",
+            }
+
+        return cached_source_extract(
+            source_cache,
+            "uploaded_documents",
+            str(rel),
+            document_path,
+            settings_fingerprint,
+            build,
+            force=force,
+        )
+
+    return _run_ordered_source_tasks(document_paths, max(1, int(workers)), collect_one)
+
+
 def collect_support_articles(
     paths: Paths,
     settings: dict[str, Any],
@@ -604,6 +667,81 @@ def collect_repo_snapshots(data: dict[str, Any], paths: Paths) -> list[dict[str,
             }
         )
     return snapshots
+
+
+def _git_tracked_files(repo_path: Path) -> list[Path]:
+    if not (repo_path / ".git").exists():
+        return sorted(
+            path.relative_to(repo_path)
+            for path in repo_path.rglob("*")
+            if path.is_file()
+        )
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "ls-files"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return []
+    return sorted(Path(line) for line in result.stdout.splitlines() if line.strip())
+
+
+def _first_meaningful_markdown_text(text: str, limit: int = 900) -> str:
+    parts: list[str] = []
+    for line in text.splitlines():
+        cleaned = line.strip()
+        if not cleaned or cleaned.startswith("#") or cleaned.startswith("!") or cleaned.startswith("<"):
+            continue
+        if "<img" in cleaned.casefold():
+            continue
+        parts.append(cleaned)
+        if sum(len(part) for part in parts) >= limit:
+            break
+    return evidence_cards.compact_text(" ".join(parts), limit)
+
+
+def collect_repo_documents(data: dict[str, Any], paths: Paths) -> list[dict[str, Any]]:
+    del paths
+    documents: list[dict[str, Any]] = []
+    markdown_exts = {".md", ".mdx", ".markdown"}
+    for item in data.get("repositories", {}).get("items", []):
+        repo_path = Path(str(item.get("local_path") or "")).expanduser()
+        if not repo_path.exists():
+            continue
+        repo_name = str(item.get("name") or repo_path.name)
+        for relative_path in _git_tracked_files(repo_path):
+            if relative_path.suffix.lower() not in markdown_exts:
+                continue
+            if code_intelligence.is_generated_or_ignored_path(relative_path):
+                continue
+            absolute_path = repo_path / relative_path
+            if not absolute_path.exists() or not absolute_path.is_file():
+                continue
+            text = absolute_path.read_text(encoding="utf-8", errors="ignore")
+            title = title_from_text(text, relative_path.stem)
+            summary = _first_meaningful_markdown_text(text)
+            if not summary:
+                continue
+            source_uri = f"{repo_name}/{relative_path.as_posix()}"
+            documents.append(
+                {
+                    "id": f"repo-doc:{source_uri}",
+                    "source_kind": "repo-doc",
+                    "repo": repo_name,
+                    "role": item.get("role") or "",
+                    "relative_path": relative_path.as_posix(),
+                    "absolute_path": str(absolute_path),
+                    "title": title,
+                    "summary": summary,
+                    "source_uri": source_uri,
+                    "confidence": "medium",
+                    "terms": evidence_cards.extracted_terms(" ".join([title, summary])),
+                    "sha256": hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest(),
+                }
+            )
+    return sorted(documents, key=lambda entry: (entry["repo"], entry["relative_path"]))
 
 
 def html_to_text(raw_html: str) -> str:
@@ -1138,6 +1276,7 @@ def repo_catalog_note(snapshots: list[dict[str, Any]], area_key: str) -> str:
 def corpus_overview_note(
     articles: list[dict[str, Any]],
     docx_extracts: list[dict[str, Any]],
+    uploaded_documents: list[dict[str, Any]],
     links: list[dict[str, Any]],
     *,
     area_key: str,
@@ -1164,6 +1303,7 @@ def corpus_overview_note(
         "",
         f"- Markdown files indexed: `{len(articles)}`",
         f"- DOCX files extracted: `{len(docx_extracts)}`",
+        f"- Uploaded/plain/PDF documents indexed: `{len(uploaded_documents)}`",
         f"- Sanitized links discovered: `{len(links)}`",
         "",
         "## Working paths",
@@ -1229,6 +1369,12 @@ def main() -> None:
         force=args.force,
         workers=generation_config["source_extract_workers"],
     )
+    uploaded_documents = collect_uploaded_documents(
+        paths,
+        source_cache=source_extract_cache,
+        force=args.force,
+        workers=generation_config["source_extract_workers"],
+    )
     articles, support_links = collect_support_articles(paths, settings, source_cache=source_extract_cache, force=args.force)
     wiki_pages, wiki_links = collect_wiki_pages(
         paths,
@@ -1238,13 +1384,14 @@ def main() -> None:
         settings=settings,
     )
     write_source_extract_cache(source_extract_cache_path, source_extract_cache)
-    extracted_source_units = max(1, len(docx_extracts) + len(articles) + len(wiki_pages))
+    extracted_source_units = max(1, len(docx_extracts) + len(uploaded_documents) + len(articles) + len(wiki_pages))
     progress.record(
         "source_extract",
         "completed",
         completed_units=extracted_source_units,
         total_units=extracted_source_units,
         docx_extracts=len(docx_extracts),
+        uploaded_documents=len(uploaded_documents),
         support_articles=len(articles),
         wiki_pages=len(wiki_pages),
         cache_stats=source_extract_cache.get("stats", {}),
@@ -1254,6 +1401,7 @@ def main() -> None:
         "source_extract",
         stage_started,
         docx_extracts=len(docx_extracts),
+        uploaded_documents=len(uploaded_documents),
         markdown_sources=len(articles),
         wiki_pages=len(wiki_pages),
         cache_stats=source_extract_cache.get("stats", {}),
@@ -1313,11 +1461,17 @@ def main() -> None:
     record_timing(timings, "repo_snapshots", stage_started, repos=len(repo_snapshots))
 
     stage_started = time.perf_counter()
+    repo_documents = collect_repo_documents(manifest, paths)
+    record_timing(timings, "repo_documents", stage_started, documents=len(repo_documents))
+
+    stage_started = time.perf_counter()
     write_json(paths.json_dir / "docx_extracts.json", docx_extracts)
+    write_json(paths.json_dir / "uploaded_documents.json", uploaded_documents)
     write_json(paths.json_dir / "support_articles.json", articles)
     write_json(paths.json_dir / "wiki_pages.json", wiki_pages)
     write_json(paths.json_dir / "external_links.json", link_inventory)
     write_json(paths.json_dir / "repo_snapshots.json", repo_snapshots)
+    write_json(paths.json_dir / "repo_documents.json", repo_documents)
     rate_limits.write_rate_limit_inventory(
         paths.json_dir / "rate_limit_events.json",
         config=rate_limit_config,
@@ -1332,6 +1486,7 @@ def main() -> None:
         corpus_overview_note(
             articles,
             docx_extracts,
+            uploaded_documents,
             link_inventory,
             area_key=area_key,
             product_name=settings["product_name"],
@@ -1375,10 +1530,12 @@ def main() -> None:
     print(json.dumps(
         {
             "docx_extracts": len(docx_extracts),
+            "uploaded_documents": len(uploaded_documents),
             "markdown_sources": len(articles),
             "wiki_pages": len(wiki_pages),
             "links": len(link_inventory),
             "repos": len(repo_snapshots),
+            "repo_documents": len(repo_documents),
             "mirror_dir": str(paths.links_dir),
             "inventory_dir": str(paths.json_dir),
             "source_index_cache": source_cache.get("stats", {}),

@@ -183,6 +183,71 @@ class ProductBasbUpgradeTests(unittest.TestCase):
         self.assertIn("## Outputs Missing Evidence Links", completed.stdout)
         self.assertIn("Output Candidate.md", completed.stdout)
 
+    def test_audit_flags_generated_template_residue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            vault = Path(tmp_dir) / "vault"
+            vault.mkdir()
+            (vault / "Generated Capability.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "type: concept",
+                        "source: generated",
+                        "area: acme",
+                        "status: active",
+                        "basb_stage: distill",
+                        "para_category: resource",
+                        "distillation_level: distilled",
+                        "actionability: soon",
+                        "---",
+                        "# {{TITLE}}",
+                        "",
+                        "success_metric: {'none': 0}",
+                        "",
+                        "Every entity should eventually have an _intelligence_summary.md.",
+                        "",
+                        "- [[Target]]",
+                    ]
+                )
+            )
+            (vault / "90 Templates").mkdir()
+            (vault / "90 Templates" / "Capability Template.md").write_text(
+                "---\ntype: template\n---\n# {{title}}\n- [[Target]]\n"
+            )
+            (vault / "Target.md").write_text(
+                "\n".join(
+                    [
+                        "---",
+                        "type: insight",
+                        "source: generated",
+                        "area: acme",
+                        "status: active",
+                        "basb_stage: distill",
+                        "para_category: resource",
+                        "distillation_level: distilled",
+                        "actionability: soon",
+                        "---",
+                        "# Target",
+                        "",
+                        "- [[Generated Capability]]",
+                    ]
+                )
+            )
+
+            completed = subprocess.run(
+                [sys.executable, str(AUDIT_SCRIPT), "--vault", str(vault)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertIn("## Generated Template Residue", completed.stdout)
+        self.assertIn("Generated Capability.md", completed.stdout)
+        self.assertIn("unresolved title placeholder", completed.stdout)
+        self.assertIn("raw Python-style business field", completed.stdout)
+        self.assertIn("scaffold operations text", completed.stdout)
+        self.assertNotIn("Capability Template.md", completed.stdout)
+
     def test_manifest_defaults_include_product_basb_readiness_categories(self) -> None:
         module = load_module(INIT_MANIFEST_SCRIPT, "init_manifest_basb_test")
 

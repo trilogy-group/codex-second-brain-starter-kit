@@ -200,8 +200,8 @@ def plan_generation_shards(
     reasoning_effort = openai_responses.normalize_reasoning_effort(
         shard_config.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT)
     )
+    del repo_names
     source_groups = [
-        ("repo-code", _prioritized_items("repo-code", [{"label": name} for name in sorted(repo_names)], changed_scope)),
         ("support-evidence", _prioritized_items("support-evidence", support_records, changed_scope)),
         ("wiki-evidence", _prioritized_items("wiki-evidence", wiki_records, changed_scope)),
         ("semantic-synthesis", _prioritized_items("semantic-synthesis", semantic_cards, changed_scope)),
@@ -722,10 +722,11 @@ def run_generation_shards(
                 result["cache_hit"] = False
                 results.append(result)
                 cache_key = str(result.get("cache_key") or _shard_cache_key(result))
-                shard_cache.setdefault("entries", {})[cache_key] = {
-                    "prompt_version": SHARD_PROMPT_VERSION,
-                    "result": result,
-                }
+                if result.get("status") == "succeeded" and int(result.get("shard_insight_count", 0) or 0) >= 0:
+                    shard_cache.setdefault("entries", {})[cache_key] = {
+                        "prompt_version": SHARD_PROMPT_VERSION,
+                        "result": result,
+                    }
         except FuturesTimeoutError as exc:
             raise RuntimeError(
                 "generation_shards saturated before completion; "
@@ -783,6 +784,8 @@ def collect_shard_insights(inventory: dict[str, Any]) -> list[dict[str, Any]]:
         for index, item in enumerate(data):
             if not isinstance(item, dict):
                 continue
+            if _is_placeholder_insight(item):
+                continue
             insights.append(
                 {
                     "id": f"{shard.get('id')}-insight-{index + 1}",
@@ -798,6 +801,18 @@ def collect_shard_insights(inventory: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return [item for item in insights if item["theme"] and item["summary"]]
+
+
+def _is_placeholder_insight(item: dict[str, Any]) -> bool:
+    text = " ".join(str(item.get(key) or "") for key in ("theme", "summary", "output_rationale")).casefold()
+    if any(marker in text for marker in ("repository ingestion gap", "lacks inspectable source", "placeholder", "no inspectable source", "do not use this as evidence")):
+        return True
+    evidence_ids = _string_list(item.get("evidence_ids"), 8)
+    code_surfaces = _string_list(item.get("code_surfaces"), 8)
+    if evidence_ids and all(value.startswith("repo-code-") for value in evidence_ids):
+        if not code_surfaces or all(value.startswith("repository:") for value in code_surfaces):
+            return True
+    return False
 
 
 def _is_generated_note(path: Path) -> bool:

@@ -218,6 +218,73 @@ class NoteEnrichmentTests(unittest.TestCase):
         self.assertEqual(ontology["capabilities_v2"][0]["title"], "Workspace Intelligence")
         self.assertIn("user_problem", ontology["capabilities_v2"][0])
 
+    def test_product_ontology_works_for_docs_only_project_without_code(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_docs_only_ontology_test")
+        module.configure_runtime(
+            {
+                "product": {"name": "Docs Product", "slug": "docs-product"},
+                "sources": {"stale_doc_hosts": []},
+            },
+            {
+                "capabilities": [
+                    {
+                        "key": "escalation-workflows",
+                        "title": "Escalation Workflows",
+                        "description": "Documented workflows for support escalation ownership.",
+                        "keywords": ["support", "workflow", "escalation"],
+                        "repos": [],
+                    }
+                ]
+            },
+        )
+        repo_document = {
+            "id": "repo-doc:handbook:docs/escalation.md",
+            "source_kind": "repo-doc",
+            "repo": "handbook",
+            "relative_path": "docs/escalation.md",
+            "title": "Escalation Workflow",
+            "summary": "Support managers use escalation workflows to route customer issues to owners and reduce repeated escalations.",
+            "source_uri": "handbook/docs/escalation.md",
+            "confidence": "medium",
+            "terms": ["support managers", "escalation workflows", "owners"],
+        }
+
+        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
+        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
+        try:
+            ontology = module.build_product_ontology(
+                manifest={"product": {"name": "Docs Product", "slug": "docs-product"}},
+                support_records=[],
+                wiki_records=[],
+                repo_snapshots=[],
+                repo_documents=[repo_document],
+                capability_rows=[
+                    {
+                        "title": "Escalation Workflows",
+                        "link": "[[Escalation Workflows]]",
+                        "support_count": 0,
+                        "wiki_count": 0,
+                        "repos": [],
+                        "code_count": 0,
+                        "code_reference_links": [],
+                    }
+                ],
+                code_intel={"summary": {}, "repos": [], "files": [], "graph": {"routes": [], "schemas": [], "tests": []}},
+                external_links=[],
+                docx_extracts=[],
+            )
+        finally:
+            if old_fixture is None:
+                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
+
+        self.assertEqual(ontology["schema_version"], 2)
+        self.assertIn("Support managers", ontology["product_purpose"])
+        self.assertEqual(ontology["fields"]["product_purpose"]["citations"][0]["source_type"], "repo-doc")
+        self.assertEqual(ontology["capabilities_v2"][0]["code_surfaces"], [])
+        self.assertIn("Escalation Workflows", ontology["capabilities"])
+
     def test_product_ontology_repairs_unusable_gpt_purpose_with_ai_synthesis(self) -> None:
         module = load_module(MODULE_PATH, "rebuild_product_brain_ontology_repair_test")
         module.configure_runtime(
@@ -362,6 +429,35 @@ class NoteEnrichmentTests(unittest.TestCase):
         self.assertIn("high: Cited support and code evidence.", note)
         self.assertNotIn("['Fewer", note)
         self.assertNotIn("{'level'", note)
+
+    def test_capability_note_does_not_render_raw_status_dict_for_empty_links(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_capability_status_markdown_test")
+        module.configure_runtime(
+            {"product": {"name": "Acme", "slug": "acme"}, "sources": {"stale_doc_hosts": []}},
+            {"capabilities": []},
+        )
+
+        note = module.build_capability_note(
+            capability={"key": "docs", "title": "Documented Workflows", "description": "Workflow evidence."},
+            support_links=[],
+            wiki_links=[],
+            repo_note_links=[],
+            code_hits=[],
+            code_reference_links=[],
+            link_records=[],
+            business_value={
+                "target_persona": "Support managers",
+                "user_problem": "Need current guidance.",
+                "business_value": "Faster decisions from docs.",
+                "success_metric": "Fewer repeated escalations.",
+                "value_score": 7,
+                "evidence_confidence": "medium",
+                "implementation_leverage": "Use document anchors.",
+            },
+        )
+
+        self.assertIn("Linked pages by status: `None observed`", note)
+        self.assertNotIn("{'none': 0}", note)
 
     def test_product_ontology_normalizes_percentage_value_scores_to_ten_point_scale(self) -> None:
         module = load_module(MODULE_PATH, "rebuild_product_brain_ontology_value_score_test")

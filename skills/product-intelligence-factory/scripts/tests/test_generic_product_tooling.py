@@ -760,6 +760,81 @@ class GenericToolingTests(unittest.TestCase):
         self.assertNotIn("<img", summary)
         self.assertIn("product-scoped engineering workspace", summary)
 
+    def test_repo_documents_collects_git_tracked_markdown_as_source_evidence(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_repo_documents_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo = root / "repo"
+            repo.mkdir()
+            subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.DEVNULL)
+            (repo / "README.md").write_text(
+                "# Product Handbook\n\nSupport managers use this handbook to resolve escalations with current product guidance.\n",
+                encoding="utf-8",
+            )
+            (repo / "docs").mkdir()
+            (repo / "docs" / "workflow.md").write_text(
+                "# Escalation Workflow\n\nThe workflow routes support questions to product owners and implementation teams.\n",
+                encoding="utf-8",
+            )
+            (repo / "cdk.out").mkdir()
+            (repo / "cdk.out" / "generated.md").write_text("# Generated\n\nIgnore me.\n", encoding="utf-8")
+            subprocess.run(["git", "add", "README.md", "docs/workflow.md", "cdk.out/generated.md"], cwd=repo, check=True)
+            manifest = {
+                "repositories": {
+                    "items": [
+                        {
+                            "name": "handbook",
+                            "role": "docs",
+                            "default_branch": "main",
+                            "local_path": str(repo),
+                        }
+                    ]
+                }
+            }
+            paths = module.Paths(
+                workspace=root / "workspace",
+                vault=root / "vault",
+                corpus=root / "corpus",
+                mirror=root / "mirror",
+                docx_extract=root / "docx",
+                repos_root=root / "repos",
+                links_dir=root / "mirror" / "external-pages",
+                json_dir=root / "mirror" / "inventories",
+            )
+
+            documents = module.collect_repo_documents(manifest, paths)
+
+        relative_paths = {item["relative_path"] for item in documents}
+        self.assertEqual(relative_paths, {"README.md", "docs/workflow.md"})
+        self.assertTrue(all(item["source_kind"] == "repo-doc" for item in documents))
+        self.assertTrue(all(item["confidence"] == "medium" for item in documents))
+        self.assertIn("Support managers", documents[0]["summary"] + documents[1]["summary"])
+
+    def test_uploaded_documents_collect_pdf_and_plaintext_source_evidence(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_uploaded_documents_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            corpus = root / "corpus"
+            corpus.mkdir()
+            (corpus / "policy.txt").write_text("Customer success policy\n\nRenewal teams need escalation playbooks.", encoding="utf-8")
+            (corpus / "brief.pdf").write_bytes(b"Executive brief for onboarding workflows")
+            paths = module.Paths(
+                workspace=root,
+                vault=root / "vault",
+                corpus=corpus,
+                mirror=root / "mirror",
+                docx_extract=root / "docx",
+                repos_root=root / "repos",
+                links_dir=root / "links",
+                json_dir=root / "inventories",
+            )
+
+            documents = module.collect_uploaded_documents(paths)
+
+        self.assertEqual([item["relative_path"] for item in documents], ["brief.pdf", "policy.txt"])
+        self.assertEqual([item["source_kind"] for item in documents], ["pdf", "uploaded-doc"])
+        self.assertTrue(all(item["title"] for item in documents))
+
     def test_wizard_refresh_rebuilds_indices_and_vault_before_metadata(self) -> None:
         module = load_module(WIZARD_SCRIPT, "second_brain_wizard_refresh_test")
         registry = {

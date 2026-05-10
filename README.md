@@ -18,6 +18,8 @@ It packages:
 - a Product BASB workflow that maps CODE, PARA, progressive summarization, intermediate packets, archives, and shippable outputs into Obsidian
 - lifecycle automation that drafts output candidates, weekly reviews, and stale-source archive records inside the vault
 - a canonical `product_ontology.json` artifact for product purpose, personas, capabilities, workflows, repos, APIs, entities, tests, CI/CD, and evidence citations
+- a unified multi-source evidence-card layer for repositories, repo docs, uploaded files, crawled URLs, support articles, wiki pages, DOCX/PDF/plain documents, code references, and generated notes
+- GPT-5.5/high business-value synthesis that works for code-heavy, docs-only, URL-backed, uploaded-document, and mixed-source products
 - deep code-intelligence inventories for routes, schemas, calls, dependencies, tests, ownership, churn, AST/parser backends, and parser limitations
 - required OpenAI embedding-based semantic clustering plus LLM cluster synthesis for reusable intermediate packets across support, wiki, code, and generated notes
 - starter prompts you can paste into Codex to run the workflow end to end
@@ -68,7 +70,7 @@ Typical use cases:
 2. Initialize a portfolio root for one or many second brains.
 3. Add a new second brain into that portfolio.
 4. Add source material and repositories.
-5. Use Codex to run the Product BASB loop: capture, organize, distill, and express.
+5. Use Codex to run the Product BASB loop across every evidence type: capture, organize, distill, and express.
 6. Generate or refresh the engineering-readiness report.
 7. Convert high-value intelligence into shippable outputs and archive completed work.
 8. Optionally add recurring automations after the first manual pass is proven.
@@ -109,6 +111,41 @@ generation_performance:
 
 The validator rejects `gpt-4.1-mini` for synthesis fields because it produces thinner intelligence and does not honor the reasoning-effort contract expected by this starter kit. Business-value intelligence and Product Ontology v2 fail clearly when OpenAI synthesis cannot run; they do not use deterministic template fallbacks. If you change model or reasoning settings, run `--force` once so stale semantic, shard, and generated-note caches do not hide the change.
 
+## Multi-source business-value generation
+
+Second brains are product-scoped, not codebase-scoped. Code intelligence is valuable when code exists, but the generator must also produce useful ontology, workflows, capabilities, packets, and output candidates from documents, URLs, uploads, support content, wiki pages, and mixed source sets.
+
+The source-index and rebuild scripts now normalize every useful input into evidence cards. These cards feed Product Ontology v2, semantic clustering, intermediate packets, output candidates, business-value synthesis, retrieval, and diagnostics.
+
+Supported evidence kinds include:
+- `repo-code`: source files, routes, schemas, tests, dependencies, ownership/churn, and code-reference notes
+- `repo-doc`: git-tracked Markdown, MDX, and repository documentation files
+- `uploaded-doc`: uploaded text or HTML-like documents from the corpus
+- `pdf`: uploaded PDF files with durable file provenance and extracted text where available
+- `docx`: extracted DOCX text from the corpus
+- `crawled-url`: reachable or blocked URL references discovered from indexed sources
+- `support-article`: support Markdown/articles and their linked evidence
+- `wiki-page`: engineering or product wiki pages
+- `generated-note`: generated packets, shard insights, output candidates, and hub notes that remain useful as evidence
+
+For code-heavy products, generated capability and output notes should include implementation leverage, code surfaces, routes, schemas, tests, and risk signals. For non-code or mixed-source products, the same notes should use document anchors, workflow evidence, decision/process evidence, risks, owners, and recommended next actions instead of failing because code anchors are absent.
+
+Key generated artifacts:
+- `sources.mirror_path/inventories/evidence_cards.json`
+- `sources.mirror_path/inventories/repo_documents.json`
+- `sources.mirror_path/inventories/uploaded_documents.json`
+- `sources.mirror_path/inventories/business_value_synthesis.json`
+- `sources.mirror_path/inventories/business_value_report.json`
+- `20 Product/Product Ontology.md`
+- `20 Product/Workflow Map.md`
+- `20 Product/Value Traceability Matrix.md`
+- `40 Research/Repo Documents/`
+- `40 Research/Uploaded Documents/`
+
+Warm rebuild speed depends on stable evidence-card digests. Keep inventory and cache paths stable so unchanged business-value payloads reuse cached GPT outputs. The business-value inventory reports cache hits, skipped GPT calls, source-kind counts, unstable payload warnings, GPT calls, failures, and elapsed synthesis time.
+
+Quality guards now audit generated intelligence notes for unresolved placeholders such as `{{title}}`, scaffold residue, raw Python-style dict/list renderings, and code-only assumptions in products that have strong non-code evidence.
+
 ## Performance for large source sets
 
 The full-fidelity rebuild is designed to keep provenance, code intelligence, semantic clustering, LLM shard synthesis, audits, and readiness outputs enabled. For 500+ sources, the fastest path is to preserve the generated caches between runs and let the packaged scripts skip unchanged work.
@@ -131,6 +168,7 @@ Keep these paths stable between runs:
 - `sources.mirror_path/inventories/`
 - the repository clone paths listed in the manifest
 - generated cache files such as `source_extract_cache.json`, `source_index_cache.json`, `rebuild_cache.json`, `embedding_cache.json`, `llm_cluster_cache.json`, `semantic_result_cache.json`, `generation_shard_cache.json`, and `generated_notes_manifest.json`
+- generated evidence and business-value inventories such as `evidence_cards.json`, `repo_documents.json`, `uploaded_documents.json`, `business_value_synthesis.json`, and `business_value_report.json`
 
 Treat those paths as local product-evidence caches. They make warm rebuilds much faster, but they should not be committed or copied to shared storage unless your team explicitly wants the underlying source evidence there. The generated Markdown, rebuild cache, and SQLite evidence index redact credentialed URL userinfo, OpenAI-style API keys, private IPs, and email addresses before writing reusable artifacts; if real credentials were present in source material, rotate them and rerun with `--force` so every cache and index is rebuilt from sanitized inputs.
 
@@ -163,6 +201,8 @@ business_value:
   timeout_seconds: 180
   max_repair_attempts: 1
 ```
+
+If `business_value_synthesis.json` shows low cache hit ratios on an unchanged warm rebuild, inspect the unstable payload warnings first. Business-value cache keys intentionally ignore run IDs, dates, scratch paths, generated output links, and ordering, so repeated GPT calls usually mean the underlying evidence-card payload changed.
 
 Use `--force` only when you intentionally want a clean rebuild: after changing generation logic, after deleting or repairing corrupted cache files, during a clean benchmark, or when you suspect stale generated output. A forced run is expected to be slower because it bypasses source-index, semantic, shard, and rebuild reuse.
 
@@ -250,6 +290,8 @@ These are the repositories that must be covered:
 - "trilogy-group/influitive-advocatehub-ios-whitelabel"
 
 For the code repositories, I want a full code-intelligence layer in the Obsidian second brain, not just repo summaries.
+
+Do not assume the product is code-only. Treat repository docs, uploaded files, PDFs/DOCX, crawled URLs, support articles, wiki pages, and generated packets as first-class evidence. If a product area has strong non-code evidence but no code anchor, still synthesize the ontology, workflow, capability, packet, and output-candidate value from that evidence, and explicitly say it is document-backed, URL-backed, upload-backed, or mixed-source.
 
 Please traverse every repository deeply and extract all important engineering data from the code itself, including architecture, implementation details, feature mappings, bugs, risks, code quality signals, runtime behavior, and operational context.
 
@@ -365,6 +407,10 @@ I want the result to be a real Obsidian second brain, not a flat summary dump. P
 - apply Product BASB: CODE stages, PARA categories, progressive summarization, intermediate packets, archives, and output conversion
 - run the packaged source-index build and vault rebuild scripts when they are available
 - extract useful content from support articles, repo documentation, wiki pages, and reachable external references
+- normalize every useful source into evidence cards and preserve source-kind coverage for repo code, repo docs, uploads, crawled URLs, support, wiki, DOCX, PDF, and generated notes
+- generate Product Ontology v2, Workflow Map, Value Traceability Matrix, capabilities, packets, and output candidates from the available evidence, even when the project is docs-only or URL-backed
+- exclude templates from graph, retrieval, embeddings, and answers; unresolved placeholders such as `{{title}}` should appear only in templates
+- never render raw Python-style dicts/lists in generated notes; normalize GPT arrays and objects into clean Markdown and scalar frontmatter
 - if any page requires authentication, open a new browser session and ask me to authenticate with my data; record access requirements and use approved credential or session storage, never raw credentials in the vault
 - create notes using Obsidian wikilinks throughout
 - create the references in Obsidian syntax

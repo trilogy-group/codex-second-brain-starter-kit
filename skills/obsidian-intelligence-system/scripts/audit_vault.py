@@ -15,6 +15,19 @@ except ImportError:  # pragma: no cover
 
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
+PLACEHOLDER_TOKEN_RE = re.compile(r"\{\{\s*title\s*\}\}", re.IGNORECASE)
+RAW_BUSINESS_FIELD_RE = re.compile(
+    r"(?im)^(?:[-*]\s*)?(?:target_persona|user_problem|business_value|success_metric|"
+    r"evidence_confidence|implementation_leverage|value_score)\s*[:|-]\s*"
+    r"(?:\{['\"][^}\n]+['\"]\s*:|\[[\"'][^\]\n]+[\"'](?:\s*,\s*[\"'][^\]\n]+[\"'])*\])"
+)
+SCAFFOLD_RESIDUE_MARKERS = (
+    "Every entity should eventually have an _intelligence_summary.md.",
+    "Every summary needs frontmatter and graph connections.",
+    "Hub nodes aggregate shared dimensions.",
+    "Use timestamped playbooks. Never overwrite prior strategy.",
+    "Keep emails, transcripts, and tickets close to the relevant entity.",
+)
 
 REQUIRED_FIELDS = {
     "intelligence-summary": ["type", "entity", "category", "status", "last_updated"],
@@ -125,6 +138,7 @@ def render_report(
     outputs_without_business_value: list[Path],
     packets_without_forward_use: list[Path],
     missing_weekly_reviews: list[str],
+    generated_template_residue: dict[Path, list[str]],
     duplicate_stems: dict[str, list[Path]],
     orphan_candidates: list[Path],
 ) -> str:
@@ -192,6 +206,12 @@ def render_report(
         lines.extend(["", "## Missing Weekly Reviews"])
         lines.extend(f"- {item}" for item in missing_weekly_reviews)
 
+    if generated_template_residue:
+        lines.extend(["", "## Generated Template Residue"])
+        for path, markers in sorted(generated_template_residue.items(), key=lambda item: str(item[0])):
+            marker_list = ", ".join(f"`{marker}`" for marker in markers)
+            lines.append(f"- `{path.relative_to(vault)}`: {marker_list}")
+
     if duplicate_stems:
         lines.extend(["", "## Duplicate Stems"])
         for stem, paths in sorted(duplicate_stems.items()):
@@ -216,6 +236,7 @@ def render_report(
             outputs_without_business_value,
             packets_without_forward_use,
             missing_weekly_reviews,
+            generated_template_residue,
             duplicate_stems,
             orphan_candidates,
         ]
@@ -257,6 +278,7 @@ def main() -> None:
     outputs_without_business_value: list[Path] = []
     packets_without_forward_use: list[Path] = []
     weekly_review_notes: list[Path] = []
+    generated_template_residue: dict[Path, list[str]] = {}
     frontmatter_by_path: dict[Path, dict[str, object]] = {}
 
     for path in notes:
@@ -317,6 +339,16 @@ def main() -> None:
                 tags = [tags]
             if "weekly-review" in tags or path.name.startswith("Weekly Review"):
                 weekly_review_notes.append(path)
+        if "90 Templates" not in path.parts and str(frontmatter.get("source", "")).strip() == "generated":
+            markers: list[str] = []
+            if PLACEHOLDER_TOKEN_RE.search(text):
+                markers.append("unresolved title placeholder")
+            if RAW_BUSINESS_FIELD_RE.search(text):
+                markers.append("raw Python-style business field")
+            if any(marker in text for marker in SCAFFOLD_RESIDUE_MARKERS):
+                markers.append("scaffold operations text")
+            if markers:
+                generated_template_residue[path] = markers
 
     duplicate_stems = {
         stem: paths
@@ -362,6 +394,7 @@ def main() -> None:
         outputs_without_business_value=outputs_without_business_value,
         packets_without_forward_use=packets_without_forward_use,
         missing_weekly_reviews=missing_weekly_reviews,
+        generated_template_residue=generated_template_residue,
         duplicate_stems=duplicate_stems,
         orphan_candidates=orphan_candidates,
     )
