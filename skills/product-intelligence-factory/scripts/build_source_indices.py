@@ -541,7 +541,13 @@ def summarize_readme(path: Path) -> tuple[str, str]:
     summary = ""
     for line in text.splitlines():
         line = line.strip()
-        if line and not line.startswith("#"):
+        if (
+            line
+            and not line.startswith("#")
+            and not line.startswith("!")
+            and "<img" not in line.casefold()
+            and not line.startswith("<")
+        ):
             summary = line[:240]
             break
     return title, summary

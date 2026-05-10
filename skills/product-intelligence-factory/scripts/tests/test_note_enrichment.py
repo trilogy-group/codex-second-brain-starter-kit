@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 TOOLS_DIR = Path(__file__).resolve().parents[1]
@@ -216,6 +217,204 @@ class NoteEnrichmentTests(unittest.TestCase):
         self.assertIn("reduce repeat escalations", ontology["business_value_drivers"][0]["business_value"])
         self.assertEqual(ontology["capabilities_v2"][0]["title"], "Workspace Intelligence")
         self.assertIn("user_problem", ontology["capabilities_v2"][0])
+
+    def test_product_ontology_repairs_unusable_gpt_purpose_with_ai_synthesis(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_ontology_repair_test")
+        module.configure_runtime(
+            {
+                "product": {"name": "Acme", "slug": "acme"},
+                "sources": {"stale_doc_hosts": []},
+            },
+            {
+                "capabilities": [
+                    {
+                        "key": "workspace-intelligence",
+                        "title": "Workspace Intelligence",
+                        "description": "Searchable workspace intelligence.",
+                        "keywords": ["workspace", "intelligence"],
+                        "repos": ["acme-app"],
+                    }
+                ]
+            },
+        )
+        bad_synthesis = {
+            "product_purpose": '<img src="https://example.com/logo.png">',
+            "target_personas": [{"name": "Support managers", "problem": "Need answers.", "desired_outcome": "Fewer escalations."}],
+            "business_value_drivers": [{"business_value": "Fewer repeated escalations."}],
+            "capabilities": [{"title": "Workspace Intelligence", "user_problem": "Need answers.", "business_value": "Faster support."}],
+            "workflows": [{"name": "Answer support question"}],
+        }
+        repaired_synthesis = {
+            **bad_synthesis,
+            "product_purpose": "Acme helps support managers turn product evidence into grounded answers and fewer repeated escalations.",
+        }
+
+        with mock.patch.object(module, "synthesize_business_value", side_effect=[bad_synthesis, repaired_synthesis]) as synthesize:
+            ontology = module.build_product_ontology(
+                manifest={"product": {"name": "Acme", "slug": "acme"}},
+                support_records=[],
+                wiki_records=[],
+                repo_snapshots=[
+                    {
+                        "name": "acme-app",
+                        "role": "primary",
+                        "branch": "main",
+                        "readme_title": "Acme",
+                        "readme_summary": "Acme helps support managers find grounded product answers.",
+                        "top_dirs": ["src"],
+                        "key_files": ["README.md"],
+                        "monorepo_services": ["api"],
+                        "monorepo_apps": ["web"],
+                    }
+                ],
+                capability_rows=[
+                    {
+                        "title": "Workspace Intelligence",
+                        "link": "[[Workspace Intelligence]]",
+                        "support_count": 0,
+                        "wiki_count": 0,
+                        "repos": ["acme-app"],
+                        "code_count": 1,
+                    }
+                ],
+                code_intel={"summary": {}, "files": [], "graph": {"routes": [], "schemas": [], "tests": []}},
+                external_links=[],
+                docx_extracts=[],
+            )
+
+        self.assertEqual(synthesize.call_count, 2)
+        self.assertEqual(synthesize.call_args_list[1].args[0], "product_ontology_repair")
+        self.assertNotIn("<img", ontology["product_purpose"])
+        self.assertIn("support managers", ontology["product_purpose"])
+
+    def test_business_value_normalization_accepts_structured_value_score(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_business_value_score_test")
+
+        fields = module.normalized_business_value_fields(
+            {
+                "target_persona": "Support managers",
+                "user_problem": "Need grounded answers.",
+                "business_value": "Reduce escalations.",
+                "success_metric": "Fewer repeat tickets.",
+                "value_score": {"score": "8", "rationale": "High leverage"},
+                "evidence_confidence": "high",
+                "implementation_leverage": "Reuse the source index.",
+            },
+            require_user_problem=True,
+        )
+
+        self.assertEqual(fields["value_score"], 8)
+
+    def test_business_value_normalization_formats_structured_fields_for_markdown(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_business_value_markdown_test")
+
+        fields = module.normalized_business_value_fields(
+            {
+                "target_persona": {"name": "Support managers", "rationale": "They own escalations."},
+                "user_problem": {"problem": "Need grounded answers.", "impact": "Repeat escalations."},
+                "business_value": {"business_value": "Reduce escalations.", "rationale": "Evidence is reusable."},
+                "success_metric": ["Fewer repeated tickets", "Faster evidence-backed answers"],
+                "value_score": {"score": 86, "rationale": "High leverage"},
+                "evidence_confidence": {"level": "high", "rationale": "Support and code evidence agree."},
+                "implementation_leverage": {"summary": "Use linked code references and packet evidence."},
+            },
+            require_user_problem=True,
+        )
+
+        self.assertEqual(fields["target_persona"], "Support managers")
+        self.assertEqual(fields["user_problem"], "Need grounded answers.")
+        self.assertEqual(fields["business_value"], "Reduce escalations.")
+        self.assertEqual(fields["success_metric"], "Fewer repeated tickets; Faster evidence-backed answers")
+        self.assertEqual(fields["success_metric_markdown"], "- Fewer repeated tickets\n- Faster evidence-backed answers")
+        self.assertEqual(fields["evidence_confidence"], "high: Support and code evidence agree.")
+        self.assertEqual(fields["value_score"], 9)
+        for key in ("target_persona", "user_problem", "business_value", "success_metric", "evidence_confidence", "implementation_leverage"):
+            self.assertNotIn("{", fields[key])
+            self.assertNotIn("[", fields[key])
+
+    def test_output_candidate_note_formats_structured_business_value_without_gpt_call(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_output_markdown_test")
+        packet = {
+            "title": "Workspace Intelligence",
+            "link": "[[Packet - Workspace Intelligence]]",
+            "support_links": ["[[Support - Answers]]"],
+            "wiki_links": [],
+            "code_reference_links": ["[[Code Ref - Search]]"],
+            "conflict_links": [],
+            "shard_insight_links": [],
+            "evidence_score": 8,
+        }
+        output_synthesis = {
+            "target_persona": {"name": "Support managers"},
+            "user_problem": "Need grounded answers.",
+            "business_value": "Reduce escalations.",
+            "success_metric": ["Fewer repeated tickets", "Faster evidence-backed answers"],
+            "value_score": 8,
+            "evidence_confidence": {"level": "high", "rationale": "Cited support and code evidence."},
+            "implementation_leverage": "Use the linked search code reference.",
+        }
+
+        with mock.patch.object(module, "synthesize_business_value", side_effect=AssertionError("renderer called GPT")):
+            note = module.build_output_candidate_note(packet, output_synthesis=output_synthesis)
+
+        self.assertIn("- Fewer repeated tickets", note)
+        self.assertIn("- Faster evidence-backed answers", note)
+        self.assertIn("high: Cited support and code evidence.", note)
+        self.assertNotIn("['Fewer", note)
+        self.assertNotIn("{'level'", note)
+
+    def test_product_ontology_normalizes_percentage_value_scores_to_ten_point_scale(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_ontology_value_score_test")
+        module.configure_runtime(
+            {
+                "product": {"name": "Acme", "slug": "acme"},
+                "sources": {"stale_doc_hosts": []},
+            },
+            {
+                "capabilities": [
+                    {
+                        "key": "workspace-intelligence",
+                        "title": "Workspace Intelligence",
+                        "description": "Searchable workspace intelligence.",
+                        "keywords": ["workspace"],
+                        "repos": ["acme-app"],
+                    }
+                ]
+            },
+        )
+        synthesis = {
+            "product_purpose": "Acme helps support managers find grounded product answers.",
+            "target_personas": [{"name": "Support managers", "problem": "Need answers.", "desired_outcome": "Fewer escalations."}],
+            "business_value_drivers": [{"business_value": "Fewer repeated escalations."}],
+            "capabilities": [{"title": "Workspace Intelligence", "user_problem": "Need answers.", "business_value": "Faster support.", "value_score": 94}],
+            "workflows": [{"name": "Answer support question"}],
+        }
+
+        with mock.patch.object(module, "synthesize_business_value", return_value=synthesis):
+            ontology = module.build_product_ontology(
+                manifest={"product": {"name": "Acme", "slug": "acme"}},
+                support_records=[],
+                wiki_records=[],
+                repo_snapshots=[
+                    {
+                        "name": "acme-app",
+                        "role": "primary",
+                        "branch": "main",
+                        "readme_title": "Acme",
+                        "readme_summary": "Acme helps support managers find grounded product answers.",
+                        "top_dirs": ["src"],
+                        "key_files": ["README.md"],
+                        "monorepo_services": ["api"],
+                        "monorepo_apps": ["web"],
+                    }
+                ],
+                capability_rows=[],
+                code_intel={"summary": {}, "files": [], "graph": {"routes": [], "schemas": [], "tests": []}},
+                external_links=[],
+                docx_extracts=[],
+            )
+
+        self.assertEqual(ontology["capabilities_v2"][0]["value_score"], 9)
 
     def test_support_note_preserves_full_article_content_and_obsidian_links(self) -> None:
         module = load_module(MODULE_PATH, "rebuild_product_brain_note_test")

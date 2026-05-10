@@ -40,7 +40,7 @@ profile:
 #   similarity_threshold: 0.78
 #   max_clusters: 40
 #   llm_model: gpt-5.5
-#   reasoning_effort: xhigh
+#   reasoning_effort: high
 #   llm_cluster_synthesis: true
 #   max_llm_clusters: 40
 # code_intelligence:
@@ -54,7 +54,12 @@ profile:
 # business_value:
 #   enabled: true
 #   llm_model: gpt-5.5
-#   reasoning_effort: xhigh
+#   reasoning_effort: high
+#   synthesis_workers: 24
+#   batch_size: 12
+#   cache_enabled: true
+#   timeout_seconds: 180
+#   max_repair_attempts: 1
 #   require_user_problem_for_output: true
 # retrieval_index:
 #   enabled: true
@@ -79,7 +84,7 @@ profile:
 #     timeout_seconds: 1800
 #     worker_mode: llm-synthesis
 #     shard_model: gpt-5.5
-#     reasoning_effort: xhigh
+#     reasoning_effort: high
 #     max_cards_per_shard: 80
 # rate_limits:
 #   openai_requests_per_minute: 3000

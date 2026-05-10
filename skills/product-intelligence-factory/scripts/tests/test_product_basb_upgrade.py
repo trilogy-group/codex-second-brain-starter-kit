@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 import subprocess
 import sys
 import tempfile
@@ -263,27 +262,28 @@ class ProductBasbUpgradeTests(unittest.TestCase):
             {"capabilities": []},
         )
 
-        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
-        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
-        try:
-            body = module.build_intermediate_packet_note(
-                capability={
-                    "key": "platform-core",
-                    "title": "Platform Core",
-                    "description": "Core product behavior.",
-                    "keywords": ["platform"],
-                    "repos": ["core-repo"],
-                },
-                support_links=["[[Support - 100 - Sample Article]]"],
-                wiki_links=["[[Wiki - Root - Platform]]"],
-                repo_note_links=["[[Repo - core-repo]]"],
-                code_reference_links=["[[Code Ref - core-repo - app.rb]]"],
-            )
-        finally:
-            if old_fixture is None:
-                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
-            else:
-                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
+        body = module.build_intermediate_packet_note(
+            capability={
+                "key": "platform-core",
+                "title": "Platform Core",
+                "description": "Core product behavior.",
+                "keywords": ["platform"],
+                "repos": ["core-repo"],
+            },
+            support_links=["[[Support - 100 - Sample Article]]"],
+            wiki_links=["[[Wiki - Root - Platform]]"],
+            repo_note_links=["[[Repo - core-repo]]"],
+            code_reference_links=["[[Code Ref - core-repo - app.rb]]"],
+            business_value={
+                "target_persona": "Product and engineering teams",
+                "user_problem": "Teams need platform evidence connected to outputs.",
+                "business_value": "Reusable packets reduce repeated analysis.",
+                "success_metric": "The packet can feed an output candidate.",
+                "value_score": 6,
+                "evidence_confidence": "medium",
+                "implementation_leverage": "Validate linked code before shipping.",
+            },
+        )
 
         self.assertIn("type: \"intermediate-packet\"", body)
         self.assertIn("basb_stage: \"distill\"", body)

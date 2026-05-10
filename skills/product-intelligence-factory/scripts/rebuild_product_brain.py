@@ -8,16 +8,20 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
+import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
 
@@ -175,10 +179,34 @@ EXTERNAL_SYSTEM_TERMS = (
 
 
 BUSINESS_VALUE_PROMPT_VERSION = "product-basb-business-value-v1"
+BUSINESS_VALUE_BATCH_PROMPT_VERSION = "product-basb-business-value-batch-v1"
+BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION = "business-value-fields-v2"
+BUSINESS_VALUE_CACHE_NAMESPACE = "business_value_synthesis"
 
 
 def default_business_value_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
     configured = dict((profile or {}).get("business_value") or {})
+    def positive_int(field: str, default: int) -> int:
+        env_names = {
+            "synthesis_workers": ("PRODUCT_BASB_BUSINESS_VALUE_WORKERS", "TYLER_SECOND_BRAIN_BUSINESS_VALUE_WORKERS"),
+            "batch_size": ("PRODUCT_BASB_BUSINESS_VALUE_BATCH_SIZE", "TYLER_SECOND_BRAIN_BUSINESS_VALUE_BATCH_SIZE"),
+            "timeout_seconds": ("PRODUCT_BASB_BUSINESS_VALUE_TIMEOUT_SECONDS", "TYLER_SECOND_BRAIN_BUSINESS_VALUE_TIMEOUT_SECONDS"),
+            "max_repair_attempts": ("PRODUCT_BASB_BUSINESS_VALUE_MAX_REPAIR_ATTEMPTS",),
+        }.get(field, ())
+        raw: Any = configured.get(field, default)
+        for env_name in env_names:
+            env_value = os.environ.get(env_name)
+            if env_value not in (None, ""):
+                raw = env_value
+                break
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"business_value.{field} must be an explicit positive integer.") from exc
+        if parsed <= 0:
+            raise SystemExit(f"business_value.{field} must be greater than zero.")
+        return parsed
+
     return {
         "enabled": bool(configured.get("enabled", True)),
         "llm_model": openai_responses.ensure_allowed_synthesis_model(
@@ -188,6 +216,11 @@ def default_business_value_config(profile: dict[str, Any] | None = None) -> dict
         "reasoning_effort": openai_responses.normalize_reasoning_effort(
             configured.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT)
         ),
+        "synthesis_workers": positive_int("synthesis_workers", 24),
+        "batch_size": positive_int("batch_size", 12),
+        "cache_enabled": bool(configured.get("cache_enabled", True)),
+        "timeout_seconds": positive_int("timeout_seconds", 180),
+        "max_repair_attempts": positive_int("max_repair_attempts", 1),
         "require_user_problem_for_output": bool(configured.get("require_user_problem_for_output", True)),
     }
 
@@ -227,13 +260,124 @@ def _business_citations_from_cards(cards: list[dict[str, Any]], limit: int = 6) 
 
 
 class OpenAIBusinessValueClient:
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, rate_config: dict[str, Any] | None = None) -> None:
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+        self.rate_config = rate_config or generation_performance.default_rate_limit_config({})
+        self.recorder = rate_limits.RateLimitRecorder()
+        self.limiter = rate_limits.WindowRateLimiter(self.rate_config, recorder=self.recorder)
 
-    def synthesize(self, task: str, payload: dict[str, Any], model: str, reasoning_effort: str) -> dict[str, Any]:
+    def _timeout_seconds(self) -> float:
+        config = BUSINESS_VALUE_CONFIG or default_business_value_config({})
+        configured = (
+            os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_TIMEOUT_SECONDS")
+            or os.environ.get("TYLER_SECOND_BRAIN_BUSINESS_VALUE_TIMEOUT_SECONDS")
+            or os.environ.get("PRODUCT_BASB_OPENAI_TIMEOUT_SECONDS")
+            or os.environ.get("TYLER_SECOND_BRAIN_OPENAI_TIMEOUT_SECONDS")
+            or str(config.get("timeout_seconds") or 180)
+        )
+        try:
+            timeout = float(configured)
+        except ValueError as exc:
+            raise SystemExit("PRODUCT_BASB_OPENAI_TIMEOUT_SECONDS must be a positive number.") from exc
+        if timeout <= 0:
+            raise SystemExit("PRODUCT_BASB_OPENAI_TIMEOUT_SECONDS must be a positive number.")
+        return timeout
+
+    def _task_contract(self, task: str) -> dict[str, Any]:
+        if task in {"product_ontology", "product_ontology_repair"}:
+            return {
+                "required_fields": [
+                    "product_purpose",
+                    "target_personas",
+                    "jobs_to_be_done",
+                    "business_value_drivers",
+                    "capabilities",
+                    "workflows",
+                    "risks_and_opportunities",
+                    "ontology_confidence",
+                ],
+                "product_purpose": "One concrete sentence describing what the product helps users accomplish. Never return a title, heading, HTML, or image markdown.",
+                "target_personas": "Array of objects with name, problem, desired_outcome, evidence, and confidence.",
+                "business_value_drivers": "Array of objects with business_value, user_problem, success_metric, evidence, and confidence.",
+                "capabilities": "Array of objects with title, target_persona, user_problem, business_value, success_metric, value_score, evidence_confidence, and implementation_leverage.",
+            }
+        return {
+            "required_fields": [
+                "target_persona",
+                "user_problem",
+                "business_value",
+                "success_metric",
+                "value_score",
+                "evidence_confidence",
+                "implementation_leverage",
+            ]
+        }
+
+    def _read_response_with_deadline(self, request: urllib.request.Request, timeout_seconds: float) -> tuple[Any, bytes]:
+        previous_handler = None
+
+        def timeout_handler(_signum: int, _frame: Any) -> None:
+            raise TimeoutError(f"OpenAI business-value synthesis exceeded {timeout_seconds:.0f}s.")
+
+        use_alarm = threading.current_thread() is threading.main_thread() and hasattr(signal, "SIGALRM")
+        if use_alarm:
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+                return response.headers, response.read()
+        finally:
+            if use_alarm:
+                signal.setitimer(signal.ITIMER_REAL, 0)
+                signal.signal(signal.SIGALRM, previous_handler)
+
+    def _post_json(self, request_body: dict[str, Any], *, worker_count: int = 1) -> dict[str, Any]:
         if not self.api_key:
             raise SystemExit("OPENAI_API_KEY is required for business-value and Product Ontology v2 synthesis.")
-        request_payload = json.dumps(
+        request_payload = json.dumps(request_body).encode("utf-8")
+        request = urllib.request.Request(
+            openai_responses.OPENAI_RESPONSES_URL,
+            data=request_payload,
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        timeout_seconds = self._timeout_seconds()
+
+        def send_request() -> dict[str, Any]:
+            self.limiter.acquire_openai(
+                stage="business_value_synthesis",
+                worker_count=worker_count,
+                tokens=max(1, len(request_payload) // 4),
+                recommended_knob="openai_requests_per_minute",
+            )
+            try:
+                headers, raw_response = self._read_response_with_deadline(request, timeout_seconds)
+                self.limiter.observe_openai_response_headers(
+                    headers,
+                    stage="business_value_synthesis",
+                    worker_count=worker_count,
+                    recommended_knob="openai_requests_per_minute",
+                )
+                return json.loads(raw_response.decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                provider_error = rate_limits.provider_rate_limit_from_http_error(exc)
+                if provider_error is not None:
+                    raise provider_error from exc
+                raise
+
+        data, _retry_count, _wait_seconds = rate_limits.with_retries(
+            action=send_request,
+            config=self.rate_config,
+            recorder=self.recorder,
+            stage="business_value_synthesis",
+            worker_count=worker_count,
+            recommended_knob="PRODUCT_BASB_OPENAI_TIMEOUT_SECONDS",
+        )
+        return openai_responses.parse_json_response(data)
+
+    def synthesize(self, task: str, payload: dict[str, Any], model: str, reasoning_effort: str) -> dict[str, Any]:
+        return self._post_json(
             openai_responses.build_json_response_payload(
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -247,27 +391,57 @@ class OpenAIBusinessValueClient:
                         "prompt_version": BUSINESS_VALUE_PROMPT_VERSION,
                         "task": task,
                         "required_model_behavior": "synthesize user problems, personas, business value, success metrics, and implementation leverage",
+                        "output_contract": self._task_contract(task),
                         "payload": payload,
                     },
                     sort_keys=True,
                 ),
             )
-        ).encode("utf-8")
-        request = urllib.request.Request(
-            openai_responses.OPENAI_RESPONSES_URL,
-            data=request_payload,
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            method="POST",
         )
-        with urllib.request.urlopen(request, timeout=90) as response:
-            data = json.loads(response.read().decode("utf-8"))
-        return openai_responses.parse_json_response(data)
+
+    def synthesize_batch(self, task: str, items: list[dict[str, Any]], model: str, reasoning_effort: str) -> dict[str, Any]:
+        return self._post_json(
+            openai_responses.build_json_response_payload(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                instructions=(
+                    "You synthesize Product BASB business-value intelligence for multiple independent entities. "
+                    "Use only the compact payload for each id. Return JSON only with one item per requested id. "
+                    "Do not omit ids. Do not return templates, raw HTML, image markdown, or heading-only facts."
+                ),
+                user_content=json.dumps(
+                    {
+                        "prompt_version": BUSINESS_VALUE_BATCH_PROMPT_VERSION,
+                        "task": f"{task}_batch",
+                        "required_model_behavior": "synthesize per-entity user problems, personas, business value, success metrics, and implementation leverage",
+                        "output_contract": {
+                            "required_top_level": ["items"],
+                            "item_contract": {
+                                "required_fields": [
+                                    "id",
+                                    "target_persona",
+                                    "user_problem",
+                                    "business_value",
+                                    "success_metric",
+                                    "value_score",
+                                    "evidence_confidence",
+                                    "implementation_leverage",
+                                ]
+                            },
+                        },
+                        "items": items,
+                    },
+                    sort_keys=True,
+                ),
+            ),
+            worker_count=max(1, len(items)),
+        )
 
 
 class FixtureBusinessValueClient:
     def synthesize(self, task: str, payload: dict[str, Any], model: str, reasoning_effort: str) -> dict[str, Any]:
         del model, reasoning_effort
-        if task == "product_ontology":
+        if task in {"product_ontology", "product_ontology_repair"}:
             return self._product_ontology(payload)
         if task == "output_candidate":
             return self._output_candidate(payload)
@@ -276,6 +450,14 @@ class FixtureBusinessValueClient:
         if task == "packet":
             return self._packet(payload)
         return {}
+
+    def synthesize_batch(self, task: str, items: list[dict[str, Any]], model: str, reasoning_effort: str) -> dict[str, Any]:
+        return {
+            "items": [
+                {"id": item["id"], **self.synthesize(task, dict(item.get("payload") or {}), model, reasoning_effort)}
+                for item in items
+            ]
+        }
 
     def _first_card_text(self, payload: dict[str, Any]) -> str:
         cards = payload.get("evidence_cards") or payload.get("cards") or []
@@ -411,7 +593,7 @@ def business_value_client() -> OpenAIBusinessValueClient | FixtureBusinessValueC
 def synthesize_business_value(task: str, payload: dict[str, Any]) -> dict[str, Any]:
     config = BUSINESS_VALUE_CONFIG or default_business_value_config({})
     if not config.get("enabled", True):
-        raise SystemExit("business_value.enabled must remain true; generated intelligence requires GPT-5.5/xhigh synthesis.")
+        raise SystemExit("business_value.enabled must remain true; generated intelligence requires GPT-5.5/high synthesis.")
     return business_value_client().synthesize(
         task,
         payload,
@@ -420,15 +602,170 @@ def synthesize_business_value(task: str, payload: dict[str, Any]) -> dict[str, A
     )
 
 
+@dataclass(frozen=True)
+class BusinessValueSynthesisResult:
+    values: dict[str, dict[str, dict[str, Any]]]
+    inventory: dict[str, Any]
+
+
+def _truncate_clean_text(text: str, limit: int) -> str:
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if limit <= 0 or len(cleaned) <= limit:
+        return cleaned
+    wikilink_start = cleaned.rfind("[[", 0, limit)
+    wikilink_end = cleaned.rfind("]]", 0, limit)
+    if wikilink_start > wikilink_end:
+        limit = max(20, wikilink_start)
+    candidate = cleaned[:limit].rstrip()
+    sentence_boundary = max(candidate.rfind(". "), candidate.rfind("? "), candidate.rfind("! "))
+    if sentence_boundary >= max(40, int(limit * 0.55)):
+        candidate = candidate[: sentence_boundary + 1]
+    else:
+        word_boundary = candidate.rfind(" ")
+        if word_boundary >= max(20, int(limit * 0.65)):
+            candidate = candidate[:word_boundary]
+    return candidate.rstrip(" ,;:") + "..."
+
+
+def _clean_text(value: Any, limit: int = 500) -> str:
+    return _truncate_clean_text(re.sub(r"\s+", " ", str(value or "")).strip(), limit)
+
+
+def _structured_text(value: Any, *, preferred_keys: tuple[str, ...], limit: int = 500, list_separator: str = "; ") -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, list):
+        parts = [
+            _structured_text(item, preferred_keys=preferred_keys, limit=limit, list_separator=list_separator)
+            for item in value
+        ]
+        return _truncate_clean_text(list_separator.join(part for part in parts if part), limit)
+    if isinstance(value, dict):
+        if "level" in value and "rationale" in value:
+            return _truncate_clean_text(f"{value.get('level')}: {value.get('rationale')}", limit)
+        for key in preferred_keys:
+            candidate = value.get(key)
+            if candidate not in (None, "", [], {}):
+                return _structured_text(candidate, preferred_keys=preferred_keys, limit=limit, list_separator=list_separator)
+        parts: list[str] = []
+        for key in (
+            "name",
+            "title",
+            "problem",
+            "user_problem",
+            "business_value",
+            "success_metric",
+            "summary",
+            "text",
+            "rationale",
+            "impact",
+            "value",
+        ):
+            candidate = value.get(key)
+            if candidate not in (None, "", [], {}):
+                text = _structured_text(candidate, preferred_keys=preferred_keys, limit=limit, list_separator=list_separator)
+                if text and text not in parts:
+                    parts.append(text)
+            if len(parts) >= 2:
+                break
+        if parts:
+            return _truncate_clean_text(list_separator.join(parts), limit)
+        return ""
+    return _truncate_clean_text(str(value), limit)
+
+
+def _structured_markdown(value: Any, *, preferred_keys: tuple[str, ...], limit: int = 500) -> str:
+    if isinstance(value, list):
+        parts = [
+            _structured_text(item, preferred_keys=preferred_keys, limit=limit)
+            for item in value
+        ]
+        return "\n".join(f"- {part}" for part in parts if part)
+    return _structured_text(value, preferred_keys=preferred_keys, limit=limit)
+
+
+def _business_markdown_bullets(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return ["- Not synthesized."]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) > 1 and all(line.startswith("- ") for line in lines):
+        return lines
+    return [f"- {line[2:] if line.startswith('- ') else line}" for line in lines]
+
+
+def _business_text_field(synthesis: dict[str, Any], field: str, limit: int = 800) -> str:
+    return _structured_text(
+        synthesis.get(field),
+        preferred_keys=("summary", "purpose", "description", "value_proposition", "business_value", "text"),
+        limit=limit,
+    )
+
+
+def _business_int_field(synthesis: dict[str, Any], field: str, default: int = 0) -> int:
+    value = synthesis.get(field)
+    if isinstance(value, dict):
+        for key in ("score", "value", "rating", "number"):
+            if value.get(key) not in (None, ""):
+                value = value[key]
+                break
+    try:
+        parsed = int(value if value not in (None, "") else default)
+    except (TypeError, ValueError):
+        return default
+    if parsed > 10 and parsed <= 100:
+        parsed = round(parsed / 10)
+    return max(0, min(10, parsed))
+
+
+def _normalize_business_value_score(value: Any) -> int:
+    return _business_int_field({"value_score": value}, "value_score")
+
+
 def normalized_business_value_fields(synthesis: dict[str, Any], *, require_user_problem: bool = False) -> dict[str, Any]:
+    target_persona_raw = synthesis.get("target_persona")
+    user_problem_raw = synthesis.get("user_problem")
+    business_value_raw = synthesis.get("business_value")
+    success_metric_raw = synthesis.get("success_metric")
+    evidence_confidence_raw = synthesis.get("evidence_confidence") or "medium"
+    implementation_leverage_raw = synthesis.get("implementation_leverage")
     fields = {
-        "target_persona": _compact_text(synthesis.get("target_persona") or "Product and engineering teams", 180),
-        "user_problem": _compact_text(synthesis.get("user_problem"), 500),
-        "business_value": _compact_text(synthesis.get("business_value"), 500),
-        "success_metric": _compact_text(synthesis.get("success_metric"), 500),
-        "value_score": int(synthesis.get("value_score") or 0),
-        "evidence_confidence": _compact_text(synthesis.get("evidence_confidence") or "medium", 80),
-        "implementation_leverage": _compact_text(synthesis.get("implementation_leverage"), 500),
+        "target_persona": _structured_text(
+            target_persona_raw or "Product and engineering teams",
+            preferred_keys=("name", "persona", "target_persona", "title", "text", "summary"),
+            limit=180,
+        ),
+        "user_problem": _structured_text(
+            user_problem_raw,
+            preferred_keys=("problem", "user_problem", "pain", "need", "summary", "text", "description"),
+            limit=500,
+        ),
+        "business_value": _structured_text(
+            business_value_raw,
+            preferred_keys=("business_value", "value", "outcome", "summary", "text", "description"),
+            limit=500,
+        ),
+        "success_metric": _structured_text(
+            success_metric_raw,
+            preferred_keys=("success_metric", "metric", "measure", "kpi", "summary", "text", "value"),
+            limit=500,
+        ),
+        "success_metric_markdown": _structured_markdown(
+            success_metric_raw,
+            preferred_keys=("success_metric", "metric", "measure", "kpi", "summary", "text", "value"),
+            limit=500,
+        ),
+        "value_score": _business_int_field(synthesis, "value_score"),
+        "evidence_confidence": _structured_text(
+            evidence_confidence_raw,
+            preferred_keys=("evidence_confidence", "confidence", "level", "summary", "text", "rationale"),
+            limit=120,
+        ),
+        "implementation_leverage": _structured_text(
+            implementation_leverage_raw,
+            preferred_keys=("implementation_leverage", "leverage", "summary", "text", "description"),
+            limit=500,
+        ),
     }
     if require_user_problem and not fields["user_problem"]:
         raise SystemExit("GPT business-value synthesis did not return user_problem for an output candidate.")
@@ -436,8 +773,268 @@ def normalized_business_value_fields(synthesis: dict[str, Any], *, require_user_
         raise SystemExit("GPT business-value synthesis did not return business_value.")
     if not fields["success_metric"]:
         raise SystemExit("GPT business-value synthesis did not return success_metric.")
-    fields["value_score"] = max(0, min(10, fields["value_score"]))
     return fields
+
+
+def business_value_cache_key(task: str, entity_id: str, payload: dict[str, Any], config: dict[str, Any]) -> str:
+    key_payload = {
+        "task": task,
+        "entity_id": entity_id,
+        "prompt_version": BUSINESS_VALUE_BATCH_PROMPT_VERSION,
+        "output_contract_version": BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION,
+        "model": config["llm_model"],
+        "reasoning_effort": config["reasoning_effort"],
+        "payload_hash": incremental_cache.stable_hash(payload),
+    }
+    return incremental_cache.stable_hash(key_payload)
+
+
+def _business_value_cache_input(task: str, entity_id: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task": task,
+        "entity_id": entity_id,
+        "prompt_version": BUSINESS_VALUE_BATCH_PROMPT_VERSION,
+        "output_contract_version": BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION,
+        "model": config["llm_model"],
+        "reasoning_effort": config["reasoning_effort"],
+        "payload": payload,
+    }
+
+
+def _business_value_cache_dependencies(task: str, entity_id: str, payload: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "task": task,
+        "entity_id": entity_id,
+        "payload_hash": incremental_cache.stable_hash(payload),
+        "prompt_version": BUSINESS_VALUE_BATCH_PROMPT_VERSION,
+        "output_contract_version": BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION,
+        "model": config["llm_model"],
+        "reasoning_effort": config["reasoning_effort"],
+    }
+
+
+def _chunked(items: list[dict[str, Any]], size: int) -> list[list[dict[str, Any]]]:
+    return [items[index : index + size] for index in range(0, len(items), size)]
+
+
+def new_business_value_synthesis_inventory(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "generated_at": DATE,
+        "prompt_version": BUSINESS_VALUE_BATCH_PROMPT_VERSION,
+        "output_contract_version": BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION,
+        "model": config["llm_model"],
+        "reasoning_effort": config["reasoning_effort"],
+        "worker_count": int(config.get("synthesis_workers", 24) or 24),
+        "batch_size": int(config.get("batch_size", 12) or 12),
+        "cache_enabled": bool(config.get("cache_enabled", True)),
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "batch_count": 0,
+        "gpt_call_count": 0,
+        "repair_count": 0,
+        "failures": 0,
+        "tasks": {},
+    }
+
+
+def merge_business_value_synthesis_inventory(base: dict[str, Any], other: dict[str, Any]) -> dict[str, Any]:
+    for key in ("cache_hits", "cache_misses", "batch_count", "gpt_call_count", "repair_count", "failures"):
+        base[key] = int(base.get(key, 0) or 0) + int(other.get(key, 0) or 0)
+    base["elapsed_seconds"] = round(float(base.get("elapsed_seconds", 0) or 0) + float(other.get("elapsed_seconds", 0) or 0), 4)
+    base_tasks = base.setdefault("tasks", {})
+    for task, task_stats in (other.get("tasks") or {}).items():
+        merged = base_tasks.setdefault(task, {})
+        for key, value in task_stats.items():
+            if isinstance(value, (int, float)):
+                merged[key] = int(merged.get(key, 0) or 0) + int(value)
+            else:
+                merged[key] = value
+    return base
+
+
+def synthesize_single_business_value_cached(
+    task: str,
+    entity_id: str,
+    payload: dict[str, Any],
+    *,
+    cache: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+    client: Any | None = None,
+    inventory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    active_config = config or (BUSINESS_VALUE_CONFIG or default_business_value_config({}))
+    active_client = client or business_value_client()
+    cache_enabled = bool(active_config.get("cache_enabled", True)) and cache is not None
+    task_stats = None
+    if inventory is not None:
+        task_stats = inventory.setdefault("tasks", {}).setdefault(task, {"input_count": 0, "cache_hits": 0, "cache_misses": 0, "batch_count": 0})
+        task_stats["input_count"] = int(task_stats.get("input_count", 0) or 0) + 1
+    cache_key = business_value_cache_key(task, entity_id, payload, active_config)
+    input_payload = _business_value_cache_input(task, entity_id, payload, active_config)
+    dependencies = _business_value_cache_dependencies(task, entity_id, payload, active_config)
+    cached = incremental_cache.lookup(cache, BUSINESS_VALUE_CACHE_NAMESPACE, cache_key, input_payload, dependencies=dependencies) if cache_enabled else None
+    if cached is not None:
+        if inventory is not None:
+            inventory["cache_hits"] = int(inventory.get("cache_hits", 0) or 0) + 1
+            if task_stats is not None:
+                task_stats["cache_hits"] = int(task_stats.get("cache_hits", 0) or 0) + 1
+        return dict(cached.value)
+    if inventory is not None:
+        inventory["cache_misses"] = int(inventory.get("cache_misses", 0) or 0) + 1
+        inventory["gpt_call_count"] = int(inventory.get("gpt_call_count", 0) or 0) + 1
+        if task_stats is not None:
+            task_stats["cache_misses"] = int(task_stats.get("cache_misses", 0) or 0) + 1
+            task_stats["batch_count"] = int(task_stats.get("batch_count", 0) or 0) + 1
+    if client is None and cache is None:
+        value = synthesize_business_value(task, payload)
+    else:
+        value = active_client.synthesize(task, payload, str(active_config["llm_model"]), str(active_config["reasoning_effort"]))
+    if cache_enabled:
+        incremental_cache.store(cache, BUSINESS_VALUE_CACHE_NAMESPACE, cache_key, input_payload, value, dependencies=dependencies)
+    return value
+
+
+def _normalize_batch_items(task: str, requested_items: list[dict[str, Any]], response: dict[str, Any], config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_items = response.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError("batch response did not include an items array")
+    by_id = {str(item.get("id")): item for item in raw_items if isinstance(item, dict) and item.get("id")}
+    missing = [str(item["id"]) for item in requested_items if str(item["id"]) not in by_id]
+    if missing:
+        raise ValueError(f"batch response missing ids: {', '.join(missing)}")
+    require_user_problem = task == "output_candidate" and bool(config.get("require_user_problem_for_output", True))
+    normalized: dict[str, dict[str, Any]] = {}
+    for item in requested_items:
+        entity_id = str(item["id"])
+        normalized[entity_id] = normalized_business_value_fields(by_id[entity_id], require_user_problem=require_user_problem)
+    return normalized
+
+
+def _synthesize_business_value_batch_with_repair(
+    *,
+    task: str,
+    items: list[dict[str, Any]],
+    config: dict[str, Any],
+    client: Any,
+    inventory: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    attempts = max(1, int(config.get("max_repair_attempts", 1) or 1) + 1)
+    last_error: Exception | None = None
+    for _attempt in range(attempts):
+        inventory["gpt_call_count"] += 1
+        try:
+            response = client.synthesize_batch(task, items, str(config["llm_model"]), str(config["reasoning_effort"]))
+            return _normalize_batch_items(task, items, response, config)
+        except Exception as exc:  # repair path surfaces final failure with task context
+            last_error = exc
+    if len(items) > 1:
+        inventory["repair_count"] += 1
+        repaired: dict[str, dict[str, Any]] = {}
+        for item in items:
+            repaired.update(
+                _synthesize_business_value_batch_with_repair(
+                    task=task,
+                    items=[item],
+                    config=config,
+                    client=client,
+                    inventory=inventory,
+                )
+            )
+        return repaired
+    inventory["failures"] += 1
+    raise SystemExit(f"GPT business-value synthesis failed for {task}:{items[0].get('id')}: {last_error}") from last_error
+
+
+def synthesize_business_value_entities(
+    task_items: dict[str, list[dict[str, Any]]],
+    *,
+    cache: dict[str, Any] | None,
+    config: dict[str, Any] | None = None,
+    client: Any | None = None,
+    progress_callback: Any | None = None,
+) -> BusinessValueSynthesisResult:
+    active_config = config or (BUSINESS_VALUE_CONFIG or default_business_value_config({}))
+    if not active_config.get("enabled", True):
+        raise SystemExit("business_value.enabled must remain true; generated intelligence requires GPT-5.5/high synthesis.")
+    active_client = client or business_value_client()
+    batch_size = max(1, int(active_config.get("batch_size", 12) or 12))
+    workers = max(1, int(active_config.get("synthesis_workers", 24) or 24))
+    cache_enabled = bool(active_config.get("cache_enabled", True)) and cache is not None
+    inventory: dict[str, Any] = new_business_value_synthesis_inventory(active_config)
+    inventory["worker_count"] = workers
+    inventory["batch_size"] = batch_size
+    inventory["cache_enabled"] = cache_enabled
+    started = time.perf_counter()
+    values: dict[str, dict[str, dict[str, Any]]] = {task: {} for task in task_items}
+    misses: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    total_items = sum(len(items) for items in task_items.values())
+    completed_items = 0
+
+    for task, items in sorted(task_items.items()):
+        task_stats = inventory["tasks"].setdefault(task, {"input_count": len(items), "cache_hits": 0, "cache_misses": 0, "batch_count": 0})
+        for item in items:
+            entity_id = str(item["id"])
+            payload = dict(item.get("payload") or {})
+            cache_key = business_value_cache_key(task, entity_id, payload, active_config)
+            input_payload = _business_value_cache_input(task, entity_id, payload, active_config)
+            dependencies = _business_value_cache_dependencies(task, entity_id, payload, active_config)
+            cached = incremental_cache.lookup(cache, BUSINESS_VALUE_CACHE_NAMESPACE, cache_key, input_payload, dependencies=dependencies) if cache_enabled else None
+            if cached is not None:
+                values[task][entity_id] = dict(cached.value)
+                inventory["cache_hits"] += 1
+                task_stats["cache_hits"] += 1
+                completed_items += 1
+                if progress_callback is not None:
+                    progress_callback(completed_items, max(1, total_items))
+            else:
+                misses[task].append({**item, "id": entity_id, "payload": payload, "cache_key": cache_key, "cache_input": input_payload, "cache_dependencies": dependencies})
+                inventory["cache_misses"] += 1
+                task_stats["cache_misses"] += 1
+
+    batches: list[tuple[str, list[dict[str, Any]]]] = []
+    for task, items in sorted(misses.items()):
+        for batch in _chunked(items, batch_size):
+            batches.append((task, batch))
+            inventory["batch_count"] += 1
+            inventory["tasks"][task]["batch_count"] += 1
+
+    def run_batch(task: str, batch: list[dict[str, Any]]) -> tuple[str, dict[str, dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+        batch_inventory = new_business_value_synthesis_inventory(active_config)
+        normalized = _synthesize_business_value_batch_with_repair(
+            task=task,
+            items=batch,
+            config=active_config,
+            client=active_client,
+            inventory=batch_inventory,
+        )
+        return task, normalized, batch, batch_inventory
+
+    if batches:
+        with ThreadPoolExecutor(max_workers=min(workers, len(batches)), thread_name_prefix="basb-business-value") as executor:
+            futures = [executor.submit(run_batch, task, batch) for task, batch in batches]
+            for future in as_completed(futures):
+                task, normalized_items, batch, batch_inventory = future.result()
+                merge_business_value_synthesis_inventory(inventory, batch_inventory)
+                for item in batch:
+                    entity_id = str(item["id"])
+                    normalized = normalized_items[entity_id]
+                    values[task][entity_id] = normalized
+                    if cache_enabled:
+                        incremental_cache.store(
+                            cache,
+                            BUSINESS_VALUE_CACHE_NAMESPACE,
+                            item["cache_key"],
+                            item["cache_input"],
+                            normalized,
+                            dependencies=item["cache_dependencies"],
+                        )
+                    completed_items += 1
+                    if progress_callback is not None:
+                        progress_callback(completed_items, max(1, total_items))
+
+    inventory["elapsed_seconds"] = round(time.perf_counter() - started, 4)
+    return BusinessValueSynthesisResult(values=values, inventory=inventory)
 
 
 def load_product_profile(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -2650,24 +3247,13 @@ def build_capability_note(
     code_hits: list[dict[str, Any]],
     code_reference_links: list[str],
     link_records: list[dict[str, Any]],
+    business_value: dict[str, Any] | None = None,
 ) -> str:
     status_counts = Counter(record["status"] for record in link_records)
     domain_counts = Counter(record["domain"] for record in link_records)
-    business_value = normalized_business_value_fields(
-        synthesize_business_value(
-            "capability",
-            {
-                "title": capability["title"],
-                "key": capability["key"],
-                "description": capability.get("description", ""),
-                "support_links": support_links[:20],
-                "wiki_links": wiki_links[:20],
-                "repo_note_links": repo_note_links[:12],
-                "code_reference_links": code_reference_links[:20],
-                "linked_domains": dict(domain_counts),
-            },
-        )
-    )
+    if business_value is None:
+        raise SystemExit("Capability note rendering requires precomputed business-value synthesis.")
+    business_value = normalized_business_value_fields(business_value)
     lines = [
         frontmatter(
             {
@@ -2709,7 +3295,7 @@ def build_capability_note(
     lines.extend(["", "## Who benefits", "", f"- {business_value['target_persona']}"])
     lines.extend(["", "## User problem", "", f"- {business_value['user_problem']}"])
     lines.extend(["", "## Business value", "", f"- {business_value['business_value']}"])
-    lines.extend(["", "## Success signals", "", f"- {business_value['success_metric']}"])
+    lines.extend(["", "## Success signals", "", *_business_markdown_bullets(business_value.get("success_metric_markdown") or business_value["success_metric"])])
     lines.extend(["", "## Implementation leverage", "", f"- {business_value['implementation_leverage']}"])
     lines.extend(["", "## Use in current project", ""])
     if code_reference_links:
@@ -2843,6 +3429,7 @@ def build_intermediate_packet_note(
     evidence_score: int | None = None,
     output_candidate_links: list[str] | None = None,
     shard_insight_links: list[str] | None = None,
+    business_value: dict[str, Any] | None = None,
 ) -> str:
     conflict_links = conflict_links or []
     output_candidate_links = output_candidate_links or []
@@ -2855,22 +3442,9 @@ def build_intermediate_packet_note(
         stale_doc_count=stale_doc_count,
         shard_insight_count=len(shard_insight_links),
     )
-    business_value = normalized_business_value_fields(
-        synthesize_business_value(
-            "packet",
-            {
-                "title": capability["title"],
-                "description": capability.get("description", ""),
-                "packet_kind": packet_kind,
-                "evidence_score": score,
-                "support_links": support_links[:20],
-                "wiki_links": wiki_links[:20],
-                "code_reference_links": code_reference_links[:20],
-                "conflict_links": conflict_links[:20],
-                "shard_insight_links": shard_insight_links[:12],
-            },
-        )
-    )
+    if business_value is None:
+        raise SystemExit("Intermediate packet note rendering requires precomputed business-value synthesis.")
+    business_value = normalized_business_value_fields(business_value)
     lines = [
         frontmatter(
             {
@@ -3081,6 +3655,61 @@ def output_candidate_business_payload(packet: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def capability_business_payload(
+    *,
+    capability: dict[str, Any],
+    support_links: list[str],
+    wiki_links: list[str],
+    repo_note_links: list[str],
+    code_reference_links: list[str],
+    linked_domains: dict[str, int],
+) -> dict[str, Any]:
+    return {
+        "title": capability["title"],
+        "key": capability["key"],
+        "description": capability.get("description", ""),
+        "support_links": support_links[:20],
+        "wiki_links": wiki_links[:20],
+        "repo_note_links": repo_note_links[:12],
+        "code_reference_links": code_reference_links[:20],
+        "linked_domains": linked_domains,
+    }
+
+
+def packet_business_payload_from_spec(spec: dict[str, Any], packet: dict[str, Any]) -> dict[str, Any]:
+    if spec["kind"] == "semantic":
+        cluster = spec["cluster"]
+        cards = cluster.get("cards", [])
+        evidence_links = unique_lines(
+            [link for card in cards for link in card.get("source_links", [])] + [card.get("link", "") for card in cards],
+            60,
+        )
+        code_reference_links = unique_lines([link for card in cards for link in card.get("code_reference_links", [])], 60)
+        code_terms = unique_lines([term for card in cards for term in card.get("code_terms", [])], 80)
+        return {
+            "title": cluster.get("theme", "Semantic Evidence Cluster"),
+            "description": cluster.get("llm_summary") or cluster.get("why_this_cluster_exists") or "",
+            "packet_kind": "semantic-cluster",
+            "evidence_score": cluster.get("evidence_score", packet.get("evidence_score", 0)),
+            "evidence_links": evidence_links[:30],
+            "code_reference_links": code_reference_links[:20],
+            "code_terms": code_terms[:20],
+            "shard_insight_links": cluster.get("shard_insight_links", [])[:12],
+        }
+    capability = spec["capability"]
+    return {
+        "title": capability["title"],
+        "description": capability.get("description", ""),
+        "packet_kind": spec["packet_kind"],
+        "evidence_score": spec["evidence_score"],
+        "support_links": spec["support_links"][:20],
+        "wiki_links": spec["wiki_links"][:20],
+        "code_reference_links": spec["code_reference_links"][:20],
+        "conflict_links": spec["conflict_links"][:20],
+        "shard_insight_links": spec.get("shard_insight_links", [])[:12],
+    }
+
+
 def build_output_candidate_note(packet: dict[str, Any], output_synthesis: dict[str, Any] | None = None) -> str:
     output_kind = infer_output_kind(packet)
     title = f"{packet['title']} Output Candidate"
@@ -3095,7 +3724,8 @@ def build_output_candidate_note(packet: dict[str, Any], output_synthesis: dict[s
         ],
         40,
     )
-    output_synthesis = output_synthesis or synthesize_business_value("output_candidate", output_candidate_business_payload(packet))
+    if output_synthesis is None:
+        raise SystemExit("Output candidate note rendering requires precomputed business-value synthesis.")
     business_value = normalized_business_value_fields(
         output_synthesis,
         require_user_problem=bool((BUSINESS_VALUE_CONFIG or default_business_value_config({})).get("require_user_problem_for_output", True)),
@@ -3151,7 +3781,7 @@ def build_output_candidate_note(packet: dict[str, Any], output_synthesis: dict[s
         "",
         "## Success metric",
         "",
-        f"- {business_value['success_metric']}",
+        *_business_markdown_bullets(business_value.get("success_metric_markdown") or business_value["success_metric"]),
         "",
         "## Why now",
         "",
@@ -3195,9 +3825,9 @@ def build_output_candidate_note(packet: dict[str, Any], output_synthesis: dict[s
     return "\n".join(lines)
 
 
-def build_packet_note_from_spec(spec: dict[str, Any], output_candidate_links: list[str]) -> str:
+def build_packet_note_from_spec(spec: dict[str, Any], output_candidate_links: list[str], business_value: dict[str, Any] | None = None) -> str:
     if spec["kind"] == "semantic":
-        return build_semantic_packet_note(spec["cluster"], output_candidate_links=output_candidate_links)
+        return build_semantic_packet_note(spec["cluster"], output_candidate_links=output_candidate_links, business_value=business_value)
     return build_intermediate_packet_note(
         capability=spec["capability"],
         support_links=spec["support_links"],
@@ -3210,6 +3840,7 @@ def build_packet_note_from_spec(spec: dict[str, Any], output_candidate_links: li
         evidence_score=spec["evidence_score"],
         output_candidate_links=output_candidate_links,
         shard_insight_links=spec.get("shard_insight_links", []),
+        business_value=business_value,
     )
 
 
@@ -3649,7 +4280,11 @@ def build_semantic_evidence_cards(
     return cards
 
 
-def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: list[str] | None = None) -> str:
+def build_semantic_packet_note(
+    cluster: dict[str, Any],
+    output_candidate_links: list[str] | None = None,
+    business_value: dict[str, Any] | None = None,
+) -> str:
     cards = cluster.get("cards", [])
     evidence_links = unique_lines(
         [link for card in cards for link in card.get("source_links", [])] +
@@ -3669,21 +4304,9 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
         [str(link) for link in cluster.get("shard_insight_links", []) if str(link).strip()],
         12,
     )
-    business_value = normalized_business_value_fields(
-        synthesize_business_value(
-            "packet",
-            {
-                "title": cluster.get("theme", "Semantic Evidence Cluster"),
-                "description": cluster.get("llm_summary") or cluster.get("why_this_cluster_exists") or "",
-                "packet_kind": "semantic-cluster",
-                "evidence_score": cluster.get("evidence_score", 0),
-                "evidence_links": evidence_links[:30],
-                "code_reference_links": code_reference_links[:20],
-                "code_terms": code_terms[:20],
-                "shard_insight_links": shard_insight_links[:12],
-            },
-        )
-    )
+    if business_value is None:
+        raise SystemExit("Semantic packet note rendering requires precomputed business-value synthesis.")
+    business_value = normalized_business_value_fields(business_value)
     lines = [
         frontmatter(
             {
@@ -3900,20 +4523,30 @@ def build_product_ontology_note(product_ontology: dict[str, Any], business_repor
     for persona in product_ontology.get("target_personas", [])[:12]:
         if not isinstance(persona, dict):
             continue
-        lines.append(f"- **{persona.get('name', 'Persona')}**: {persona.get('problem', '')} Outcome: {persona.get('desired_outcome', '')}")
+        name = _structured_text(persona.get("name") or "Persona", preferred_keys=("name", "title", "text"), limit=120)
+        problem = _structured_text(persona.get("problem"), preferred_keys=("problem", "summary", "text"), limit=240)
+        outcome = _structured_text(persona.get("desired_outcome"), preferred_keys=("desired_outcome", "outcome", "business_value", "summary", "text"), limit=240)
+        lines.append(f"- **{name or 'Persona'}**: {problem} Outcome: {outcome}")
     lines.extend(["", "## Jobs to be done", ""])
     for job in product_ontology.get("jobs_to_be_done", [])[:12]:
         if isinstance(job, dict):
-            lines.append(f"- **{job.get('job', 'Job')}**: {job.get('outcome', '')}")
+            job_title = _structured_text(job.get("job") or "Job", preferred_keys=("job", "title", "text"), limit=160)
+            outcome = _structured_text(job.get("outcome"), preferred_keys=("outcome", "business_value", "summary", "text"), limit=260)
+            lines.append(f"- **{job_title or 'Job'}**: {outcome}")
     lines.extend(["", "## Business value drivers", ""])
     for driver in product_ontology.get("business_value_drivers", [])[:12]:
         if isinstance(driver, dict):
-            lines.append(f"- **{driver.get('driver', 'Value driver')}**: {driver.get('business_value', '')} Metric: {driver.get('success_metric', '')}")
+            driver_name = _structured_text(driver.get("driver") or "Value driver", preferred_keys=("driver", "name", "title", "text"), limit=160)
+            value = _structured_text(driver.get("business_value"), preferred_keys=("business_value", "value", "summary", "text"), limit=260)
+            metric = _structured_text(driver.get("success_metric"), preferred_keys=("success_metric", "metric", "summary", "text"), limit=220)
+            lines.append(f"- **{driver_name or 'Value driver'}**: {value} Metric: {metric}")
     lines.extend(["", "## Capabilities", ""])
     for capability in product_ontology.get("capabilities_v2", [])[:20]:
         if isinstance(capability, dict):
+            title = _structured_text(capability.get("title") or "Capability", preferred_keys=("title", "name", "text"), limit=160)
+            value = _structured_text(capability.get("business_value"), preferred_keys=("business_value", "value", "summary", "text"), limit=260)
             lines.append(
-                f"- **{capability.get('title', 'Capability')}**: {capability.get('business_value', '')} "
+                f"- **{title or 'Capability'}**: {value} "
                 f"Score: `{capability.get('value_score', 0)}/10`"
             )
     lines.extend(
@@ -4356,6 +4989,8 @@ def build_product_ontology(
     code_intel: dict[str, Any],
     external_links: list[dict[str, Any]],
     docx_extracts: list[dict[str, Any]],
+    business_cache: dict[str, Any] | None = None,
+    business_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     product = manifest.get("product") or {}
     product_name = str(product.get("name") or PRODUCT_CONTEXT["name"])
@@ -4381,29 +5016,75 @@ def build_product_ontology(
         )
         for item in files[:12]
     ]
-    synthesis = synthesize_business_value(
-        "product_ontology",
-        {
-            "product": {"name": product_name, "slug": product_slug},
-            "evidence_cards": evidence_cards,
-            "capability_rows": capability_rows[:30],
-            "code_summary": code_intel.get("summary", {}),
-            "code_graph": {
-                "routes": [edge.get("to", "") for edge in graph.get("routes", [])[:80] if edge.get("to")],
-                "schemas": [edge.get("to", "") for edge in graph.get("schemas", [])[:80] if edge.get("to")],
-                "tests": [edge.get("to", "") for edge in graph.get("tests", [])[:80] if edge.get("to")],
-            },
+    ontology_payload = {
+        "product": {"name": product_name, "slug": product_slug},
+        "evidence_cards": evidence_cards,
+        "capability_rows": capability_rows[:30],
+        "code_summary": code_intel.get("summary", {}),
+        "code_graph": {
+            "routes": [edge.get("to", "") for edge in graph.get("routes", [])[:80] if edge.get("to")],
+            "schemas": [edge.get("to", "") for edge in graph.get("schemas", [])[:80] if edge.get("to")],
+            "tests": [edge.get("to", "") for edge in graph.get("tests", [])[:80] if edge.get("to")],
         },
+    }
+    synthesis = synthesize_single_business_value_cached(
+        "product_ontology",
+        "product-ontology",
+        ontology_payload,
+        cache=business_cache,
+        config=BUSINESS_VALUE_CONFIG or default_business_value_config({}),
+        inventory=business_inventory,
     )
-    purpose = _compact_text(synthesis.get("product_purpose"), 800)
-    if _looks_like_placeholder_intelligence(purpose):
-        raise SystemExit("GPT Product Ontology v2 synthesis returned an unusable product_purpose.")
+    purpose = _business_text_field(synthesis, "product_purpose", 800)
     target_personas = [item for item in synthesis.get("target_personas", []) if isinstance(item, dict)]
-    jobs_to_be_done = [item for item in synthesis.get("jobs_to_be_done", []) if isinstance(item, dict)]
     business_value_drivers = [item for item in synthesis.get("business_value_drivers", []) if isinstance(item, dict)]
     capabilities_v2 = [item for item in synthesis.get("capabilities", []) if isinstance(item, dict)]
+    validation_errors = []
+    if _looks_like_placeholder_intelligence(purpose):
+        validation_errors.append("product_purpose must be a concrete product purpose, not HTML, image markdown, a title, or a template.")
+    if not target_personas:
+        validation_errors.append("target_personas must include cited persona objects.")
+    if not business_value_drivers:
+        validation_errors.append("business_value_drivers must include cited business-value objects.")
+    if not capabilities_v2:
+        validation_errors.append("capabilities must include cited capability objects.")
+    if validation_errors:
+        repair_payload = {
+            **ontology_payload,
+            "previous_synthesis": synthesis,
+            "validation_errors": validation_errors,
+            "required_json_fields": [
+                "product_purpose",
+                "target_personas",
+                "jobs_to_be_done",
+                "business_value_drivers",
+                "capabilities",
+                "workflows",
+                "risks_and_opportunities",
+                "ontology_confidence",
+            ],
+        }
+        repair = synthesize_single_business_value_cached(
+            "product_ontology_repair",
+            f"product-ontology-repair-{incremental_cache.stable_hash(validation_errors)}",
+            repair_payload,
+            cache=business_cache,
+            config=BUSINESS_VALUE_CONFIG or default_business_value_config({}),
+            inventory=business_inventory,
+        )
+        if isinstance(repair, dict):
+            synthesis = {**synthesis, **{key: value for key, value in repair.items() if value not in (None, "", [], {})}}
+        purpose = _business_text_field(synthesis, "product_purpose", 800)
+        target_personas = [item for item in synthesis.get("target_personas", []) if isinstance(item, dict)]
+        business_value_drivers = [item for item in synthesis.get("business_value_drivers", []) if isinstance(item, dict)]
+        capabilities_v2 = [item for item in synthesis.get("capabilities", []) if isinstance(item, dict)]
+    if _looks_like_placeholder_intelligence(purpose):
+        raise SystemExit("GPT Product Ontology v2 synthesis returned an unusable product_purpose.")
+    jobs_to_be_done = [item for item in synthesis.get("jobs_to_be_done", []) if isinstance(item, dict)]
     workflows_v2 = [item for item in synthesis.get("workflows", []) if isinstance(item, dict)]
     risks_and_opportunities = [item for item in synthesis.get("risks_and_opportunities", []) if isinstance(item, dict)]
+    for capability in capabilities_v2:
+        capability["value_score"] = _normalize_business_value_score(capability.get("value_score"))
     if not target_personas:
         raise SystemExit("GPT Product Ontology v2 synthesis did not return target_personas.")
     if not business_value_drivers:
@@ -5249,6 +5930,7 @@ def main() -> None:
     stage_started = time.perf_counter()
     progress.record("packets_outputs", "running", completed_units=0, total_units=10)
     capability_rows: list[dict[str, Any]] = []
+    capability_note_inputs: list[dict[str, Any]] = []
     packet_records: list[dict[str, Any]] = []
     packet_links: list[str] = []
     packet_write_specs: dict[str, dict[str, Any]] = {}
@@ -5300,11 +5982,9 @@ def main() -> None:
             stale_doc_count=stale_doc_count,
             shard_insight_count=len(shard_matches),
         )
-        add_note_render(
-            capability_dir / f"{cap_stem}.md",
-            namespace="note_render.capability",
-            key=capability["key"],
-            payload={
+        capability_note_inputs.append(
+            {
+                "path": capability_dir / f"{cap_stem}.md",
                 "capability": capability,
                 "support_links": support_links,
                 "wiki_links": wiki_links,
@@ -5312,17 +5992,7 @@ def main() -> None:
                 "code_hits": code_hits,
                 "code_reference_links": code_reference_links,
                 "link_records": capability_link_records.get(capability["key"], []),
-            },
-            renderer=lambda capability=capability, support_links=support_links, wiki_links=wiki_links, repo_note_links=repo_note_links, code_hits=code_hits, code_reference_links=code_reference_links: build_capability_note(
-                capability=capability,
-                support_links=support_links,
-                wiki_links=wiki_links,
-                repo_note_links=repo_note_links,
-                code_hits=code_hits,
-                code_reference_links=code_reference_links,
-                link_records=capability_link_records.get(capability["key"], []),
-            ),
-            generated=True,
+            }
         )
         packet_stem = safe_filename(f"Packet - {capability['title']}")
         packet_link = note_link(packet_stem)
@@ -5370,6 +6040,18 @@ def main() -> None:
             }
         )
 
+    business_stage_started = time.perf_counter()
+    business_config = BUSINESS_VALUE_CONFIG or default_business_value_config({})
+    business_inventory = new_business_value_synthesis_inventory(business_config)
+    planned_business_units = max(1, len(capability_note_inputs) + len(packet_records) + min(12, len(packet_records)) + 1)
+    progress.record(
+        "business_value_synthesis",
+        "running",
+        completed_units=0,
+        total_units=planned_business_units,
+        synthesis_workers=business_config["synthesis_workers"],
+        batch_size=business_config["batch_size"],
+    )
     product_ontology = build_product_ontology(
         manifest=manifest,
         support_records=support_records,
@@ -5379,6 +6061,8 @@ def main() -> None:
         code_intel=code_intel,
         external_links=external_links,
         docx_extracts=docx_extracts,
+        business_cache=render_cache,
+        business_inventory=business_inventory,
     )
     ontology_capabilities = {
         str(item.get("title") or "").casefold(): item
@@ -5389,14 +6073,20 @@ def main() -> None:
         enriched = ontology_capabilities.get(str(row.get("title") or "").casefold()) or {}
         row.update(
             {
-                "target_persona": enriched.get("target_persona") or "",
-                "user_problem": enriched.get("user_problem") or "",
-                "business_value": enriched.get("business_value") or "",
-                "success_metric": "; ".join(str(item) for item in enriched.get("success_metrics", [])[:2])
-                if isinstance(enriched.get("success_metrics"), list)
-                else str(enriched.get("success_metric") or ""),
+                "target_persona": _structured_text(enriched.get("target_persona"), preferred_keys=("name", "persona", "target_persona", "title", "text"), limit=180),
+                "user_problem": _structured_text(enriched.get("user_problem"), preferred_keys=("problem", "user_problem", "summary", "text"), limit=500),
+                "business_value": _structured_text(enriched.get("business_value"), preferred_keys=("business_value", "value", "summary", "text"), limit=500),
+                "success_metric": _structured_text(
+                    enriched.get("success_metrics") or enriched.get("success_metric"),
+                    preferred_keys=("success_metric", "metric", "summary", "text", "value"),
+                    limit=500,
+                ),
                 "value_score": int(enriched.get("value_score") or 0),
-                "evidence_confidence": enriched.get("evidence_confidence") or enriched.get("confidence") or "",
+                "evidence_confidence": _structured_text(
+                    enriched.get("evidence_confidence") or enriched.get("confidence"),
+                    preferred_keys=("evidence_confidence", "confidence", "level", "summary", "text", "rationale"),
+                    limit=120,
+                ),
             }
         )
     write_json(paths.json_dir / "product_ontology.json", product_ontology)
@@ -5588,23 +6278,135 @@ def main() -> None:
         packet_records.append(packet_record)
         packet_links.append(packet_link)
 
+    selected_output_packets = select_output_candidates(packet_records)
+    progress.record(
+        "packets_outputs",
+        "completed",
+        completed_units=max(1, len(packet_records) + len(selected_output_packets)),
+        total_units=max(1, len(packet_records) + len(selected_output_packets)),
+        intermediate_packets=len(packet_records),
+        output_candidates=len(selected_output_packets),
+        shard_linked_packets=sum(1 for packet in packet_records if packet.get("shard_insight_count", 0)),
+    )
+
+    business_task_items: dict[str, list[dict[str, Any]]] = {
+        "capability": [],
+        "packet": [],
+        "output_candidate": [],
+    }
+    for item in capability_note_inputs:
+        domain_counts = Counter(record["domain"] for record in item["link_records"])
+        business_task_items["capability"].append(
+            {
+                "id": item["capability"]["key"],
+                "payload": capability_business_payload(
+                    capability=item["capability"],
+                    support_links=item["support_links"],
+                    wiki_links=item["wiki_links"],
+                    repo_note_links=item["repo_note_links"],
+                    code_reference_links=item["code_reference_links"],
+                    linked_domains=dict(domain_counts),
+                ),
+            }
+        )
+    for packet in packet_records:
+        spec = packet_write_specs.get(packet["stem"])
+        if spec:
+            business_task_items["packet"].append(
+                {
+                    "id": packet["stem"],
+                    "payload": packet_business_payload_from_spec(spec, packet),
+                }
+            )
+    for packet in selected_output_packets:
+        output_stem = stem_for_output_candidate(packet["title"])
+        business_task_items["output_candidate"].append(
+            {
+                "id": output_stem,
+                "payload": output_candidate_business_payload(packet),
+            }
+        )
+    business_units = max(1, 1 + sum(len(items) for items in business_task_items.values()))
+    completed_business_units = 1
+    progress.record(
+        "business_value_synthesis",
+        "running",
+        completed_units=completed_business_units,
+        total_units=business_units,
+        synthesis_workers=business_config["synthesis_workers"],
+        batch_size=business_config["batch_size"],
+    )
+    entity_business_result = synthesize_business_value_entities(
+        business_task_items,
+        cache=render_cache,
+        config=business_config,
+        progress_callback=lambda completed, total: progress.record(
+            "business_value_synthesis",
+            "running",
+            completed_units=min(business_units, completed_business_units + completed),
+            total_units=business_units,
+            synthesis_workers=business_config["synthesis_workers"],
+            batch_size=business_config["batch_size"],
+            entity_units=total,
+        ),
+    )
+    business_inventory = merge_business_value_synthesis_inventory(business_inventory, entity_business_result.inventory)
+    business_inventory["elapsed_seconds"] = round(time.perf_counter() - business_stage_started, 4)
+    write_json(paths.json_dir / "business_value_synthesis.json", business_inventory)
+    record_timing(
+        timings,
+        "business_value_synthesis",
+        business_stage_started,
+        worker_count=business_config["synthesis_workers"],
+        batch_size=business_config["batch_size"],
+        cache_hits=business_inventory.get("cache_hits", 0),
+        cache_misses=business_inventory.get("cache_misses", 0),
+        gpt_call_count=business_inventory.get("gpt_call_count", 0),
+        failures=business_inventory.get("failures", 0),
+    )
+    progress.record(
+        "business_value_synthesis",
+        "completed",
+        completed_units=business_units,
+        total_units=business_units,
+        cache_hits=business_inventory.get("cache_hits", 0),
+        cache_misses=business_inventory.get("cache_misses", 0),
+        gpt_call_count=business_inventory.get("gpt_call_count", 0),
+    )
+
+    for item in capability_note_inputs:
+        capability_business_value = entity_business_result.values["capability"][item["capability"]["key"]]
+        add_note_render(
+            item["path"],
+            namespace="note_render.capability",
+            key=item["capability"]["key"],
+            payload={**item, "business_value": capability_business_value},
+            renderer=lambda item=item, capability_business_value=capability_business_value: build_capability_note(
+                capability=item["capability"],
+                support_links=item["support_links"],
+                wiki_links=item["wiki_links"],
+                repo_note_links=item["repo_note_links"],
+                code_hits=item["code_hits"],
+                code_reference_links=item["code_reference_links"],
+                link_records=item["link_records"],
+                business_value=capability_business_value,
+            ),
+            generated=True,
+        )
+
     output_candidate_records: list[dict[str, Any]] = []
     output_links_by_packet: dict[str, list[str]] = defaultdict(list)
-    for packet in select_output_candidates(packet_records):
+    for packet in selected_output_packets:
         output_kind = infer_output_kind(packet)
         output_stem = stem_for_output_candidate(packet["title"])
         output_link = note_link(output_stem)
-        output_synthesis = synthesize_business_value("output_candidate", output_candidate_business_payload(packet))
-        output_business_value = normalized_business_value_fields(
-            output_synthesis,
-            require_user_problem=bool((BUSINESS_VALUE_CONFIG or default_business_value_config({})).get("require_user_problem_for_output", True)),
-        )
+        output_business_value = entity_business_result.values["output_candidate"][output_stem]
         add_note_render(
             output_candidate_dir / f"{output_stem}.md",
             namespace="note_render.output_candidate",
             key=output_stem,
-            payload={"packet": packet, "output_synthesis": output_synthesis},
-            renderer=lambda packet=packet, output_synthesis=output_synthesis: build_output_candidate_note(packet, output_synthesis=output_synthesis),
+            payload={"packet": packet, "output_synthesis": output_business_value},
+            renderer=lambda packet=packet, output_business_value=output_business_value: build_output_candidate_note(packet, output_synthesis=output_business_value),
             generated=True,
         )
         output_links_by_packet[packet["link"]].append(output_link)
@@ -5619,15 +6421,6 @@ def main() -> None:
                 **output_business_value,
             }
         )
-    progress.record(
-        "packets_outputs",
-        "completed",
-        completed_units=max(1, len(packet_records) + len(output_candidate_records)),
-        total_units=max(1, len(packet_records) + len(output_candidate_records)),
-        intermediate_packets=len(packet_records),
-        output_candidates=len(output_candidate_records),
-        shard_linked_packets=sum(1 for packet in packet_records if packet.get("shard_insight_count", 0)),
-    )
     business_value_report = build_business_value_report(product_ontology, capability_rows, output_candidate_records)
     write_json(paths.json_dir / "business_value_report.json", business_value_report)
     add_note_render(
@@ -5644,12 +6437,17 @@ def main() -> None:
         if not spec:
             continue
         output_links = unique_lines(output_links_by_packet.get(packet["link"], []), 12)
+        packet_business_value = entity_business_result.values["packet"][packet["stem"]]
         add_note_render(
             intermediate_packet_dir / f"{packet['stem']}.md",
             namespace="note_render.intermediate_packet",
             key=packet["stem"],
-            payload={"spec": spec, "output_links": output_links},
-            renderer=lambda spec=spec, output_links=output_links: build_packet_note_from_spec(spec, output_links),
+            payload={"spec": spec, "output_links": output_links, "business_value": packet_business_value},
+            renderer=lambda spec=spec, output_links=output_links, packet_business_value=packet_business_value: build_packet_note_from_spec(
+                spec,
+                output_links,
+                business_value=packet_business_value,
+            ),
             generated=True,
         )
 
@@ -5769,6 +6567,7 @@ def main() -> None:
         generated=True,
     )
     note_render_units = max(1, len(note_specs))
+    note_render_started = time.perf_counter()
     progress.record(
         "note_rendering",
         "running",
@@ -5778,6 +6577,16 @@ def main() -> None:
         note_render_workers=generation_config["note_render_workers"],
     )
     flush_note_renders()
+    record_timing(
+        timings,
+        "note_rendering",
+        note_render_started,
+        worker_count=generation_config["note_render_workers"],
+        note_count=len(note_specs),
+        cache_hits=rendered_note_stats["cache_hits"],
+        cache_misses=rendered_note_stats["cache_misses"],
+        skipped_unchanged=rendered_note_stats.get("skipped_unchanged", 0),
+    )
     progress.record(
         "note_rendering",
         "completed",
@@ -5856,6 +6665,7 @@ def main() -> None:
         timings,
         "vault_note_generation",
         stage_started,
+        aggregate=True,
         note_render_workers=generation_config["note_render_workers"],
         support_notes=len(support_records),
         wiki_notes=len(wiki_records),
@@ -5888,7 +6698,7 @@ def main() -> None:
             }),
         },
         "dependency_graph": render_cache.get("dependency_graph", {}) if render_cache is not None else {},
-        "cache_policy": "Per-source, per-code-file, semantic-card, retrieval-index, shard, and generated-note entries are reused by content hash; aggregate notes are regenerated with a date-scoped cache key.",
+        "cache_policy": "Per-source, per-code-file, semantic-card, business-value synthesis, retrieval-index, shard, and generated-note entries are reused by content hash; aggregate notes are regenerated with a date-scoped cache key.",
     }
     if render_cache is not None:
         render_cache.update(cache_metadata)
@@ -5901,7 +6711,10 @@ def main() -> None:
         events=rate_limiter.recorder.events(),
     )
     timings["rate_limit_summary"] = rate_limit_inventory.get("summary", {})
-    timings["total_seconds"] = round(sum(item["seconds"] for item in timings.get("stages", {}).values()), 4)
+    timings["total_seconds"] = round(
+        sum(item["seconds"] for item in timings.get("stages", {}).values() if not item.get("aggregate")),
+        4,
+    )
     rebuild_cache_stats = render_cache.get("stats", {}) if isinstance(render_cache, dict) else {}
     performance_recommendations = slow_stage_recommendations(timings, rebuild_cache_stats)
     write_json(paths.json_dir / "rebuild_timings.json", timings)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import os
 import subprocess
 import sys
 import tempfile
@@ -47,15 +46,18 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         ]
 
         selected = module.select_output_candidates(packets)
-        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
-        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
-        try:
-            body = module.build_output_candidate_note(selected[0])
-        finally:
-            if old_fixture is None:
-                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
-            else:
-                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
+        body = module.build_output_candidate_note(
+            selected[0],
+            output_synthesis={
+                "target_persona": "Product and engineering teams",
+                "user_problem": "Teams need packet evidence converted into a shippable draft.",
+                "business_value": "Traceable output drafts reduce repeated analysis.",
+                "success_metric": "The draft links evidence and implementation anchors.",
+                "value_score": 7,
+                "evidence_confidence": "medium",
+                "implementation_leverage": "Start from the packet and verify linked code references.",
+            },
+        )
 
         self.assertEqual(len(selected), 12)
         self.assertIn("type: \"output\"", body)
@@ -107,26 +109,27 @@ class ProductBasbLifecycleTests(unittest.TestCase):
 
     def test_packet_notes_include_generated_output_candidate_backlinks(self) -> None:
         module = load_module(REBUILD_SCRIPT, "rebuild_product_brain_packet_backlink_test")
-        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
-        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
-        try:
-            body = module.build_intermediate_packet_note(
-                capability={
-                    "key": "platform-core",
-                    "title": "Platform Core",
-                    "description": "Core product behavior.",
-                },
-                support_links=["[[Support 1]]"],
-                wiki_links=[],
-                repo_note_links=[],
-                code_reference_links=["[[Code Ref 1]]"],
-                output_candidate_links=["[[Output Candidate - Platform Core]]"],
-            )
-        finally:
-            if old_fixture is None:
-                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
-            else:
-                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
+        body = module.build_intermediate_packet_note(
+            capability={
+                "key": "platform-core",
+                "title": "Platform Core",
+                "description": "Core product behavior.",
+            },
+            support_links=["[[Support 1]]"],
+            wiki_links=[],
+            repo_note_links=[],
+            code_reference_links=["[[Code Ref 1]]"],
+            output_candidate_links=["[[Output Candidate - Platform Core]]"],
+            business_value={
+                "target_persona": "Product and engineering teams",
+                "user_problem": "Teams need reusable platform evidence.",
+                "business_value": "Reusable packets reduce repeated discovery.",
+                "success_metric": "The packet can feed an output candidate.",
+                "value_score": 6,
+                "evidence_confidence": "medium",
+                "implementation_leverage": "Validate the linked code reference before shipping.",
+            },
+        )
 
         self.assertIn("generated_output_candidates:", body)
         self.assertIn("[[Output Candidate - Platform Core]]", body)

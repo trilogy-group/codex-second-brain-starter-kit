@@ -26,6 +26,7 @@ BENCHMARK_REBUILD_SCRIPT = TOOLS_DIR / "benchmark_rebuild.py"
 BUILD_SOURCE_INDICES_SCRIPT = TOOLS_DIR / "build_source_indices.py"
 SEMANTIC_SCRIPT = TOOLS_DIR / "semantic_clustering.py"
 EVIDENCE_INDEX_SCRIPT = TOOLS_DIR / "evidence_index.py"
+REBUILD_PRODUCT_BRAIN_SCRIPT = TOOLS_DIR / "rebuild_product_brain.py"
 
 
 def load_module(module_path: Path, module_name: str):
@@ -266,7 +267,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.calls = 0
 
-            def synthesize_cluster(self, cluster: dict, model: str, reasoning_effort: str = "xhigh") -> dict:
+            def synthesize_cluster(self, cluster: dict, model: str, reasoning_effort: str = "high") -> dict:
                 self.calls += 1
                 return super().synthesize_cluster(cluster, model, reasoning_effort)
 
@@ -773,7 +774,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
                 "embedding_batch_size": 512,
                 "embedding_workers": 8,
                 "llm_model": "gpt-5.5",
-                "reasoning_effort": "xhigh",
+                "reasoning_effort": "high",
                 "llm_synthesis_workers": 10,
                 "retry_attempts": 1,
                 "retry_base_seconds": 0.01,
@@ -783,7 +784,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
                 "id": "shard-01",
                 "kind": "support-evidence",
                 "model": "gpt-5.5",
-                "reasoning_effort": "xhigh",
+                "reasoning_effort": "high",
                 "cards": cards,
                 "input_card_count": 1,
                 "max_concurrent_shards": 6,
@@ -817,11 +818,171 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
 
         observed_events = [event for event in recorder.events() if event["event"] == "provider_limits_observed"]
         self.assertEqual([payload["model"] for payload in response_payloads], ["gpt-5.5", "gpt-5.5"])
-        self.assertEqual([payload["reasoning"]["effort"] for payload in response_payloads], ["xhigh", "xhigh"])
+        self.assertEqual([payload["reasoning"]["effort"] for payload in response_payloads], ["high", "high"])
         self.assertEqual(
             [event["stage"] for event in observed_events],
             ["semantic_embedding", "semantic_llm_synthesis", "generation_shards"],
         )
+
+    def test_business_value_client_retries_timeout_and_uses_configured_timeout(self) -> None:
+        rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_timeout_retry_test")
+        attempts: list[float] = []
+
+        class FakeResponse:
+            headers = {"x-ratelimit-limit-requests": "3000", "x-ratelimit-limit-tokens": "3000000"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": json.dumps({"business_value": "Retryable synthesis succeeded."}),
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(_request, timeout):
+            attempts.append(timeout)
+            if len(attempts) == 1:
+                raise TimeoutError("timed out")
+            return FakeResponse()
+
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "OPENAI_API_KEY": "test-key",
+                "PRODUCT_BASB_OPENAI_TIMEOUT_SECONDS": "240",
+                "PRODUCT_BASB_RATE_LIMIT_RETRY_BASE_SECONDS": "0.001",
+                "PRODUCT_BASB_RATE_LIMIT_RETRY_MAX_SECONDS": "0.001",
+            },
+        ), mock.patch.object(rebuild.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = rebuild.OpenAIBusinessValueClient().synthesize(
+                "capability",
+                {"evidence_cards": []},
+                "gpt-5.5",
+                "high",
+            )
+
+        self.assertEqual(result["business_value"], "Retryable synthesis succeeded.")
+        self.assertEqual(attempts, [240.0, 240.0])
+
+    def test_business_value_synthesis_batches_misses_and_reuses_cache(self) -> None:
+        rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_batch_cache_test")
+        cache = rebuild.incremental_cache.empty_incremental_cache()
+        calls: list[tuple[str, list[str]]] = []
+
+        class FakeClient:
+            def synthesize_batch(self, task, items, model, reasoning_effort):
+                calls.append((task, [item["id"] for item in items]))
+                return {
+                    "items": [
+                        {
+                            "id": item["id"],
+                            "target_persona": "Product teams",
+                            "user_problem": f"Need {item['id']} translated into action.",
+                            "business_value": f"Business value for {item['id']}.",
+                            "success_metric": ["Metric A", "Metric B"],
+                            "value_score": 8,
+                            "evidence_confidence": {"level": "medium", "rationale": "Fixture evidence."},
+                            "implementation_leverage": "Use linked evidence.",
+                        }
+                        for item in items
+                    ]
+                }
+
+        config = {
+            **rebuild.default_business_value_config({}),
+            "batch_size": 2,
+            "synthesis_workers": 24,
+            "cache_enabled": True,
+            "max_repair_attempts": 1,
+        }
+        task_items = {
+            "capability": [
+                {"id": "cap-1", "payload": {"title": "One"}},
+                {"id": "cap-2", "payload": {"title": "Two"}},
+                {"id": "cap-3", "payload": {"title": "Three"}},
+            ]
+        }
+
+        first = rebuild.synthesize_business_value_entities(task_items, cache=cache, config=config, client=FakeClient())
+        second = rebuild.synthesize_business_value_entities(task_items, cache=cache, config=config, client=FakeClient())
+
+        self.assertEqual(calls, [("capability", ["cap-1", "cap-2"]), ("capability", ["cap-3"])])
+        self.assertEqual(first.values["capability"]["cap-1"]["success_metric"], "Metric A; Metric B")
+        self.assertEqual(first.inventory["cache_hits"], 0)
+        self.assertEqual(first.inventory["cache_misses"], 3)
+        self.assertEqual(first.inventory["batch_count"], 2)
+        self.assertEqual(first.inventory["gpt_call_count"], 2)
+        self.assertEqual(second.inventory["cache_hits"], 3)
+        self.assertEqual(second.inventory["cache_misses"], 0)
+        self.assertEqual(second.inventory["gpt_call_count"], 0)
+
+    def test_business_value_synthesis_repairs_malformed_batch_by_splitting_items(self) -> None:
+        rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_batch_repair_test")
+        cache = rebuild.incremental_cache.empty_incremental_cache()
+        calls: list[list[str]] = []
+
+        class FlakyClient:
+            def synthesize_batch(self, task, items, model, reasoning_effort):
+                del task, model, reasoning_effort
+                ids = [item["id"] for item in items]
+                calls.append(ids)
+                if len(ids) > 1:
+                    return {"items": [{"id": ids[0], "business_value": "missing fields"}]}
+                return {
+                    "items": [
+                        {
+                            "id": ids[0],
+                            "target_persona": "Product teams",
+                            "user_problem": f"Need {ids[0]} translated into action.",
+                            "business_value": f"Business value for {ids[0]}.",
+                            "success_metric": "Metric",
+                            "value_score": 7,
+                            "evidence_confidence": "medium",
+                            "implementation_leverage": "Use linked evidence.",
+                        }
+                    ]
+                }
+
+        config = {
+            **rebuild.default_business_value_config({}),
+            "batch_size": 2,
+            "synthesis_workers": 24,
+            "cache_enabled": True,
+            "max_repair_attempts": 1,
+        }
+
+        result = rebuild.synthesize_business_value_entities(
+            {
+                "packet": [
+                    {"id": "packet-1", "payload": {"title": "One"}},
+                    {"id": "packet-2", "payload": {"title": "Two"}},
+                ]
+            },
+            cache=cache,
+            config=config,
+            client=FlakyClient(),
+        )
+
+        self.assertEqual(calls, [["packet-1", "packet-2"], ["packet-1", "packet-2"], ["packet-1"], ["packet-2"]])
+        self.assertEqual(result.values["packet"]["packet-2"]["business_value"], "Business value for packet-2.")
+        self.assertEqual(result.inventory["repair_count"], 1)
+        self.assertEqual(result.inventory["gpt_call_count"], 4)
+        self.assertEqual(result.inventory["failures"], 0)
 
     def test_retry_after_parser_and_shared_budget_fail_clearly(self) -> None:
         rate_module = load_module(RATE_LIMITS_SCRIPT, "rate_limits_provider_budget_test")
@@ -994,7 +1155,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
                 "item_count": 2,
                 "worker_mode": "fixture",
                 "model": "gpt-5.5",
-                "reasoning_effort": "xhigh",
+                "reasoning_effort": "high",
                 "cards": [
                     {"id": "card-1", "title": "Branding settings", "kind": "support", "summary": "Branding controls."},
                     {"id": "card-2", "title": "Theme docs", "kind": "wiki", "summary": "Theme implementation."},
@@ -1016,10 +1177,10 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(result["input_card_count"], 2)
         self.assertEqual(result["output_note_count"], 1)
         self.assertEqual(result["shard_insight_count"], 1)
-        self.assertEqual(result["reasoning_effort"], "xhigh")
+        self.assertEqual(result["reasoning_effort"], "high")
         self.assertIn("source: generated", body)
         self.assertIn("basb_stage: distill", body)
-        self.assertIn("llm_reasoning_effort: \"xhigh\"", body)
+        self.assertIn("llm_reasoning_effort: \"high\"", body)
         self.assertIn("## Distilled Takeaways", body)
 
     def test_shard_insights_are_collected_for_reducer_inputs(self) -> None:

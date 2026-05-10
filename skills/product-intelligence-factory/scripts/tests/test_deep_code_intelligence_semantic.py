@@ -47,7 +47,7 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertEqual(config["agent_shards"]["timeout_seconds"], 1800)
         self.assertEqual(config["agent_shards"]["worker_mode"], "llm-synthesis")
         self.assertEqual(config["agent_shards"]["shard_model"], "gpt-5.5")
-        self.assertEqual(config["agent_shards"]["reasoning_effort"], "xhigh")
+        self.assertEqual(config["agent_shards"]["reasoning_effort"], "high")
         self.assertEqual(config["agent_shards"]["max_cards_per_shard"], 80)
         self.assertTrue(config["changed_scope_rebuild"])
 
@@ -401,37 +401,38 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
             {"product": {"name": "Acme", "slug": "acme"}, "sources": {"stale_doc_hosts": []}},
             {"capabilities": []},
         )
-        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
-        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
-        try:
-            body = module.build_semantic_packet_note(
-                {
-                    "theme": "Identity Access",
-                    "similarity_score": 0.91,
-                    "evidence_score": 8,
-                    "llm_summary": "Identity access evidence should be reviewed together.",
-                    "why_this_cluster_exists": "The cards point to the same login path.",
-                    "merge_split_recommendation": "Keep together.",
-                    "output_candidate_rationale": "Strong delivery candidate.",
-                    "llm_synthesis_status": "succeeded",
-                    "llm_model": "gpt-5.5",
-                    "llm_reasoning_effort": "xhigh",
-                    "cards": [
-                        {
-                            "link": "[[Support - Login]]",
-                            "source_links": ["[[Support - Login]]"],
-                            "code_reference_links": ["[[Code Ref - auth.rb]]"],
-                            "code_terms": ["AuthController"],
-                        }
-                    ],
-                    "limitations": ["Embedding cluster over compact evidence cards."],
-                }
-            )
-        finally:
-            if old_fixture is None:
-                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
-            else:
-                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
+        body = module.build_semantic_packet_note(
+            {
+                "theme": "Identity Access",
+                "similarity_score": 0.91,
+                "evidence_score": 8,
+                "llm_summary": "Identity access evidence should be reviewed together.",
+                "why_this_cluster_exists": "The cards point to the same login path.",
+                "merge_split_recommendation": "Keep together.",
+                "output_candidate_rationale": "Strong delivery candidate.",
+                "llm_synthesis_status": "succeeded",
+                "llm_model": "gpt-5.5",
+                "llm_reasoning_effort": "high",
+                "cards": [
+                    {
+                        "link": "[[Support - Login]]",
+                        "source_links": ["[[Support - Login]]"],
+                        "code_reference_links": ["[[Code Ref - auth.rb]]"],
+                        "code_terms": ["AuthController"],
+                    }
+                ],
+                "limitations": ["Embedding cluster over compact evidence cards."],
+            },
+            business_value={
+                "target_persona": "Product and engineering teams",
+                "user_problem": "Teams need identity evidence reviewed together.",
+                "business_value": "Semantic packets reduce duplicated investigation.",
+                "success_metric": "The cluster can feed a grounded output candidate.",
+                "value_score": 7,
+                "evidence_confidence": "medium",
+                "implementation_leverage": "Validate the linked AuthController reference.",
+            },
+        )
 
         self.assertIn("packet_kind: \"semantic-cluster\"", body)
         self.assertIn("## Theme", body)
@@ -441,7 +442,7 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertIn("## LLM synthesis", body)
         self.assertIn("Identity access evidence", body)
         self.assertIn("## Synthesis guidance", body)
-        self.assertIn("llm_reasoning_effort: \"xhigh\"", body)
+        self.assertIn("llm_reasoning_effort: \"high\"", body)
         self.assertIn("## Synthesis status", body)
         self.assertIn("## Related code surfaces", body)
         self.assertIn("## Output candidates", body)

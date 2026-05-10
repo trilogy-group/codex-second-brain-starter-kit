@@ -464,7 +464,7 @@ class GenericToolingTests(unittest.TestCase):
                         "  similarity_threshold: 0.78",
                         "  max_clusters: 40",
                         "  llm_model: gpt-5.5",
-                        "  reasoning_effort: xhigh",
+                        "  reasoning_effort: high",
                         "  llm_cluster_synthesis: false",
                         "  max_llm_clusters: 0",
                         "code_intelligence:",
@@ -591,7 +591,7 @@ class GenericToolingTests(unittest.TestCase):
                         "  similarity_threshold: 0.78",
                         "  max_clusters: 40",
                         "  llm_model: gpt-5.5",
-                        "  reasoning_effort: xhigh",
+                        "  reasoning_effort: high",
                         "  llm_cluster_synthesis: false",
                         "  max_llm_clusters: 0",
                         "code_intelligence:",
@@ -736,6 +736,29 @@ class GenericToolingTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
         self.assertFalse(snapshots[0]["path_exists"])
         self.assertEqual(snapshots[0]["top_dirs"], [])
+
+    def test_readme_summary_skips_image_html_and_uses_first_meaningful_product_text(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_readme_summary_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            readme = Path(tmp_dir) / "README.md"
+            readme.write_text(
+                "\n".join(
+                    [
+                        '<img src="https://example.com/hero.png" width="30%">',
+                        "",
+                        "# Tyler Agent",
+                        "",
+                        "Tyler is a product-scoped engineering workspace for importing a product, building its second-brain knowledge base, and asking grounded questions.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            title, summary = module.summarize_readme(readme)
+
+        self.assertEqual(title, "Tyler Agent")
+        self.assertNotIn("<img", summary)
+        self.assertIn("product-scoped engineering workspace", summary)
 
     def test_wizard_refresh_rebuilds_indices_and_vault_before_metadata(self) -> None:
         module = load_module(WIZARD_SCRIPT, "second_brain_wizard_refresh_test")

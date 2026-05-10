@@ -7,7 +7,7 @@ from typing import Any
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 DEFAULT_REASONING_MODEL = "gpt-5.5"
-DEFAULT_REASONING_EFFORT = "xhigh"
+DEFAULT_REASONING_EFFORT = "high"
 VALID_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 BANNED_SYNTHESIS_MODELS = {"gpt-4.1-mini"}
 

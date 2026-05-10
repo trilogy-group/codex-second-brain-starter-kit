@@ -20,6 +20,7 @@ DEFAULT_STAGE_PLAN: tuple[tuple[str, str, int], ...] = (
     ("generation_shards", "Shard synthesis", 8),
     ("semantic_clustering", "Semantic clustering", 12),
     ("packets_outputs", "Packets and output candidates", 10),
+    ("business_value_synthesis", "Business-value synthesis", 18),
     ("note_rendering", "Rendering notes", 30),
     ("generation_shard_reducer", "Reducing shard output", 5),
     ("vault_validation", "Vault validation", 2),

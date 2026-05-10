@@ -45,7 +45,7 @@ Typical use cases:
 - Python 3
 - Git
 - Obsidian
-- `OPENAI_API_KEY` for GPT-5.5/xhigh semantic intermediate-packet clustering and generation-shard synthesis during vault rebuilds
+- `OPENAI_API_KEY` for GPT-5.5/high semantic intermediate-packet clustering and generation-shard synthesis during vault rebuilds
 - optional: `tree_sitter` and `tree_sitter_languages` Python packages for AST-backed code intelligence; regex fallback is always kept
 - optional: GitHub CLI (`gh`) if you want repo-mirror sync to resolve default branches automatically
 
@@ -75,20 +75,25 @@ Typical use cases:
 
 ## Intelligence model defaults
 
-Full-fidelity LLM synthesis defaults to `gpt-5.5` with `xhigh` reasoning for semantic cluster synthesis, business-value synthesis, Product Ontology v2, and generation shards. The workflow uses OpenAI's Responses API for these reasoning calls so the requested reasoning effort is explicit instead of silently falling back to a lower-quality chat-completions path.
+Full-fidelity LLM synthesis defaults to `gpt-5.5` with `high` reasoning for semantic cluster synthesis, business-value synthesis, Product Ontology v2, and generation shards. The workflow uses OpenAI's Responses API for these reasoning calls so the requested reasoning effort is explicit instead of silently falling back to a lower-quality chat-completions path.
 
 Keep these settings in `profile.intelligence_path` unless you are intentionally testing a different quality/cost tradeoff:
 
 ```yaml
 semantic_clustering:
   llm_model: gpt-5.5
-  reasoning_effort: xhigh
+  reasoning_effort: high
   llm_cluster_synthesis: true
 
 business_value:
   enabled: true
   llm_model: gpt-5.5
-  reasoning_effort: xhigh
+  reasoning_effort: high
+  synthesis_workers: 24
+  batch_size: 12
+  cache_enabled: true
+  timeout_seconds: 180
+  max_repair_attempts: 1
   require_user_problem_for_output: true
 
 code_intelligence:
@@ -99,7 +104,7 @@ generation_performance:
   agent_shards:
     worker_mode: llm-synthesis
     shard_model: gpt-5.5
-    reasoning_effort: xhigh
+    reasoning_effort: high
 ```
 
 The validator rejects `gpt-4.1-mini` for synthesis fields because it produces thinner intelligence and does not honor the reasoning-effort contract expected by this starter kit. Business-value intelligence and Product Ontology v2 fail clearly when OpenAI synthesis cannot run; they do not use deterministic template fallbacks. If you change model or reasoning settings, run `--force` once so stale semantic, shard, and generated-note caches do not hide the change.
@@ -146,11 +151,17 @@ generation_performance:
   agent_shards:
     worker_mode: llm-synthesis
     shard_model: gpt-5.5
-    reasoning_effort: xhigh
+    reasoning_effort: high
 rate_limits:
   openai_requests_per_minute: 3000
   openai_tokens_per_minute: 3000000
   source_fetch_requests_per_host_per_minute: 120
+business_value:
+  synthesis_workers: 24
+  batch_size: 12
+  cache_enabled: true
+  timeout_seconds: 180
+  max_repair_attempts: 1
 ```
 
 Use `--force` only when you intentionally want a clean rebuild: after changing generation logic, after deleting or repairing corrupted cache files, during a clean benchmark, or when you suspect stale generated output. A forced run is expected to be slower because it bypasses source-index, semantic, shard, and rebuild reuse.

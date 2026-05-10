@@ -129,8 +129,20 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                     validate_reasoning_effort(
                         errors,
                         "profile business_value.reasoning_effort",
-                        business.get("reasoning_effort", "xhigh"),
+                        business.get("reasoning_effort", "high"),
                     )
+                    for field in ("synthesis_workers", "batch_size", "timeout_seconds", "max_repair_attempts"):
+                        if field not in business:
+                            continue
+                        if str(business[field]).strip().lower() == "auto":
+                            errors.append(f"profile business_value.{field} must be an explicit positive integer; auto mode is disabled.")
+                            continue
+                        try:
+                            parsed = int(business[field])
+                        except (TypeError, ValueError):
+                            parsed = 0
+                        if parsed <= 0:
+                            errors.append(f"profile business_value.{field} must be positive.")
                 retrieval = profile_data.get("retrieval_index") or {}
                 if isinstance(retrieval, dict):
                     if "max_candidates_per_source" in retrieval:
