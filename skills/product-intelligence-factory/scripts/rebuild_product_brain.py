@@ -192,6 +192,27 @@ def load_product_profile(manifest: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def manifest_repo_names(manifest: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    for item in (manifest.get("repositories") or {}).get("items", []):
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def capabilities_with_default_repos(capabilities: list[dict[str, Any]], repo_names: list[str]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for capability in capabilities:
+        item = dict(capability)
+        repos = [str(repo).strip() for repo in item.get("repos", []) if str(repo).strip()]
+        item["repos"] = repos or list(repo_names)
+        normalized.append(item)
+    return normalized
+
+
 def configure_runtime(manifest: dict[str, Any], profile: dict[str, Any]) -> None:
     global PRODUCT_CONTEXT, STALE_DOC_HOSTS, CAPABILITIES, CAPABILITY_BY_KEY
     product = manifest.get("product") or {}
@@ -204,7 +225,7 @@ def configure_runtime(manifest: dict[str, Any], profile: dict[str, Any]) -> None
         for host in (manifest.get("sources", {}).get("stale_doc_hosts") or [])
         if str(host).strip()
     }
-    CAPABILITIES = list(profile["capabilities"])
+    CAPABILITIES = capabilities_with_default_repos(list(profile["capabilities"]), manifest_repo_names(manifest))
     CAPABILITY_BY_KEY = {item["key"]: item for item in CAPABILITIES}
 
 

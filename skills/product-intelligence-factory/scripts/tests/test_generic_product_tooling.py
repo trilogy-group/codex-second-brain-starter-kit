@@ -521,6 +521,142 @@ class GenericToolingTests(unittest.TestCase):
         self.assertIn("Invite users directly to a translated sign-up page.", support_note)
         self.assertNotIn("## Uncaptured evidence", support_note)
 
+    def test_empty_capability_repos_default_to_manifest_repositories(self) -> None:
+        module = load_module(REBUILD_SCRIPT, "rebuild_product_brain_default_capability_repos_test")
+        manifest = {
+            "product": {"name": "Acme", "slug": "acme"},
+            "sources": {"stale_doc_hosts": []},
+            "repositories": {
+                "items": [
+                    {"name": "repo-one", "local_path": "/tmp/repo-one"},
+                    {"name": "repo-two", "local_path": "/tmp/repo-two"},
+                ]
+            },
+        }
+        profile = {
+            "capabilities": [
+                {
+                    "key": "platform-core",
+                    "title": "Platform Core",
+                    "description": "Core behavior.",
+                    "keywords": ["settings"],
+                    "repos": [],
+                },
+                {
+                    "key": "api",
+                    "title": "API",
+                    "description": "API behavior.",
+                    "keywords": ["api"],
+                    "repos": ["repo-two"],
+                },
+            ]
+        }
+
+        module.configure_runtime(manifest, profile)
+
+        self.assertEqual(module.CAPABILITIES[0]["repos"], ["repo-one", "repo-two"])
+        self.assertEqual(module.CAPABILITIES[1]["repos"], ["repo-two"])
+
+    def test_rebuild_generates_code_references_when_capability_repos_are_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace = root / "workspace"
+            vault = root / "vault"
+            corpus = root / "corpus"
+            mirror = root / "mirror"
+            repo = workspace / "repos" / "repo-one"
+            profile = workspace / "config" / "intelligence-profile.yaml"
+            manifest = root / "manifest.yaml"
+            (repo / "src").mkdir(parents=True)
+            corpus.mkdir()
+            vault.mkdir()
+            profile.parent.mkdir(parents=True)
+            (repo / "src" / "settings.py").write_text(
+                "\n".join(
+                    [
+                        "class Settings:",
+                        "    def load_settings(self):",
+                        "        return {'homepage': 'dashboard'}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            profile.write_text(
+                "\n".join(
+                    [
+                        "semantic_clustering:",
+                        "  provider: openai",
+                        "  embedding_model: text-embedding-3-small",
+                        "  min_cluster_size: 3",
+                        "  similarity_threshold: 0.78",
+                        "  max_clusters: 40",
+                        "  llm_model: gpt-5.5",
+                        "  reasoning_effort: xhigh",
+                        "  llm_cluster_synthesis: false",
+                        "  max_llm_clusters: 0",
+                        "code_intelligence:",
+                        "  max_files_per_repo: 20",
+                        "  include_git_history: false",
+                        "  include_tests: true",
+                        "  include_dependency_graph: true",
+                        "  parser_mode: regex-fallback",
+                        "generation_performance:",
+                        "  agent_shards:",
+                        "    enabled: false",
+                        "capabilities:",
+                        "  - key: platform-core",
+                        "    title: Platform Core",
+                        "    description: Core behavior.",
+                        "    keywords:",
+                        "      - settings",
+                        "      - dashboard",
+                        "    repos: []",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            manifest.write_text(
+                "\n".join(
+                    [
+                        "product:",
+                        "  name: Acme",
+                        "  slug: acme",
+                        "  mode: hybrid",
+                        f"  vault_path: {vault}",
+                        f"  workspace_path: {workspace}",
+                        "sources:",
+                        f"  corpus_path: {corpus}",
+                        f"  mirror_path: {mirror}",
+                        f"  docx_extract_path: {workspace / 'docx'}",
+                        "  support_article_url_template: ''",
+                        "  stale_doc_hosts: []",
+                        "profile:",
+                        f"  intelligence_path: {profile}",
+                        "repositories:",
+                        f"  local_clone_root: {workspace / 'repos'}",
+                        "  safe_mirror_root: /tmp/acme-mirrors",
+                        "  items:",
+                        "    - owner: acme",
+                        "      name: repo-one",
+                        "      role: source-repository",
+                        "      default_branch: main",
+                        f"      local_path: {repo}",
+                        "      url: https://github.com/acme/repo-one",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            env = {**os.environ, "PRODUCT_BASB_EMBEDDING_FIXTURE": "1"}
+
+            subprocess.run([sys.executable, str(BUILD_SCRIPT), "--manifest", str(manifest)], check=True, env=env, capture_output=True, text=True)
+            subprocess.run([sys.executable, str(REBUILD_SCRIPT), "--manifest", str(manifest)], check=True, env=env, capture_output=True, text=True)
+
+            code_refs = list((vault / "40 Research" / "Code Intelligence" / "References").glob("*.md"))
+            capability_note = (vault / "20 Product" / "Capabilities" / "Capability - Platform Core.md").read_text(encoding="utf-8")
+
+        self.assertTrue(code_refs)
+        self.assertIn("[[Code Ref - repo-one - src -- settings.py|repo-one/src/settings.py:1]]", capability_note)
+
     def test_repo_snapshots_tolerate_missing_repo_paths(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_missing_repo_test")
         with tempfile.TemporaryDirectory() as tmp_dir:
