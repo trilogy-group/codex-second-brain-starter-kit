@@ -107,7 +107,15 @@ def inbox_base_text() -> str:
     ).strip()
 
 
-def intelligence_canvas(mode: str) -> str:
+def product_enabled(mode: str) -> bool:
+    return mode in {"product", "hybrid"}
+
+
+def operations_enabled(mode: str, include_operations: bool = False) -> bool:
+    return mode == "operations" or include_operations
+
+
+def intelligence_canvas(mode: str, include_operations: bool = False) -> str:
     nodes = [
         {
             "id": "home",
@@ -138,7 +146,7 @@ def intelligence_canvas(mode: str) -> str:
         }
     ]
 
-    if mode in {"product", "hybrid"}:
+    if product_enabled(mode):
         nodes.extend(
             [
                 {
@@ -180,7 +188,7 @@ def intelligence_canvas(mode: str) -> str:
             ]
         )
 
-    if mode in {"operations", "hybrid"}:
+    if operations_enabled(mode, include_operations):
         nodes.append(
             {
                 "id": "operations",
@@ -205,9 +213,9 @@ def intelligence_canvas(mode: str) -> str:
     return json.dumps({"nodes": nodes, "edges": edges}, indent=2)
 
 
-def home_links(mode: str) -> list[str]:
+def home_links(mode: str, include_operations: bool = False) -> list[str]:
     links = ["[[00 Journal Hub]]", "[[TRAVERSAL-INDEX]]", "[[Intelligence Map.canvas]]"]
-    if mode in {"product", "hybrid"}:
+    if product_enabled(mode):
         links.extend(
             [
                 "[[Product OS]]",
@@ -219,12 +227,12 @@ def home_links(mode: str) -> list[str]:
                 "[[Archive Index]]",
             ]
         )
-    if mode in {"operations", "hybrid"}:
+    if operations_enabled(mode, include_operations):
         links.append("[[Operations/INDEX]]")
     return links
 
 
-def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> None:
+def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool, include_operations: bool = False) -> None:
     common_dirs = [
         vault / ".obsidian",
         vault / "00 Home",
@@ -273,7 +281,7 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         "",
         "Start here:",
     ]
-    home_lines.extend(f"- {link}" for link in home_links(mode))
+    home_lines.extend(f"- {link}" for link in home_links(mode, include_operations))
     write_file(vault / "00 Home" / "Intelligence Home.md", "\n".join(home_lines), overwrite)
 
     write_file(
@@ -431,7 +439,7 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         overwrite,
     )
 
-    write_file(vault / "80 Assets" / "Canvas" / "Intelligence Map.canvas", intelligence_canvas(mode), overwrite)
+    write_file(vault / "80 Assets" / "Canvas" / "Intelligence Map.canvas", intelligence_canvas(mode, include_operations), overwrite)
 
     folder_roles = [
         "- `00 Home/`: primary dashboards and navigation",
@@ -441,7 +449,7 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         "- `90 Templates/`: reusable note templates",
     ]
     start_lines = ["- [[00 Home/Intelligence Home]]", "- [[70 Journal/00 Journal Hub]]"]
-    if mode in {"product", "hybrid"}:
+    if product_enabled(mode):
         start_lines.extend(
             [
                 "- [[00 Home/Product OS]]",
@@ -466,7 +474,7 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
                 "- `60 Experiments/`: tests, rollouts, and outcomes",
             ]
         )
-    if mode in {"operations", "hybrid"}:
+    if operations_enabled(mode, include_operations):
         start_lines.append("- [[Operations/INDEX]]")
         folder_roles.extend(
             [
@@ -517,9 +525,9 @@ def scaffold_common(vault: Path, project: str, mode: str, overwrite: bool) -> No
         "1. Read `TRAVERSAL-INDEX.md`.",
         "2. Read `00 Home/Intelligence Home.md`.",
     ]
-    if mode in {"product", "hybrid"}:
+    if product_enabled(mode):
         nav_lines.append("3. Read `00 Home/Product OS.md` for product-memory work.")
-    if mode in {"operations", "hybrid"}:
+    if operations_enabled(mode, include_operations):
         nav_lines.append("4. Read `Operations/INDEX.md` for operations work.")
     nav_lines.append("5. Scan summaries and hub notes before reading deep source notes.")
 
@@ -1850,18 +1858,25 @@ def main() -> None:
     )
     parser.add_argument("--entity-singular", default="entity", help="Singular name for operational entities.")
     parser.add_argument("--entity-plural", default="entities", help="Plural name for operational entities.")
+    parser.add_argument(
+        "--include-operations",
+        action="store_true",
+        help="Also scaffold the operations/entity intelligence layer. Product BASB hybrid vaults omit it by default.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing scaffold files.")
     args = parser.parse_args()
 
     vault = Path(args.vault).expanduser().resolve()
     vault.mkdir(parents=True, exist_ok=True)
 
-    scaffold_common(vault, args.project, args.mode, args.overwrite)
+    include_operations = operations_enabled(args.mode, args.include_operations)
 
-    if args.mode in {"product", "hybrid"}:
+    scaffold_common(vault, args.project, args.mode, args.overwrite, include_operations)
+
+    if product_enabled(args.mode):
         scaffold_product(vault, args.project, args.overwrite)
 
-    if args.mode in {"operations", "hybrid"}:
+    if include_operations:
         scaffold_operations(
             vault,
             args.project,

@@ -63,6 +63,55 @@ class ProductBasbUpgradeTests(unittest.TestCase):
             self.assertIn("[[Output Pipeline]]", product_os)
             self.assertIn("basb_stage: organize", product_os)
 
+    def test_hybrid_scaffold_omits_operations_layer_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            vault = Path(tmp_dir) / "vault"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCAFFOLD_SCRIPT),
+                    "--vault",
+                    str(vault),
+                    "--project",
+                    "Acme",
+                    "--mode",
+                    "hybrid",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertTrue((vault / "00 Home" / "Product OS.md").exists())
+            self.assertFalse((vault / "Operations" / "INDEX.md").exists())
+            intelligence_home = (vault / "00 Home" / "Intelligence Home.md").read_text(encoding="utf-8")
+            self.assertNotIn("[[Operations/INDEX]]", intelligence_home)
+
+    def test_hybrid_scaffold_can_include_operations_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            vault = Path(tmp_dir) / "vault"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCAFFOLD_SCRIPT),
+                    "--vault",
+                    str(vault),
+                    "--project",
+                    "Acme",
+                    "--mode",
+                    "hybrid",
+                    "--include-operations",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertTrue((vault / "00 Home" / "Product OS.md").exists())
+            self.assertTrue((vault / "Operations" / "INDEX.md").exists())
+            intelligence_home = (vault / "00 Home" / "Intelligence Home.md").read_text(encoding="utf-8")
+            self.assertIn("[[Operations/INDEX]]", intelligence_home)
+
     def test_audit_flags_product_basb_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             vault = Path(tmp_dir) / "vault"
