@@ -190,6 +190,34 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertGreaterEqual(result["summary"]["ast_parsed_files"], 1)
         self.assertGreater(result["summary"]["ast_node_count"], 0)
 
+    def test_git_tracked_source_mode_excludes_untracked_generated_artifacts(self) -> None:
+        module = load_module(CODE_INTELLIGENCE_SCRIPT, "code_intelligence_git_tracked_filter_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo = Path(tmp_dir) / "repo"
+            repo.mkdir()
+            (repo / "src").mkdir()
+            (repo / "src" / "app.py").write_text("def useful_feature():\n    return True\n", encoding="utf-8")
+            (repo / "cdk.out").mkdir()
+            (repo / "cdk.out" / "asset.py").write_text("def generated_asset():\n    return True\n", encoding="utf-8")
+            (repo / "scratch.py").write_text("def untracked_scratch():\n    return True\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "init"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(repo), "add", "src/app.py"], check=True)
+            subprocess.run(["git", "-C", str(repo), "commit", "-m", "add source"], check=True, capture_output=True)
+
+            result = module.analyze_repositories(
+                {"sample-repo": repo},
+                {"code_intelligence": {"max_files_per_repo": 50, "include_git_history": False}},
+            )
+            paths = {item["relative_path"] for item in result["files"]}
+
+        self.assertEqual(paths, {"src/app.py"})
+        self.assertEqual(result["config"]["source_file_mode"], "git-tracked")
+        self.assertEqual(result["config"]["include_untracked_code"], False)
+        self.assertGreaterEqual(result["summary"]["excluded_untracked_files"], 1)
+        self.assertGreaterEqual(result["summary"]["excluded_generated_files"], 1)
+
     def test_git_history_metrics_extract_churn_and_owner_candidates(self) -> None:
         module = load_module(CODE_INTELLIGENCE_SCRIPT, "code_intelligence_git_test")
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -373,29 +401,37 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
             {"product": {"name": "Acme", "slug": "acme"}, "sources": {"stale_doc_hosts": []}},
             {"capabilities": []},
         )
-        body = module.build_semantic_packet_note(
-            {
-                "theme": "Identity Access",
-                "similarity_score": 0.91,
-                "evidence_score": 8,
-                "llm_summary": "Identity access evidence should be reviewed together.",
-                "why_this_cluster_exists": "The cards point to the same login path.",
-                "merge_split_recommendation": "Keep together.",
-                "output_candidate_rationale": "Strong delivery candidate.",
-                "llm_synthesis_status": "succeeded",
-                "llm_model": "gpt-5.5",
-                "llm_reasoning_effort": "xhigh",
-                "cards": [
-                    {
-                        "link": "[[Support - Login]]",
-                        "source_links": ["[[Support - Login]]"],
-                        "code_reference_links": ["[[Code Ref - auth.rb]]"],
-                        "code_terms": ["AuthController"],
-                    }
-                ],
-                "limitations": ["Embedding cluster over compact evidence cards."],
-            }
-        )
+        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
+        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
+        try:
+            body = module.build_semantic_packet_note(
+                {
+                    "theme": "Identity Access",
+                    "similarity_score": 0.91,
+                    "evidence_score": 8,
+                    "llm_summary": "Identity access evidence should be reviewed together.",
+                    "why_this_cluster_exists": "The cards point to the same login path.",
+                    "merge_split_recommendation": "Keep together.",
+                    "output_candidate_rationale": "Strong delivery candidate.",
+                    "llm_synthesis_status": "succeeded",
+                    "llm_model": "gpt-5.5",
+                    "llm_reasoning_effort": "xhigh",
+                    "cards": [
+                        {
+                            "link": "[[Support - Login]]",
+                            "source_links": ["[[Support - Login]]"],
+                            "code_reference_links": ["[[Code Ref - auth.rb]]"],
+                            "code_terms": ["AuthController"],
+                        }
+                    ],
+                    "limitations": ["Embedding cluster over compact evidence cards."],
+                }
+            )
+        finally:
+            if old_fixture is None:
+                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
 
         self.assertIn("packet_kind: \"semantic-cluster\"", body)
         self.assertIn("## Theme", body)

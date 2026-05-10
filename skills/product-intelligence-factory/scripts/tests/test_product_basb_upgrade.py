@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -262,19 +263,27 @@ class ProductBasbUpgradeTests(unittest.TestCase):
             {"capabilities": []},
         )
 
-        body = module.build_intermediate_packet_note(
-            capability={
-                "key": "platform-core",
-                "title": "Platform Core",
-                "description": "Core product behavior.",
-                "keywords": ["platform"],
-                "repos": ["core-repo"],
-            },
-            support_links=["[[Support - 100 - Sample Article]]"],
-            wiki_links=["[[Wiki - Root - Platform]]"],
-            repo_note_links=["[[Repo - core-repo]]"],
-            code_reference_links=["[[Code Ref - core-repo - app.rb]]"],
-        )
+        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
+        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
+        try:
+            body = module.build_intermediate_packet_note(
+                capability={
+                    "key": "platform-core",
+                    "title": "Platform Core",
+                    "description": "Core product behavior.",
+                    "keywords": ["platform"],
+                    "repos": ["core-repo"],
+                },
+                support_links=["[[Support - 100 - Sample Article]]"],
+                wiki_links=["[[Wiki - Root - Platform]]"],
+                repo_note_links=["[[Repo - core-repo]]"],
+                code_reference_links=["[[Code Ref - core-repo - app.rb]]"],
+            )
+        finally:
+            if old_fixture is None:
+                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
 
         self.assertIn("type: \"intermediate-packet\"", body)
         self.assertIn("basb_stage: \"distill\"", body)

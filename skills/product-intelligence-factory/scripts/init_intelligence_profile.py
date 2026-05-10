@@ -115,6 +115,14 @@ def build_profile() -> dict[str, object]:
             "include_tests": True,
             "include_dependency_graph": True,
             "parser_mode": "ast-when-available",
+            "source_file_mode": "git-tracked",
+            "include_untracked_code": False,
+        },
+        "business_value": {
+            "enabled": True,
+            "llm_model": "gpt-5.5",
+            "reasoning_effort": "xhigh",
+            "require_user_problem_for_output": True,
         },
         "retrieval_index": {
             "enabled": True,

@@ -49,6 +49,13 @@ profile:
 #   include_tests: true
 #   include_dependency_graph: true
 #   parser_mode: ast-when-available
+#   source_file_mode: git-tracked
+#   include_untracked_code: false
+# business_value:
+#   enabled: true
+#   llm_model: gpt-5.5
+#   reasoning_effort: xhigh
+#   require_user_problem_for_output: true
 # retrieval_index:
 #   enabled: true
 #   max_candidates_per_source: 30

@@ -117,6 +117,20 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                     errors.append("profile code_intelligence.max_files_per_repo must be positive.")
                 if code and code.get("parser_mode", "ast-when-available") not in {"ast-when-available", "regex-only"}:
                     errors.append("profile code_intelligence.parser_mode must be `ast-when-available` or `regex-only`.")
+                if code and code.get("source_file_mode", "git-tracked") not in {"git-tracked", "all"}:
+                    errors.append("profile code_intelligence.source_file_mode must be `git-tracked` or `all`.")
+                business = profile_data.get("business_value") or {}
+                if isinstance(business, dict) and business:
+                    model = str(business.get("llm_model") or "").strip()
+                    if not model:
+                        errors.append("profile business_value.llm_model is required.")
+                    else:
+                        validate_synthesis_model(errors, "profile business_value.llm_model", model)
+                    validate_reasoning_effort(
+                        errors,
+                        "profile business_value.reasoning_effort",
+                        business.get("reasoning_effort", "xhigh"),
+                    )
                 retrieval = profile_data.get("retrieval_index") or {}
                 if isinstance(retrieval, dict):
                     if "max_candidates_per_source" in retrieval:

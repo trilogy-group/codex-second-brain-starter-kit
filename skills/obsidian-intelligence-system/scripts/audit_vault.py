@@ -122,6 +122,7 @@ def render_report(
     orphan_resources: list[Path],
     outputs_without_evidence: list[Path],
     outputs_without_source_packet: list[Path],
+    outputs_without_business_value: list[Path],
     packets_without_forward_use: list[Path],
     missing_weekly_reviews: list[str],
     duplicate_stems: dict[str, list[Path]],
@@ -179,6 +180,10 @@ def render_report(
         lines.extend(["", "## Outputs Missing Source Packet"])
         lines.extend(f"- `{path.relative_to(vault)}`" for path in outputs_without_source_packet)
 
+    if outputs_without_business_value:
+        lines.extend(["", "## Outputs Missing Business Value"])
+        lines.extend(f"- `{path.relative_to(vault)}`" for path in outputs_without_business_value)
+
     if packets_without_forward_use:
         lines.extend(["", "## Packets Without Forward Use"])
         lines.extend(f"- `{path.relative_to(vault)}`" for path in packets_without_forward_use)
@@ -208,6 +213,7 @@ def render_report(
             orphan_resources,
             outputs_without_evidence,
             outputs_without_source_packet,
+            outputs_without_business_value,
             packets_without_forward_use,
             missing_weekly_reviews,
             duplicate_stems,
@@ -248,6 +254,7 @@ def main() -> None:
     active_projects_without_review: list[Path] = []
     outputs_without_evidence: list[Path] = []
     outputs_without_source_packet: list[Path] = []
+    outputs_without_business_value: list[Path] = []
     packets_without_forward_use: list[Path] = []
     weekly_review_notes: list[Path] = []
     frontmatter_by_path: dict[Path, dict[str, object]] = {}
@@ -297,6 +304,9 @@ def main() -> None:
                 outputs_without_evidence.append(path)
             if not frontmatter.get("source_packet"):
                 outputs_without_source_packet.append(path)
+            business_fields = ("target_persona", "user_problem", "business_value", "success_metric", "value_score", "evidence_confidence")
+            if any(not frontmatter.get(field) for field in business_fields):
+                outputs_without_business_value.append(path)
         if "90 Templates" not in path.parts and note_type == "intermediate-packet":
             forward_targets = ("[[Output Pipeline]]", "[[Initiative", "[[Decision", "[[Weekly Review", "[[Weekly Synthesis")
             if not any(target in text for target in forward_targets):
@@ -349,6 +359,7 @@ def main() -> None:
         orphan_resources=orphan_resources,
         outputs_without_evidence=outputs_without_evidence,
         outputs_without_source_packet=outputs_without_source_packet,
+        outputs_without_business_value=outputs_without_business_value,
         packets_without_forward_use=packets_without_forward_use,
         missing_weekly_reviews=missing_weekly_reviews,
         duplicate_stems=duplicate_stems,

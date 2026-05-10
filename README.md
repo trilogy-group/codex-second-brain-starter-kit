@@ -75,7 +75,7 @@ Typical use cases:
 
 ## Intelligence model defaults
 
-Full-fidelity LLM synthesis defaults to `gpt-5.5` with `xhigh` reasoning for both semantic cluster synthesis and generation shards. The workflow uses OpenAI's Responses API for these reasoning calls so the requested reasoning effort is explicit instead of silently falling back to a lower-quality chat-completions path.
+Full-fidelity LLM synthesis defaults to `gpt-5.5` with `xhigh` reasoning for semantic cluster synthesis, business-value synthesis, Product Ontology v2, and generation shards. The workflow uses OpenAI's Responses API for these reasoning calls so the requested reasoning effort is explicit instead of silently falling back to a lower-quality chat-completions path.
 
 Keep these settings in `profile.intelligence_path` unless you are intentionally testing a different quality/cost tradeoff:
 
@@ -85,6 +85,16 @@ semantic_clustering:
   reasoning_effort: xhigh
   llm_cluster_synthesis: true
 
+business_value:
+  enabled: true
+  llm_model: gpt-5.5
+  reasoning_effort: xhigh
+  require_user_problem_for_output: true
+
+code_intelligence:
+  source_file_mode: git-tracked
+  include_untracked_code: false
+
 generation_performance:
   agent_shards:
     worker_mode: llm-synthesis
@@ -92,7 +102,7 @@ generation_performance:
     reasoning_effort: xhigh
 ```
 
-The validator rejects `gpt-4.1-mini` for synthesis fields because it produces thinner intelligence and does not honor the reasoning-effort contract expected by this starter kit. If you change model or reasoning settings, run `--force` once so stale semantic, shard, and generated-note caches do not hide the change.
+The validator rejects `gpt-4.1-mini` for synthesis fields because it produces thinner intelligence and does not honor the reasoning-effort contract expected by this starter kit. Business-value intelligence and Product Ontology v2 fail clearly when OpenAI synthesis cannot run; they do not use deterministic template fallbacks. If you change model or reasoning settings, run `--force` once so stale semantic, shard, and generated-note caches do not hide the change.
 
 ## Performance for large source sets
 

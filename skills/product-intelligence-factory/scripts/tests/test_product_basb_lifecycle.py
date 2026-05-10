@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -46,7 +47,15 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         ]
 
         selected = module.select_output_candidates(packets)
-        body = module.build_output_candidate_note(selected[0])
+        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
+        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
+        try:
+            body = module.build_output_candidate_note(selected[0])
+        finally:
+            if old_fixture is None:
+                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
 
         self.assertEqual(len(selected), 12)
         self.assertIn("type: \"output\"", body)
@@ -54,6 +63,15 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         self.assertIn("source_packet:", body)
         self.assertIn("evidence_score:", body)
         self.assertIn("shipping_path:", body)
+        self.assertIn("target_persona:", body)
+        self.assertIn("user_problem:", body)
+        self.assertIn("business_value:", body)
+        self.assertIn("success_metric:", body)
+        self.assertIn("value_score:", body)
+        self.assertIn("evidence_confidence:", body)
+        self.assertIn("## User problem", body)
+        self.assertIn("## Business value", body)
+        self.assertIn("## Success metric", body)
         self.assertIn("## Evidence", body)
         self.assertIn("[[Packet", body)
 
@@ -89,18 +107,26 @@ class ProductBasbLifecycleTests(unittest.TestCase):
 
     def test_packet_notes_include_generated_output_candidate_backlinks(self) -> None:
         module = load_module(REBUILD_SCRIPT, "rebuild_product_brain_packet_backlink_test")
-        body = module.build_intermediate_packet_note(
-            capability={
-                "key": "platform-core",
-                "title": "Platform Core",
-                "description": "Core product behavior.",
-            },
-            support_links=["[[Support 1]]"],
-            wiki_links=[],
-            repo_note_links=[],
-            code_reference_links=["[[Code Ref 1]]"],
-            output_candidate_links=["[[Output Candidate - Platform Core]]"],
-        )
+        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
+        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
+        try:
+            body = module.build_intermediate_packet_note(
+                capability={
+                    "key": "platform-core",
+                    "title": "Platform Core",
+                    "description": "Core product behavior.",
+                },
+                support_links=["[[Support 1]]"],
+                wiki_links=[],
+                repo_note_links=[],
+                code_reference_links=["[[Code Ref 1]]"],
+                output_candidate_links=["[[Output Candidate - Platform Core]]"],
+            )
+        finally:
+            if old_fixture is None:
+                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
 
         self.assertIn("generated_output_candidates:", body)
         self.assertIn("[[Output Candidate - Platform Core]]", body)
@@ -180,6 +206,7 @@ class ProductBasbLifecycleTests(unittest.TestCase):
 
         self.assertIn("## Outputs Missing Evidence Links", completed.stdout)
         self.assertIn("## Outputs Missing Source Packet", completed.stdout)
+        self.assertIn("## Outputs Missing Business Value", completed.stdout)
         self.assertIn("## Packets Without Forward Use", completed.stdout)
         self.assertIn("## Missing Weekly Reviews", completed.stdout)
 
@@ -209,6 +236,9 @@ class ProductBasbLifecycleTests(unittest.TestCase):
             (inventory_dir / "semantic_clusters.json").write_text(
                 '{"clusters":[{"id":"semantic-cluster-1"}],"stats":{"cache_hits":8,"cache_misses":2,"openai_failures":0,"llm_cache_hits":3,"llm_cache_misses":1,"llm_failures":0}}\n'
             )
+            (inventory_dir / "business_value_report.json").write_text(
+                '{"ontology_quality_score":8.5,"persona_count":2,"jobs_to_be_done_count":3,"business_value_driver_count":2,"business_evidence_gaps":["Billing"]}\n'
+            )
             (inventory_dir / "embedding_cache.json").write_text('{"items":{"a":{},"b":{}}}\n')
             (inventory_dir / "llm_cluster_cache.json").write_text('{"items":{"cluster":{}}}\n')
             manifest = {
@@ -233,6 +263,11 @@ class ProductBasbLifecycleTests(unittest.TestCase):
         self.assertIn("- Semantic clusters: `1`", report)
         self.assertIn("- Embedding cache hit rate: `80%`", report)
         self.assertIn("- LLM synthesis cache hits: `3`", report)
+        self.assertIn("- Ontology quality score: `8.5`", report)
+        self.assertIn("- Personas: `2`", report)
+        self.assertIn("- Jobs to be done: `3`", report)
+        self.assertIn("- Business value drivers: `2`", report)
+        self.assertIn("- Business evidence gaps: `1`", report)
 
     def test_migration_dry_run_and_write_create_surfaces_without_overwriting_user_notes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -136,7 +136,8 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
     rebuild_cache = load_json_if_exists(inventory_dir / "rebuild_cache.json")
     rate_limits = load_json_if_exists(inventory_dir / "rate_limit_events.json")
     benchmark = load_json_if_exists(inventory_dir / "benchmark_report.json")
-    if not code_intel and not semantic and not embedding_cache and not llm_cache and not rebuild_cache and not rate_limits and not benchmark:
+    business_value = load_json_if_exists(inventory_dir / "business_value_report.json")
+    if not code_intel and not semantic and not embedding_cache and not llm_cache and not rebuild_cache and not rate_limits and not benchmark and not business_value:
         return {}
     summary = code_intel.get("summary") if isinstance(code_intel.get("summary"), dict) else {}
     graph = code_intel.get("graph") if isinstance(code_intel.get("graph"), dict) else {}
@@ -176,6 +177,11 @@ def inventory_quality_metrics(mirror_path: Path | None) -> dict[str, int | str]:
         "rate_limit_wait_seconds": str(rate_summary.get("total_wait_seconds", 0)),
         "benchmark_runs": len(benchmark_runs),
         "benchmark_digest_stable": "yes" if benchmark.get("digest_stable") else "no",
+        "ontology_quality_score": str(business_value.get("ontology_quality_score", 0)),
+        "persona_count": int(business_value.get("persona_count", 0) or 0),
+        "jobs_to_be_done_count": int(business_value.get("jobs_to_be_done_count", 0) or 0),
+        "business_value_driver_count": int(business_value.get("business_value_driver_count", 0) or 0),
+        "business_evidence_gap_count": len(business_value.get("business_evidence_gaps", []) if isinstance(business_value.get("business_evidence_gaps"), list) else []),
     }
 
 
@@ -296,6 +302,11 @@ def render_report(manifest: dict[str, object], manifest_path: Path) -> str:
         lines.append(f"- Rate-limit wait seconds: `{inventory_metrics['rate_limit_wait_seconds']}`")
         lines.append(f"- Benchmark runs: `{inventory_metrics['benchmark_runs']}`")
         lines.append(f"- Benchmark digest stable: `{inventory_metrics['benchmark_digest_stable']}`")
+        lines.append(f"- Ontology quality score: `{inventory_metrics['ontology_quality_score']}`")
+        lines.append(f"- Personas: `{inventory_metrics['persona_count']}`")
+        lines.append(f"- Jobs to be done: `{inventory_metrics['jobs_to_be_done_count']}`")
+        lines.append(f"- Business value drivers: `{inventory_metrics['business_value_driver_count']}`")
+        lines.append(f"- Business evidence gaps: `{inventory_metrics['business_evidence_gap_count']}`")
 
     lines.extend(["", "## Readiness Categories", ""])
     for category in categories:

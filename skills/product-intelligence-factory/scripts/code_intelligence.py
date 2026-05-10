@@ -141,6 +141,8 @@ def default_code_config(profile: dict[str, Any] | None = None) -> dict[str, Any]
         "include_tests": bool(configured.get("include_tests", True)),
         "include_dependency_graph": bool(configured.get("include_dependency_graph", True)),
         "parser_mode": str(configured.get("parser_mode", "ast-when-available")),
+        "source_file_mode": str(configured.get("source_file_mode", "git-tracked")),
+        "include_untracked_code": bool(configured.get("include_untracked_code", False)),
         "repo_analysis_workers": generation_config["repo_analysis_workers"],
         "code_analysis_workers": generation_config["code_analysis_workers"],
     }
@@ -191,17 +193,76 @@ def language_for_path(path: Path) -> str:
     }.get(path.suffix.lower(), "Code")
 
 
-def collect_code_files(repo_path: Path, max_files: int) -> list[Path]:
+GENERATED_PATH_PARTS = {
+    ".chrome-extension-profile",
+    ".next",
+    ".turbo",
+    ".venv",
+    ".vite",
+    "artifacts",
+    "cdk.out",
+    "coverage",
+    "tmp",
+    "target",
+}
+
+
+def is_generated_or_ignored_path(path: Path) -> bool:
+    return any(part in IGNORED_DIRS or part in GENERATED_PATH_PARTS or part.startswith(".chrome-extension-profile") for part in path.parts)
+
+
+def git_tracked_files(repo_path: Path) -> set[str] | None:
+    if not (repo_path / ".git").exists():
+        return None
+    try:
+        result = subprocess.run(["git", "-C", str(repo_path), "ls-files"], capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
+def collect_code_files_with_stats(repo_path: Path, config: dict[str, Any]) -> tuple[list[Path], dict[str, int]]:
     files: list[Path] = []
+    stats = {
+        "excluded_untracked_files": 0,
+        "excluded_generated_files": 0,
+        "excluded_ignored_files": 0,
+    }
     if not repo_path.exists():
-        return files
+        return files, stats
+    max_files = int(config["max_files_per_repo"])
+    tracked_files = git_tracked_files(repo_path) if config.get("source_file_mode") == "git-tracked" and not config.get("include_untracked_code") else None
     for path in sorted(repo_path.rglob("*")):
         if len(files) >= max_files:
             break
-        if any(part in IGNORED_DIRS for part in path.parts):
+        if not path.is_file():
             continue
-        if path.is_file() and is_code_like(path):
+        relative_path = path.relative_to(repo_path).as_posix()
+        if is_generated_or_ignored_path(path.relative_to(repo_path)):
+            if any(part in GENERATED_PATH_PARTS or part.startswith(".chrome-extension-profile") for part in path.relative_to(repo_path).parts):
+                stats["excluded_generated_files"] += 1
+            else:
+                stats["excluded_ignored_files"] += 1
+            continue
+        if tracked_files is not None and relative_path not in tracked_files:
+            stats["excluded_untracked_files"] += 1
+            continue
+        if is_code_like(path):
             files.append(path)
+    return files, stats
+
+
+def collect_code_files(repo_path: Path, max_files: int) -> list[Path]:
+    files, _stats = collect_code_files_with_stats(
+        repo_path,
+        {
+            "max_files_per_repo": max_files,
+            "source_file_mode": "all",
+            "include_untracked_code": True,
+        },
+    )
     return files
 
 
@@ -816,7 +877,7 @@ def collect_git_metrics(repo_path: Path, relative_paths: set[str]) -> dict[str, 
 
 def _repo_inputs(repo_item: tuple[str, Path], config: dict[str, Any]) -> dict[str, Any]:
     repo_name, repo_path = repo_item
-    code_files = collect_code_files(repo_path, config["max_files_per_repo"])
+    code_files, file_stats = collect_code_files_with_stats(repo_path, config)
     relative_paths = {path.relative_to(repo_path).as_posix() for path in code_files}
     git_metrics = collect_git_metrics(repo_path, relative_paths) if config["include_git_history"] else {}
     return {
@@ -824,6 +885,7 @@ def _repo_inputs(repo_item: tuple[str, Path], config: dict[str, Any]) -> dict[st
         "repo_path": repo_path,
         "code_files": code_files,
         "git_metrics": git_metrics,
+        "file_stats": file_stats,
     }
 
 
@@ -865,6 +927,8 @@ def repo_cache_payload(repo_name: str, repo_path: Path, config: dict[str, Any], 
             "include_tests": config["include_tests"],
             "include_dependency_graph": config["include_dependency_graph"],
             "parser_mode": config["parser_mode"],
+            "source_file_mode": config["source_file_mode"],
+            "include_untracked_code": config["include_untracked_code"],
         },
     }
 
@@ -1055,6 +1119,9 @@ def analyze_repositories(
                 "schema_count": sum(item["schema_count"] for item in repo_files),
                 "test_anchor_count": sum(item["test_anchor_count"] for item in repo_files),
                 "dependency_count": sum(item["dependency_count"] for item in repo_files),
+                "excluded_untracked_files": int(item.get("file_stats", {}).get("excluded_untracked_files", 0)),
+                "excluded_generated_files": int(item.get("file_stats", {}).get("excluded_generated_files", 0)),
+                "excluded_ignored_files": int(item.get("file_stats", {}).get("excluded_ignored_files", 0)),
                 "high_churn_files": [
                     f"{item['repo']}/{item['relative_path']}"
                     for item in sorted(repo_files, key=lambda value: (-value["churn_score"], value["relative_path"]))[:20]
@@ -1072,6 +1139,9 @@ def analyze_repositories(
         "schema_count": len(graph["schemas"]),
         "test_anchor_count": len(graph["tests"]),
         "dependency_edges": len(graph["dependencies"]),
+        "excluded_untracked_files": sum(int(item.get("file_stats", {}).get("excluded_untracked_files", 0)) for item in repo_inputs),
+        "excluded_generated_files": sum(int(item.get("file_stats", {}).get("excluded_generated_files", 0)) for item in repo_inputs),
+        "excluded_ignored_files": sum(int(item.get("file_stats", {}).get("excluded_ignored_files", 0)) for item in repo_inputs),
         "repo_cache_hits": repo_cache_hits,
         "repo_cache_misses": repo_cache_misses,
         "repo_cache_bypassed": repo_cache_bypassed,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 import tempfile
 import unittest
@@ -56,52 +57,60 @@ class NoteEnrichmentTests(unittest.TestCase):
             "source_ref": "100-overview.md",
         }
 
-        ontology = module.build_product_ontology(
-            manifest={"product": {"name": "Acme", "slug": "acme"}},
-            support_records=[support_record],
-            wiki_records=[],
-            repo_snapshots=[
-                {
-                    "name": "acme-app",
-                    "role": "primary",
-                    "branch": "main",
-                    "readme_title": "Acme",
-                    "readme_summary": "Acme is a customer advocacy platform.",
-                    "top_dirs": ["src"],
-                    "key_files": ["package.json"],
-                    "monorepo_services": ["api"],
-                    "monorepo_apps": ["web"],
-                }
-            ],
-            capability_rows=[
-                {
-                    "title": "Customer Advocacy",
-                    "link": "[[Customer Advocacy]]",
-                    "support_count": 1,
-                    "wiki_count": 0,
-                    "repos": ["acme-app"],
-                    "code_count": 2,
-                }
-            ],
-            code_intel={
-                "summary": {"route_count": 1, "schema_count": 1, "test_anchor_count": 1},
-                "repos": [{"repo": "acme-app", "test_anchor_count": 1}],
-                "files": [
+        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
+        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
+        try:
+            ontology = module.build_product_ontology(
+                manifest={"product": {"name": "Acme", "slug": "acme"}},
+                support_records=[support_record],
+                wiki_records=[],
+                repo_snapshots=[
                     {
-                        "repo": "acme-app",
-                        "relative_path": "src/api/campaigns.ts",
-                        "dependencies": [],
+                        "name": "acme-app",
+                        "role": "primary",
+                        "branch": "main",
+                        "readme_title": "Acme",
+                        "readme_summary": "Acme is a customer advocacy platform.",
+                        "top_dirs": ["src"],
+                        "key_files": ["package.json"],
+                        "monorepo_services": ["api"],
+                        "monorepo_apps": ["web"],
                     }
                 ],
-                "graph": {
-                    "routes": [{"from": "acme-app/src/api/campaigns.ts", "to": "GET /campaigns"}],
-                    "schemas": [{"from": "acme-app/src/api/campaigns.ts", "to": "type:Campaign"}],
-                    "tests": [{"from": "acme-app/src/api/campaigns.test.ts", "to": "campaign test"}],
+                capability_rows=[
+                    {
+                        "title": "Customer Advocacy",
+                        "link": "[[Customer Advocacy]]",
+                        "support_count": 1,
+                        "wiki_count": 0,
+                        "repos": ["acme-app"],
+                        "code_count": 2,
+                    }
+                ],
+                code_intel={
+                    "summary": {"route_count": 1, "schema_count": 1, "test_anchor_count": 1},
+                    "repos": [{"repo": "acme-app", "test_anchor_count": 1}],
+                    "files": [
+                        {
+                            "repo": "acme-app",
+                            "relative_path": "src/api/campaigns.ts",
+                            "dependencies": [],
+                        }
+                    ],
+                    "graph": {
+                        "routes": [{"from": "acme-app/src/api/campaigns.ts", "to": "GET /campaigns"}],
+                        "schemas": [{"from": "acme-app/src/api/campaigns.ts", "to": "type:Campaign"}],
+                        "tests": [{"from": "acme-app/src/api/campaigns.test.ts", "to": "campaign test"}],
+                    },
                 },
-            },
-            external_links=[],
-            docx_extracts=[],
-        )
+                external_links=[],
+                docx_extracts=[],
+            )
+        finally:
+            if old_fixture is None:
+                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
 
         self.assertEqual(ontology["source"], "codex-second-brain-starter-kit")
         self.assertEqual(ontology["product"]["slug"], "acme")
@@ -112,6 +121,101 @@ class NoteEnrichmentTests(unittest.TestCase):
         self.assertIn("campaign test", ontology["test_map"])
         self.assertEqual(ontology["fields"]["product_purpose"]["confidence"], "medium")
         self.assertEqual(ontology["fields"]["product_purpose"]["citations"][0]["source_type"], "support")
+
+    def test_product_ontology_v2_rejects_readme_images_and_extracts_business_value(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_ontology_v2_test")
+        module.configure_runtime(
+            {
+                "product": {"name": "Acme", "slug": "acme"},
+                "sources": {"stale_doc_hosts": []},
+            },
+            {
+                "capabilities": [
+                    {
+                        "key": "workspace-intelligence",
+                        "title": "Workspace Intelligence",
+                        "description": "Searchable workspace intelligence for support and product teams.",
+                        "keywords": ["workspace", "support", "intelligence"],
+                        "repos": ["acme-app"],
+                    }
+                ]
+            },
+        )
+        support_record = {
+            "item": {
+                "title": "Acme Workspace Overview",
+                "source_url": "https://support.example.com/article/200",
+                "relative_path": "200-workspace.md",
+            },
+            "text": "Support managers use Acme to find product answers faster, reduce repeat escalations, and keep customer-facing guidance current.",
+            "signals": {
+                "title": "Acme Workspace Overview",
+                "headings": ["Overview"],
+                "bullets": ["Support managers reduce repeat escalations with current product guidance."],
+                "paragraphs": [
+                    "Support managers use Acme to find product answers faster, reduce repeat escalations, and keep customer-facing guidance current."
+                ],
+            },
+            "source_ref": "200-workspace.md",
+        }
+
+        old_fixture = os.environ.get("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE")
+        os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = "1"
+        try:
+            ontology = module.build_product_ontology(
+                manifest={"product": {"name": "Acme", "slug": "acme"}},
+                support_records=[support_record],
+                wiki_records=[],
+                repo_snapshots=[
+                    {
+                        "name": "acme-app",
+                        "role": "primary",
+                        "branch": "main",
+                        "readme_title": "Acme",
+                        "readme_summary": '<img src="https://example.com/logo.png" width="30%">',
+                        "top_dirs": ["src"],
+                        "key_files": ["package.json"],
+                        "monorepo_services": ["api"],
+                        "monorepo_apps": ["web"],
+                    }
+                ],
+                capability_rows=[
+                    {
+                        "title": "Workspace Intelligence",
+                        "link": "[[Workspace Intelligence]]",
+                        "support_count": 1,
+                        "wiki_count": 0,
+                        "repos": ["acme-app"],
+                        "code_count": 1,
+                        "code_reference_links": ["[[Code Ref - acme-app - src -- search.py|acme-app/src/search.py:1]]"],
+                    }
+                ],
+                code_intel={
+                    "summary": {"route_count": 1, "schema_count": 0, "test_anchor_count": 1},
+                    "repos": [{"repo": "acme-app", "test_anchor_count": 1}],
+                    "files": [{"repo": "acme-app", "relative_path": "src/search.py", "dependencies": []}],
+                    "graph": {
+                        "routes": [{"from": "acme-app/src/search.py", "to": "GET /answers"}],
+                        "schemas": [],
+                        "tests": [{"from": "acme-app/tests/test_search.py", "to": "search freshness test"}],
+                    },
+                },
+                external_links=[],
+                docx_extracts=[],
+            )
+        finally:
+            if old_fixture is None:
+                os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
+            else:
+                os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
+
+        self.assertEqual(ontology["schema_version"], 2)
+        self.assertNotIn("<img", ontology["product_purpose"])
+        self.assertIn("Support managers", ontology["product_purpose"])
+        self.assertEqual(ontology["target_personas"][0]["name"], "Support managers")
+        self.assertIn("reduce repeat escalations", ontology["business_value_drivers"][0]["business_value"])
+        self.assertEqual(ontology["capabilities_v2"][0]["title"], "Workspace Intelligence")
+        self.assertIn("user_problem", ontology["capabilities_v2"][0])
 
     def test_support_note_preserves_full_article_content_and_obsidian_links(self) -> None:
         module = load_module(MODULE_PATH, "rebuild_product_brain_note_test")

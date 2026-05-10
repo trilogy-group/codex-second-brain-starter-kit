@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -16,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
+import urllib.request
 
 import yaml
 
@@ -31,6 +33,7 @@ import generation_progress
 import generation_shards
 import incremental_cache
 import note_rendering
+import openai_responses
 import rate_limits
 import semantic_clustering
 
@@ -50,6 +53,7 @@ PRODUCT_CONTEXT = {"name": "Product", "slug": "product"}
 STALE_DOC_HOSTS: set[str] = set()
 CAPABILITIES: list[dict[str, Any]] = []
 CAPABILITY_BY_KEY: dict[str, dict[str, Any]] = {}
+BUSINESS_VALUE_CONFIG: dict[str, Any] = {}
 CODE_EXTENSIONS = {
     ".js",
     ".jsx",
@@ -170,6 +174,272 @@ EXTERNAL_SYSTEM_TERMS = (
 )
 
 
+BUSINESS_VALUE_PROMPT_VERSION = "product-basb-business-value-v1"
+
+
+def default_business_value_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
+    configured = dict((profile or {}).get("business_value") or {})
+    return {
+        "enabled": bool(configured.get("enabled", True)),
+        "llm_model": openai_responses.ensure_allowed_synthesis_model(
+            str(configured.get("llm_model") or openai_responses.DEFAULT_REASONING_MODEL),
+            field="business_value.llm_model",
+        ),
+        "reasoning_effort": openai_responses.normalize_reasoning_effort(
+            configured.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT)
+        ),
+        "require_user_problem_for_output": bool(configured.get("require_user_problem_for_output", True)),
+    }
+
+
+def _business_fixture_enabled() -> bool:
+    return any(
+        os.environ.get(name) == "1"
+        for name in ("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", "PRODUCT_BASB_LLM_FIXTURE", "PRODUCT_BASB_EMBEDDING_FIXTURE")
+    )
+
+
+def _compact_text(value: Any, limit: int = 500) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit].strip()
+
+
+def _looks_like_placeholder_intelligence(value: str) -> bool:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return True
+    if "<img" in cleaned or cleaned.startswith("![") or cleaned.startswith("<"):
+        return True
+    if cleaned in {"overview", "product overview", "readme", "getting started"}:
+        return True
+    return False
+
+
+def _business_citations_from_cards(cards: list[dict[str, Any]], limit: int = 6) -> list[dict[str, Any]]:
+    citations: list[dict[str, Any]] = []
+    for card in cards:
+        citation = card.get("citation")
+        if isinstance(citation, dict):
+            citations.append(citation)
+        if len(citations) >= limit:
+            break
+    return citations
+
+
+class OpenAIBusinessValueClient:
+    def __init__(self, api_key: str | None = None) -> None:
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
+
+    def synthesize(self, task: str, payload: dict[str, Any], model: str, reasoning_effort: str) -> dict[str, Any]:
+        if not self.api_key:
+            raise SystemExit("OPENAI_API_KEY is required for business-value and Product Ontology v2 synthesis.")
+        request_payload = json.dumps(
+            openai_responses.build_json_response_payload(
+                model=model,
+                reasoning_effort=reasoning_effort,
+                instructions=(
+                    "You synthesize Product BASB business-value intelligence from compact evidence cards. "
+                    "Use only the provided evidence. Do not return templates, headings as facts, raw HTML, or image markdown. "
+                    "Return JSON only. Every generated business claim must include evidence citations when available."
+                ),
+                user_content=json.dumps(
+                    {
+                        "prompt_version": BUSINESS_VALUE_PROMPT_VERSION,
+                        "task": task,
+                        "required_model_behavior": "synthesize user problems, personas, business value, success metrics, and implementation leverage",
+                        "payload": payload,
+                    },
+                    sort_keys=True,
+                ),
+            )
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            openai_responses.OPENAI_RESPONSES_URL,
+            data=request_payload,
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=90) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        return openai_responses.parse_json_response(data)
+
+
+class FixtureBusinessValueClient:
+    def synthesize(self, task: str, payload: dict[str, Any], model: str, reasoning_effort: str) -> dict[str, Any]:
+        del model, reasoning_effort
+        if task == "product_ontology":
+            return self._product_ontology(payload)
+        if task == "output_candidate":
+            return self._output_candidate(payload)
+        if task == "capability":
+            return self._capability(payload)
+        if task == "packet":
+            return self._packet(payload)
+        return {}
+
+    def _first_card_text(self, payload: dict[str, Any]) -> str:
+        cards = payload.get("evidence_cards") or payload.get("cards") or []
+        if isinstance(cards, list):
+            for card in cards:
+                if isinstance(card, dict) and str(card.get("summary") or "").strip():
+                    return str(card["summary"])
+        return str(payload.get("summary") or payload.get("description") or "")
+
+    def _persona_for_text(self, text: str) -> str:
+        lowered = text.casefold()
+        if "support manager" in lowered:
+            return "Support managers"
+        if "advocate" in lowered:
+            return "Customer advocates"
+        if "admin" in lowered:
+            return "Product admins"
+        return "Product teams"
+
+    def _product_ontology(self, payload: dict[str, Any]) -> dict[str, Any]:
+        cards = [card for card in payload.get("evidence_cards", []) if isinstance(card, dict)]
+        text = self._first_card_text(payload)
+        persona = self._persona_for_text(text)
+        capability = (payload.get("capability_rows") or [{"title": "Product Capability"}])[0]
+        title = str(capability.get("title") or "Product Capability")
+        citations = _business_citations_from_cards(cards)
+        business_value = "reduce repeat escalations" if "repeat escalation" in text.casefold() else "ship more reliable product work from evidence"
+        return {
+            "product_purpose": text or "Product teams use this system to turn source evidence into shippable product decisions.",
+            "target_personas": [
+                {
+                    "name": persona,
+                    "problem": "They need trustworthy product evidence without searching every raw source.",
+                    "desired_outcome": business_value,
+                    "evidence": citations,
+                    "confidence": "medium",
+                }
+            ],
+            "jobs_to_be_done": [
+                {
+                    "job": "Find current product truth and implementation anchors.",
+                    "trigger": "A support, product, or engineering question needs evidence.",
+                    "outcome": business_value,
+                    "evidence": citations,
+                    "confidence": "medium",
+                }
+            ],
+            "business_value_drivers": [
+                {
+                    "driver": "Support and delivery efficiency",
+                    "business_value": business_value,
+                    "success_metric": "Fewer repeated escalations and faster evidence-backed decisions.",
+                    "evidence": citations,
+                    "confidence": "medium",
+                }
+            ],
+            "capabilities": [
+                {
+                    "title": title,
+                    "user_problem": "Teams need reusable evidence and code anchors for this capability.",
+                    "business_value": business_value,
+                    "success_metrics": ["Evidence-backed decisions can be made without reopening raw sources."],
+                    "target_persona": persona,
+                    "code_surfaces": capability.get("code_reference_links", []),
+                    "evidence_confidence": "medium",
+                    "value_score": 7,
+                    "implementation_leverage": "Use linked code surfaces and packets to scope delivery work.",
+                    "evidence": citations,
+                }
+            ],
+            "workflows": [
+                {
+                    "name": f"{title} evidence-to-action workflow",
+                    "actor": persona,
+                    "start_trigger": "A product question or delivery task needs source-backed context.",
+                    "outcome": business_value,
+                    "key_steps": ["Review ontology", "Open packet evidence", "Promote output candidate"],
+                    "code_surfaces": capability.get("code_reference_links", []),
+                    "evidence": citations,
+                    "confidence": "medium",
+                }
+            ],
+            "risks_and_opportunities": [],
+            "ontology_confidence": "medium",
+        }
+
+    def _capability(self, payload: dict[str, Any]) -> dict[str, Any]:
+        title = str(payload.get("title") or "Product capability")
+        description = str(payload.get("description") or "")
+        persona = self._persona_for_text(description)
+        return {
+            "target_persona": persona,
+            "user_problem": f"{persona} need reliable evidence and implementation anchors for {title}.",
+            "business_value": "Faster evidence-backed product decisions with lower implementation risk.",
+            "success_metric": "A reviewer can find source evidence, code surfaces, and the next shippable artifact from this note.",
+            "value_score": 7,
+            "evidence_confidence": "medium",
+            "implementation_leverage": "Use representative code paths and linked packets to scope implementation and tests.",
+        }
+
+    def _packet(self, payload: dict[str, Any]) -> dict[str, Any]:
+        title = str(payload.get("title") or "Reusable packet")
+        return {
+            "target_persona": "Product and engineering teams",
+            "user_problem": f"Teams need {title} translated from evidence into reusable delivery context.",
+            "business_value": "Reusable intelligence reduces repeated analysis before product decisions.",
+            "success_metric": "The packet can feed an output candidate with evidence and implementation anchors.",
+            "value_score": 6,
+            "evidence_confidence": "medium",
+            "implementation_leverage": "Use source links and code references to validate the work before shipping.",
+        }
+
+    def _output_candidate(self, payload: dict[str, Any]) -> dict[str, Any]:
+        title = str(payload.get("title") or "Output candidate")
+        return {
+            "target_persona": "Product and engineering teams",
+            "user_problem": f"Teams need {title} converted into a concrete shippable draft with evidence.",
+            "business_value": "The candidate turns reusable intelligence into delivery work with traceable evidence.",
+            "success_metric": "The promoted draft has linked evidence, implementation anchors, and acceptance criteria.",
+            "value_score": 7,
+            "evidence_confidence": "medium",
+            "implementation_leverage": "Start from the source packet, then validate linked code and evidence before promotion.",
+            "why_now": "The evidence score and implementation anchors are strong enough to justify review.",
+        }
+
+
+def business_value_client() -> OpenAIBusinessValueClient | FixtureBusinessValueClient:
+    if _business_fixture_enabled():
+        return FixtureBusinessValueClient()
+    return OpenAIBusinessValueClient()
+
+
+def synthesize_business_value(task: str, payload: dict[str, Any]) -> dict[str, Any]:
+    config = BUSINESS_VALUE_CONFIG or default_business_value_config({})
+    if not config.get("enabled", True):
+        raise SystemExit("business_value.enabled must remain true; generated intelligence requires GPT-5.5/xhigh synthesis.")
+    return business_value_client().synthesize(
+        task,
+        payload,
+        str(config["llm_model"]),
+        str(config["reasoning_effort"]),
+    )
+
+
+def normalized_business_value_fields(synthesis: dict[str, Any], *, require_user_problem: bool = False) -> dict[str, Any]:
+    fields = {
+        "target_persona": _compact_text(synthesis.get("target_persona") or "Product and engineering teams", 180),
+        "user_problem": _compact_text(synthesis.get("user_problem"), 500),
+        "business_value": _compact_text(synthesis.get("business_value"), 500),
+        "success_metric": _compact_text(synthesis.get("success_metric"), 500),
+        "value_score": int(synthesis.get("value_score") or 0),
+        "evidence_confidence": _compact_text(synthesis.get("evidence_confidence") or "medium", 80),
+        "implementation_leverage": _compact_text(synthesis.get("implementation_leverage"), 500),
+    }
+    if require_user_problem and not fields["user_problem"]:
+        raise SystemExit("GPT business-value synthesis did not return user_problem for an output candidate.")
+    if not fields["business_value"]:
+        raise SystemExit("GPT business-value synthesis did not return business_value.")
+    if not fields["success_metric"]:
+        raise SystemExit("GPT business-value synthesis did not return success_metric.")
+    fields["value_score"] = max(0, min(10, fields["value_score"]))
+    return fields
+
+
 def load_product_profile(manifest: dict[str, Any]) -> dict[str, Any]:
     profile_path = manifest.get("profile", {}).get("intelligence_path")
     if not profile_path:
@@ -189,6 +459,7 @@ def load_product_profile(manifest: dict[str, Any]) -> dict[str, Any]:
         "rate_limits": generation_performance.default_rate_limit_config(data),
         "semantic_clustering": semantic_clustering.default_semantic_config(data),
         "code_intelligence": code_intelligence.default_code_config(data),
+        "business_value": default_business_value_config(data),
     }
 
 
@@ -214,7 +485,7 @@ def capabilities_with_default_repos(capabilities: list[dict[str, Any]], repo_nam
 
 
 def configure_runtime(manifest: dict[str, Any], profile: dict[str, Any]) -> None:
-    global PRODUCT_CONTEXT, STALE_DOC_HOSTS, CAPABILITIES, CAPABILITY_BY_KEY
+    global PRODUCT_CONTEXT, STALE_DOC_HOSTS, CAPABILITIES, CAPABILITY_BY_KEY, BUSINESS_VALUE_CONFIG
     product = manifest.get("product") or {}
     PRODUCT_CONTEXT = {
         "name": str(product.get("name", "Product")),
@@ -227,6 +498,7 @@ def configure_runtime(manifest: dict[str, Any], profile: dict[str, Any]) -> None
     }
     CAPABILITIES = capabilities_with_default_repos(list(profile["capabilities"]), manifest_repo_names(manifest))
     CAPABILITY_BY_KEY = {item["key"]: item for item in CAPABILITIES}
+    BUSINESS_VALUE_CONFIG = default_business_value_config(profile)
 
 
 def repo_path_by_role(manifest: dict[str, Any], role: str) -> Path | None:
@@ -2381,6 +2653,21 @@ def build_capability_note(
 ) -> str:
     status_counts = Counter(record["status"] for record in link_records)
     domain_counts = Counter(record["domain"] for record in link_records)
+    business_value = normalized_business_value_fields(
+        synthesize_business_value(
+            "capability",
+            {
+                "title": capability["title"],
+                "key": capability["key"],
+                "description": capability.get("description", ""),
+                "support_links": support_links[:20],
+                "wiki_links": wiki_links[:20],
+                "repo_note_links": repo_note_links[:12],
+                "code_reference_links": code_reference_links[:20],
+                "linked_domains": dict(domain_counts),
+            },
+        )
+    )
     lines = [
         frontmatter(
             {
@@ -2395,6 +2682,12 @@ def build_capability_note(
                     distillation="executive",
                     actionability="soon",
                 ),
+                "target_persona": business_value["target_persona"],
+                "user_problem": business_value["user_problem"],
+                "business_value": business_value["business_value"],
+                "success_metric": business_value["success_metric"],
+                "value_score": business_value["value_score"],
+                "evidence_confidence": business_value["evidence_confidence"],
                 "tags": ["capability", capability["key"]],
             }
         ),
@@ -2411,7 +2704,13 @@ def build_capability_note(
         f"- Linked pages by status: `{dict(status_counts) if status_counts else {'none': 0}}`",
     ]
     lines.extend(["", "## Essence", ""])
-    lines.append(f"- This capability groups evidence and implementation anchors for {capability['title']}.")
+    lines.append(f"- {business_value['business_value']}")
+    lines.append(f"- Evidence confidence: `{business_value['evidence_confidence']}`.")
+    lines.extend(["", "## Who benefits", "", f"- {business_value['target_persona']}"])
+    lines.extend(["", "## User problem", "", f"- {business_value['user_problem']}"])
+    lines.extend(["", "## Business value", "", f"- {business_value['business_value']}"])
+    lines.extend(["", "## Success signals", "", f"- {business_value['success_metric']}"])
+    lines.extend(["", "## Implementation leverage", "", f"- {business_value['implementation_leverage']}"])
     lines.extend(["", "## Use in current project", ""])
     if code_reference_links:
         lines.append("- Use the representative code paths to scope implementation, review, and testing work.")
@@ -2556,6 +2855,22 @@ def build_intermediate_packet_note(
         stale_doc_count=stale_doc_count,
         shard_insight_count=len(shard_insight_links),
     )
+    business_value = normalized_business_value_fields(
+        synthesize_business_value(
+            "packet",
+            {
+                "title": capability["title"],
+                "description": capability.get("description", ""),
+                "packet_kind": packet_kind,
+                "evidence_score": score,
+                "support_links": support_links[:20],
+                "wiki_links": wiki_links[:20],
+                "code_reference_links": code_reference_links[:20],
+                "conflict_links": conflict_links[:20],
+                "shard_insight_links": shard_insight_links[:12],
+            },
+        )
+    )
     lines = [
         frontmatter(
             {
@@ -2567,6 +2882,12 @@ def build_intermediate_packet_note(
                 "packet_kind": packet_kind,
                 "evidence_score": score,
                 "generated_output_candidates": output_candidate_links,
+                "target_persona": business_value["target_persona"],
+                "user_problem": business_value["user_problem"],
+                "business_value": business_value["business_value"],
+                "success_metric": business_value["success_metric"],
+                "value_score": business_value["value_score"],
+                "evidence_confidence": business_value["evidence_confidence"],
                 **basb_frontmatter(
                     stage="distill",
                     para="resource",
@@ -2584,6 +2905,7 @@ def build_intermediate_packet_note(
         f"- {capability['description']}",
         f"- Evidence coverage: `{len(support_links)}` support notes, `{len(wiki_links)}` wiki notes, `{len(code_reference_links)}` code references.",
         f"- Evidence score: `{score}/10`.",
+        f"- Business value: {business_value['business_value']}",
         "",
         "## Highlights",
         "",
@@ -2600,7 +2922,9 @@ def build_intermediate_packet_note(
         "",
         "## Executive use",
         "",
-        "- Promote this packet into an output candidate when the evidence score, code links, or conflict signals justify delivery follow-up.",
+        f"- User problem: {business_value['user_problem']}",
+        f"- Success metric: {business_value['success_metric']}",
+        f"- Implementation leverage: {business_value['implementation_leverage']}",
         "",
         "## Reusable building block",
         "",
@@ -2743,7 +3067,21 @@ def select_output_candidates(packet_records: list[dict[str, Any]], limit: int = 
     return ranked[:limit]
 
 
-def build_output_candidate_note(packet: dict[str, Any]) -> str:
+def output_candidate_business_payload(packet: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "title": packet.get("title", ""),
+        "packet_kind": packet.get("packet_kind", ""),
+        "evidence_score": packet.get("evidence_score", 0),
+        "source_packet": packet.get("link", ""),
+        "support_links": packet.get("support_links", [])[:20],
+        "wiki_links": packet.get("wiki_links", [])[:20],
+        "code_reference_links": packet.get("code_reference_links", [])[:20],
+        "conflict_links": packet.get("conflict_links", [])[:20],
+        "shard_insight_links": packet.get("shard_insight_links", [])[:12],
+    }
+
+
+def build_output_candidate_note(packet: dict[str, Any], output_synthesis: dict[str, Any] | None = None) -> str:
     output_kind = infer_output_kind(packet)
     title = f"{packet['title']} Output Candidate"
     evidence_links = unique_lines(
@@ -2757,6 +3095,11 @@ def build_output_candidate_note(packet: dict[str, Any]) -> str:
         ],
         40,
     )
+    output_synthesis = output_synthesis or synthesize_business_value("output_candidate", output_candidate_business_payload(packet))
+    business_value = normalized_business_value_fields(
+        output_synthesis,
+        require_user_problem=bool((BUSINESS_VALUE_CONFIG or default_business_value_config({})).get("require_user_problem_for_output", True)),
+    )
     lines = [
         frontmatter(
             {
@@ -2769,6 +3112,12 @@ def build_output_candidate_note(packet: dict[str, Any]) -> str:
                 "source_packet": packet["link"],
                 "evidence_score": packet.get("evidence_score", 0),
                 "shipping_path": shipping_path_for_kind(output_kind),
+                "target_persona": business_value["target_persona"],
+                "user_problem": business_value["user_problem"],
+                "business_value": business_value["business_value"],
+                "success_metric": business_value["success_metric"],
+                "value_score": business_value["value_score"],
+                "evidence_confidence": business_value["evidence_confidence"],
                 **basb_frontmatter(
                     stage="express",
                     para="project",
@@ -2787,6 +3136,34 @@ def build_output_candidate_note(packet: dict[str, Any]) -> str:
         "## Decision or ask",
         "",
         f"- Convert {packet['link']} into a shippable `{output_kind}` if the linked evidence still reflects current product reality.",
+        "",
+        "## User problem",
+        "",
+        f"- {business_value['user_problem']}",
+        "",
+        "## Target persona",
+        "",
+        f"- {business_value['target_persona']}",
+        "",
+        "## Business value",
+        "",
+        f"- {business_value['business_value']}",
+        "",
+        "## Success metric",
+        "",
+        f"- {business_value['success_metric']}",
+        "",
+        "## Why now",
+        "",
+        f"- {_compact_text(output_synthesis.get('why_now') or 'The linked evidence is strong enough to justify review.', 500)}",
+        "",
+        "## Implementation leverage",
+        "",
+        f"- {business_value['implementation_leverage']}",
+        "",
+        "## Evidence confidence",
+        "",
+        f"- `{business_value['evidence_confidence']}` with value score `{business_value['value_score']}/10`.",
         "",
         "## Evidence",
         "",
@@ -3292,6 +3669,21 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
         [str(link) for link in cluster.get("shard_insight_links", []) if str(link).strip()],
         12,
     )
+    business_value = normalized_business_value_fields(
+        synthesize_business_value(
+            "packet",
+            {
+                "title": cluster.get("theme", "Semantic Evidence Cluster"),
+                "description": cluster.get("llm_summary") or cluster.get("why_this_cluster_exists") or "",
+                "packet_kind": "semantic-cluster",
+                "evidence_score": cluster.get("evidence_score", 0),
+                "evidence_links": evidence_links[:30],
+                "code_reference_links": code_reference_links[:20],
+                "code_terms": code_terms[:20],
+                "shard_insight_links": shard_insight_links[:12],
+            },
+        )
+    )
     lines = [
         frontmatter(
             {
@@ -3307,6 +3699,12 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
                 "llm_model": cluster.get("llm_model", ""),
                 "llm_reasoning_effort": cluster.get("llm_reasoning_effort", ""),
                 "generated_output_candidates": output_candidate_links,
+                "target_persona": business_value["target_persona"],
+                "user_problem": business_value["user_problem"],
+                "business_value": business_value["business_value"],
+                "success_metric": business_value["success_metric"],
+                "value_score": business_value["value_score"],
+                "evidence_confidence": business_value["evidence_confidence"],
                 **basb_frontmatter(
                     stage="distill",
                     para="resource",
@@ -3329,6 +3727,13 @@ def build_semantic_packet_note(cluster: dict[str, Any], output_candidate_links: 
         "",
         f"- {cluster.get('why_this_cluster_exists') or 'These sources were grouped by OpenAI embeddings over compact evidence cards drawn from support, wiki, code-reference, and generated-note context.'}",
         "- The cluster is meant to reveal reusable work themes across sources that may not use the same wording.",
+        "",
+        "## Business use",
+        "",
+        f"- User problem: {business_value['user_problem']}",
+        f"- Business value: {business_value['business_value']}",
+        f"- Success metric: {business_value['success_metric']}",
+        f"- Implementation leverage: {business_value['implementation_leverage']}",
         "",
     ]
     if cluster.get("llm_summary"):
@@ -3412,6 +3817,16 @@ def build_product_capability_map(capability_rows: list[dict[str, Any]]) -> str:
         lines.append(f"- Wiki notes: `{row['wiki_count']}`")
         lines.append(f"- Repositories: {', '.join(f'`{repo}`' for repo in row['repos'])}")
         lines.append(f"- Code hits: `{row['code_count']}`")
+        if row.get("target_persona"):
+            lines.append(f"- Target persona: {row['target_persona']}")
+        if row.get("user_problem"):
+            lines.append(f"- User problem: {row['user_problem']}")
+        if row.get("business_value"):
+            lines.append(f"- Business value: {row['business_value']}")
+        if row.get("success_metric"):
+            lines.append(f"- Success metric: {row['success_metric']}")
+        if row.get("value_score"):
+            lines.append(f"- Value score: `{row['value_score']}/10`")
         code_reference_links = row.get("code_reference_links") or []
         if code_reference_links:
             lines.append("- Representative code references:")
@@ -3420,6 +3835,104 @@ def build_product_capability_map(capability_rows: list[dict[str, Any]]) -> str:
             lines.append("- Representative code references: none generated yet")
         lines.append("")
     lines.extend(["## Related notes", "", "- [[Support Articles Hub]]", "- [[Wiki Pages Hub]]", "- [[Code Intelligence Hub]]", "- [[Intelligence Home]]"])
+    return "\n".join(lines)
+
+
+def build_business_value_report(product_ontology: dict[str, Any], capability_rows: list[dict[str, Any]], output_records: list[dict[str, Any]]) -> dict[str, Any]:
+    ontology_checks = {
+        "has_product_purpose": bool(product_ontology.get("product_purpose")) and not _looks_like_placeholder_intelligence(str(product_ontology.get("product_purpose"))),
+        "has_target_personas": bool(product_ontology.get("target_personas")),
+        "has_jobs_to_be_done": bool(product_ontology.get("jobs_to_be_done")),
+        "has_business_value_drivers": bool(product_ontology.get("business_value_drivers")),
+        "has_capability_objects": bool(product_ontology.get("capabilities_v2")),
+    }
+    capability_value_coverage = [
+        {
+            "title": row.get("title"),
+            "has_business_value": bool(row.get("business_value")),
+            "has_user_problem": bool(row.get("user_problem")),
+            "has_code_references": bool(row.get("code_reference_links")),
+            "value_score": int(row.get("value_score") or 0),
+        }
+        for row in capability_rows
+    ]
+    output_business_coverage = [
+        {
+            "title": record.get("title"),
+            "has_business_value": bool(record.get("business_value")),
+            "has_user_problem": bool(record.get("user_problem")),
+            "has_success_metric": bool(record.get("success_metric")),
+            "value_score": int(record.get("value_score") or 0),
+        }
+        for record in output_records
+    ]
+    ontology_quality_score = round(10 * sum(1 for value in ontology_checks.values() if value) / max(1, len(ontology_checks)), 2)
+    return {
+        "schema_version": 1,
+        "generated_at": DATE,
+        "ontology_quality_score": ontology_quality_score,
+        "ontology_checks": ontology_checks,
+        "persona_count": len(product_ontology.get("target_personas", []) or []),
+        "jobs_to_be_done_count": len(product_ontology.get("jobs_to_be_done", []) or []),
+        "business_value_driver_count": len(product_ontology.get("business_value_drivers", []) or []),
+        "capability_value_coverage": capability_value_coverage,
+        "output_business_value_coverage": output_business_coverage,
+        "business_evidence_gaps": [
+            item["title"]
+            for item in capability_value_coverage
+            if not item["has_business_value"] or not item["has_user_problem"] or not item["has_code_references"]
+        ],
+    }
+
+
+def build_product_ontology_note(product_ontology: dict[str, Any], business_report: dict[str, Any]) -> str:
+    lines = [
+        frontmatter({"type": "hub", "area": PRODUCT_CONTEXT["slug"], "source": "generated", "tags": ["product", "ontology", "business-value"]}),
+        "# Product Ontology",
+        "",
+        "## Product purpose",
+        "",
+        f"- {product_ontology.get('product_purpose', 'No GPT-synthesized product purpose was generated.')}",
+        "",
+        "## Target personas",
+        "",
+    ]
+    for persona in product_ontology.get("target_personas", [])[:12]:
+        if not isinstance(persona, dict):
+            continue
+        lines.append(f"- **{persona.get('name', 'Persona')}**: {persona.get('problem', '')} Outcome: {persona.get('desired_outcome', '')}")
+    lines.extend(["", "## Jobs to be done", ""])
+    for job in product_ontology.get("jobs_to_be_done", [])[:12]:
+        if isinstance(job, dict):
+            lines.append(f"- **{job.get('job', 'Job')}**: {job.get('outcome', '')}")
+    lines.extend(["", "## Business value drivers", ""])
+    for driver in product_ontology.get("business_value_drivers", [])[:12]:
+        if isinstance(driver, dict):
+            lines.append(f"- **{driver.get('driver', 'Value driver')}**: {driver.get('business_value', '')} Metric: {driver.get('success_metric', '')}")
+    lines.extend(["", "## Capabilities", ""])
+    for capability in product_ontology.get("capabilities_v2", [])[:20]:
+        if isinstance(capability, dict):
+            lines.append(
+                f"- **{capability.get('title', 'Capability')}**: {capability.get('business_value', '')} "
+                f"Score: `{capability.get('value_score', 0)}/10`"
+            )
+    lines.extend(
+        [
+            "",
+            "## Quality",
+            "",
+            f"- Ontology quality score: `{business_report.get('ontology_quality_score', 0)}/10`",
+            f"- Persona count: `{business_report.get('persona_count', 0)}`",
+            f"- Business value drivers: `{business_report.get('business_value_driver_count', 0)}`",
+            "",
+            "## Related notes",
+            "",
+            "- [[Product Capability Map]]",
+            "- [[Output Pipeline]]",
+            "- [[Intermediate Packet Index]]",
+            "- [[Intelligence Home]]",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -3755,62 +4268,82 @@ def source_record_citation(record: dict[str, Any], source_type: str) -> dict[str
     )
 
 
-def first_product_purpose(
-    product_name: str,
+def product_business_evidence_cards(
     support_records: list[dict[str, Any]],
     wiki_records: list[dict[str, Any]],
     repo_snapshots: list[dict[str, Any]],
-) -> tuple[str, list[dict[str, str]]]:
-    preferred_terms = ("overview", "introduction", "readme", "getting started", "what it does", "product reference")
-    for record in [*support_records, *wiki_records]:
-        haystack = f"{record['signals'].get('title', '')} {record.get('source_ref', '')}".lower()
-        if not any(term in haystack for term in preferred_terms):
-            continue
-        paragraphs = record["signals"].get("paragraphs") or []
-        if paragraphs:
-            source_type = "support" if record in support_records else "wiki"
-            return paragraphs[0], [source_record_citation(record, source_type)]
-    for snapshot in repo_snapshots:
-        summary = normalize_text(str(snapshot.get("readme_summary") or ""))
-        if summary:
-            return summary, [
-                ontology_citation(
+    capability_rows: list[dict[str, Any]],
+    code_intel: dict[str, Any],
+) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for source_type, records in (("support", support_records), ("wiki", wiki_records)):
+        for record in records[:60]:
+            signals = record.get("signals") or {}
+            summary = " ".join(str(item) for item in [*(signals.get("paragraphs") or [])[:2], *(signals.get("bullets") or [])[:3]] if str(item).strip())
+            if not summary:
+                summary = str(record.get("text") or "")[:500]
+            cards.append(
+                {
+                    "id": str(record.get("source_ref") or signals.get("title") or len(cards)),
+                    "kind": source_type,
+                    "title": str(signals.get("title") or (record.get("item") or {}).get("title") or ""),
+                    "summary": _compact_text(summary, 700),
+                    "citation": source_record_citation(record, source_type),
+                }
+            )
+    for snapshot in repo_snapshots[:20]:
+        summary = _compact_text(snapshot.get("readme_summary") or snapshot.get("readme_title") or snapshot.get("name") or "", 700)
+        if _looks_like_placeholder_intelligence(summary):
+            summary = _compact_text(
+                f"Repository {snapshot.get('name', '')} has services {snapshot.get('monorepo_services', [])} and apps {snapshot.get('monorepo_apps', [])}.",
+                700,
+            )
+        cards.append(
+            {
+                "id": f"repo:{snapshot.get('name', len(cards))}",
+                "kind": "repository",
+                "title": f"Repo - {snapshot.get('name', 'repository')}",
+                "summary": summary,
+                "citation": ontology_citation(
                     title=f"Repo - {snapshot.get('name', 'repository')}",
                     path=f"repository:{snapshot.get('name', '')}",
                     citation_uri=str(snapshot.get("path") or snapshot.get("name") or ""),
                     source_type="repository",
-                )
-            ]
-    return f"{product_name} still needs stronger README, documentation, or product profile evidence.", []
-
-
-def ontology_terms_from_records(
-    records: list[dict[str, Any]],
-    terms: tuple[str, ...],
-    *,
-    limit: int = 10,
-) -> tuple[list[str], list[dict[str, str]]]:
-    values: list[str] = []
-    citations: list[dict[str, str]] = []
-    for record in records:
-        text = f"{record['signals'].get('title', '')}\n{record['text']}\n{record.get('source_ref', '')}"
-        if not has_any(text, terms):
-            continue
-        for line in [*record["signals"].get("headings", []), *record["signals"].get("bullets", []), *record["signals"].get("paragraphs", [])]:
-            for token in re.findall(r"\b[A-Z][A-Za-z0-9]{2,}(?:\s+[A-Z][A-Za-z0-9]{2,})?\b", line):
-                if token.casefold() in {"source", "readme", "github", "article", "overview"}:
-                    continue
-                if token not in values:
-                    values.append(token)
-                if len(values) >= limit:
-                    break
-            if len(values) >= limit:
-                break
-        source_type = "support" if record.get("source_ref", "").startswith("support") or "article" in record.get("source_ref", "") else "wiki"
-        citations.append(source_record_citation(record, source_type))
-        if len(values) >= limit:
-            break
-    return unique_lines(values, limit), citations[:8]
+                ),
+            }
+        )
+    graph = code_intel.get("graph") or {}
+    code_summary = {
+        "routes": [edge.get("to", "") for edge in graph.get("routes", [])[:20] if edge.get("to")],
+        "schemas": [edge.get("to", "") for edge in graph.get("schemas", [])[:20] if edge.get("to")],
+        "tests": [edge.get("to", "") for edge in graph.get("tests", [])[:20] if edge.get("to")],
+    }
+    if any(code_summary.values()):
+        cards.append(
+            {
+                "id": "code:intelligence-summary",
+                "kind": "code-intelligence",
+                "title": "Code intelligence summary",
+                "summary": _compact_text(json.dumps(code_summary, sort_keys=True), 900),
+                "citation": ontology_citation(title="Code intelligence", path="inventories/code_intelligence.json", source_type="code"),
+            }
+        )
+    for row in capability_rows:
+        cards.append(
+            {
+                "id": f"capability:{row.get('title', len(cards))}",
+                "kind": "capability",
+                "title": str(row.get("title") or ""),
+                "summary": _compact_text(
+                    f"Capability {row.get('title')} has {row.get('support_count', 0)} support notes, "
+                    f"{row.get('wiki_count', 0)} wiki notes, {row.get('code_count', 0)} code anchors, "
+                    f"and representative code references {row.get('code_reference_links', [])[:5]}.",
+                    700,
+                ),
+                "citation": ontology_citation(title=str(row.get("title") or "Capability"), path=str(row.get("link") or ""), source_type="capability"),
+            }
+        )
+    return [card for card in cards if card.get("summary")][:120]
 
 
 def build_product_ontology(
@@ -3827,13 +4360,9 @@ def build_product_ontology(
     product = manifest.get("product") or {}
     product_name = str(product.get("name") or PRODUCT_CONTEXT["name"])
     product_slug = str(product.get("slug") or PRODUCT_CONTEXT["slug"])
-    all_records = [*support_records, *wiki_records]
-    purpose, purpose_citations = first_product_purpose(product_name, support_records, wiki_records, repo_snapshots)
-    personas, persona_citations = ontology_terms_from_records(all_records, ("persona", "user", "customer", "operator", "member", "admin"))
-    workflows, workflow_citations = ontology_terms_from_records(all_records, ("workflow", "flow", "journey", "process", "campaign", "challenge"))
-    integrations, integration_citations = ontology_terms_from_records(all_records, EXTERNAL_SYSTEM_TERMS)
     graph = code_intel.get("graph", {})
     files = code_intel.get("files", [])
+    evidence_cards = product_business_evidence_cards(support_records, wiki_records, repo_snapshots, capability_rows, code_intel)
     repo_citations = [
         ontology_citation(
             title=f"Repo - {snapshot.get('name', 'repository')}",
@@ -3852,6 +4381,35 @@ def build_product_ontology(
         )
         for item in files[:12]
     ]
+    synthesis = synthesize_business_value(
+        "product_ontology",
+        {
+            "product": {"name": product_name, "slug": product_slug},
+            "evidence_cards": evidence_cards,
+            "capability_rows": capability_rows[:30],
+            "code_summary": code_intel.get("summary", {}),
+            "code_graph": {
+                "routes": [edge.get("to", "") for edge in graph.get("routes", [])[:80] if edge.get("to")],
+                "schemas": [edge.get("to", "") for edge in graph.get("schemas", [])[:80] if edge.get("to")],
+                "tests": [edge.get("to", "") for edge in graph.get("tests", [])[:80] if edge.get("to")],
+            },
+        },
+    )
+    purpose = _compact_text(synthesis.get("product_purpose"), 800)
+    if _looks_like_placeholder_intelligence(purpose):
+        raise SystemExit("GPT Product Ontology v2 synthesis returned an unusable product_purpose.")
+    target_personas = [item for item in synthesis.get("target_personas", []) if isinstance(item, dict)]
+    jobs_to_be_done = [item for item in synthesis.get("jobs_to_be_done", []) if isinstance(item, dict)]
+    business_value_drivers = [item for item in synthesis.get("business_value_drivers", []) if isinstance(item, dict)]
+    capabilities_v2 = [item for item in synthesis.get("capabilities", []) if isinstance(item, dict)]
+    workflows_v2 = [item for item in synthesis.get("workflows", []) if isinstance(item, dict)]
+    risks_and_opportunities = [item for item in synthesis.get("risks_and_opportunities", []) if isinstance(item, dict)]
+    if not target_personas:
+        raise SystemExit("GPT Product Ontology v2 synthesis did not return target_personas.")
+    if not business_value_drivers:
+        raise SystemExit("GPT Product Ontology v2 synthesis did not return business_value_drivers.")
+    if not capabilities_v2:
+        raise SystemExit("GPT Product Ontology v2 synthesis did not return capabilities.")
     repositories = [
         {
             "name": snapshot.get("name"),
@@ -3863,16 +4421,6 @@ def build_product_ontology(
             "key_files": snapshot.get("key_files", [])[:12],
         }
         for snapshot in repo_snapshots
-    ]
-    capabilities = [
-        {
-            "title": row["title"],
-            "support_count": row["support_count"],
-            "wiki_count": row["wiki_count"],
-            "repositories": row["repos"],
-            "code_count": row["code_count"],
-        }
-        for row in capability_rows
     ]
     services = unique_lines(
         [
@@ -3894,32 +4442,44 @@ def build_product_ontology(
         ],
         20,
     )
+    integrations = unique_lines([str(item.get("name") or item.get("driver") or "") for item in synthesis.get("integrations", []) if isinstance(item, dict)], 20)
     known_bugs = unique_lines(
         [
-            source_record_citation(record, "support")["title"]
-            for record in all_records
-            if has_any(f"{record['signals'].get('title', '')}\n{record['text']}", ("bug", "failure", "error", "regression", "ticket"))
+            str(item.get("title") or item.get("risk") or item.get("opportunity") or "")
+            for item in risks_and_opportunities
+            if str(item.get("kind") or "").casefold() in {"bug", "risk", "issue", "regression"}
         ],
         12,
     )
     source_citations = unique_lines(
-        [json.dumps(item, sort_keys=True) for item in [*purpose_citations, *repo_citations, *code_citations, *persona_citations, *workflow_citations, *integration_citations]],
+        [
+            json.dumps(item, sort_keys=True)
+            for item in [
+                *_business_citations_from_cards(evidence_cards, 20),
+                *repo_citations,
+                *code_citations,
+            ]
+        ],
         30,
     )
     parsed_citations = [json.loads(item) for item in source_citations]
+    confidence = str(synthesis.get("ontology_confidence") or "medium")
     fields = {
-        "product_purpose": ontology_field(purpose, confidence="medium" if purpose_citations else "low", citations=purpose_citations, missing_reason="No product overview or README summary was found."),
-        "personas": ontology_field(personas, confidence="medium", citations=persona_citations, missing_reason="No user/persona evidence was found."),
-        "capabilities": ontology_field(capabilities, confidence="high" if capabilities else "missing", citations=repo_citations, missing_reason="No capability profile rows were generated."),
-        "workflows": ontology_field(workflows, confidence="medium", citations=workflow_citations, missing_reason="No workflow evidence was found."),
+        "product_purpose": ontology_field(purpose, confidence=confidence, citations=parsed_citations, missing_reason="GPT ontology synthesis did not return product purpose."),
+        "target_personas": ontology_field(target_personas, confidence=confidence, citations=parsed_citations, missing_reason="GPT ontology synthesis did not return target personas."),
+        "jobs_to_be_done": ontology_field(jobs_to_be_done, confidence=confidence, citations=parsed_citations, missing_reason="GPT ontology synthesis did not return jobs to be done."),
+        "business_value_drivers": ontology_field(business_value_drivers, confidence=confidence, citations=parsed_citations, missing_reason="GPT ontology synthesis did not return business value drivers."),
+        "capabilities": ontology_field(capabilities_v2, confidence=confidence, citations=repo_citations, missing_reason="GPT ontology synthesis did not return capability objects."),
+        "workflows": ontology_field(workflows_v2, confidence=confidence, citations=parsed_citations, missing_reason="GPT ontology synthesis did not return workflows."),
         "repositories": ontology_field(repositories, confidence="high" if repositories else "missing", citations=repo_citations, missing_reason="No repositories were indexed."),
         "services": ontology_field(services, confidence="medium", citations=repo_citations, missing_reason="No services or apps were detected."),
         "apis": ontology_field(apis, confidence="medium", citations=code_citations, missing_reason="No routes or API contracts were detected."),
         "data_entities": ontology_field(data_entities, confidence="medium", citations=code_citations, missing_reason="No schemas or data entities were detected."),
-        "integrations": ontology_field(integrations, confidence="medium", citations=integration_citations, missing_reason="No integration evidence was found."),
+        "integrations": ontology_field(integrations, confidence=confidence, citations=parsed_citations, missing_reason="GPT ontology synthesis did not return integrations."),
         "environments": ontology_field(environments, confidence="medium", citations=code_citations, missing_reason="No deployment or environment evidence was detected."),
         "test_map": ontology_field(test_map, confidence="medium", citations=code_citations, missing_reason="No test anchors were detected."),
         "known_bugs": ontology_field(known_bugs, confidence="medium", citations=parsed_citations, missing_reason="No bug/support evidence was detected."),
+        "risks_and_opportunities": ontology_field(risks_and_opportunities, confidence=confidence, citations=parsed_citations, missing_reason="GPT ontology synthesis did not return risks or opportunities."),
     }
     ci_cd_profile = {
         "summary": code_intel.get("summary", {}),
@@ -3930,14 +4490,22 @@ def build_product_ontology(
         "deployment_signals": environments,
     }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "source": "codex-second-brain-starter-kit",
         "generated_at": DATE,
+        "prompt_version": BUSINESS_VALUE_PROMPT_VERSION,
+        "llm_model": (BUSINESS_VALUE_CONFIG or default_business_value_config({}))["llm_model"],
+        "llm_reasoning_effort": (BUSINESS_VALUE_CONFIG or default_business_value_config({}))["reasoning_effort"],
         "product": {"name": product_name, "slug": product_slug},
         "product_purpose": purpose,
-        "personas": personas,
+        "target_personas": target_personas,
+        "personas": [str(item.get("name") or "") for item in target_personas if item.get("name")],
+        "jobs_to_be_done": jobs_to_be_done,
+        "business_value_drivers": business_value_drivers,
         "capabilities": [row["title"] for row in capability_rows],
-        "workflows": workflows,
+        "capabilities_v2": capabilities_v2,
+        "workflows": [str(item.get("name") or "") for item in workflows_v2 if item.get("name")],
+        "workflows_v2": workflows_v2,
         "repositories": [snapshot.get("name") for snapshot in repo_snapshots],
         "repository_details": repositories,
         "services": services,
@@ -3949,6 +4517,7 @@ def build_product_ontology(
         "ci_cd_profile": ci_cd_profile,
         "test_map": test_map,
         "known_bugs": known_bugs,
+        "risks_and_opportunities": risks_and_opportunities,
         "feature_areas": [row["title"] for row in capability_rows],
         "source_inventory": {
             "support_notes": len(support_records),
@@ -4811,6 +5380,25 @@ def main() -> None:
         external_links=external_links,
         docx_extracts=docx_extracts,
     )
+    ontology_capabilities = {
+        str(item.get("title") or "").casefold(): item
+        for item in product_ontology.get("capabilities_v2", [])
+        if isinstance(item, dict)
+    }
+    for row in capability_rows:
+        enriched = ontology_capabilities.get(str(row.get("title") or "").casefold()) or {}
+        row.update(
+            {
+                "target_persona": enriched.get("target_persona") or "",
+                "user_problem": enriched.get("user_problem") or "",
+                "business_value": enriched.get("business_value") or "",
+                "success_metric": "; ".join(str(item) for item in enriched.get("success_metrics", [])[:2])
+                if isinstance(enriched.get("success_metrics"), list)
+                else str(enriched.get("success_metric") or ""),
+                "value_score": int(enriched.get("value_score") or 0),
+                "evidence_confidence": enriched.get("evidence_confidence") or enriched.get("confidence") or "",
+            }
+        )
     write_json(paths.json_dir / "product_ontology.json", product_ontology)
 
     conflict_titles = {
@@ -5006,12 +5594,17 @@ def main() -> None:
         output_kind = infer_output_kind(packet)
         output_stem = stem_for_output_candidate(packet["title"])
         output_link = note_link(output_stem)
+        output_synthesis = synthesize_business_value("output_candidate", output_candidate_business_payload(packet))
+        output_business_value = normalized_business_value_fields(
+            output_synthesis,
+            require_user_problem=bool((BUSINESS_VALUE_CONFIG or default_business_value_config({})).get("require_user_problem_for_output", True)),
+        )
         add_note_render(
             output_candidate_dir / f"{output_stem}.md",
             namespace="note_render.output_candidate",
             key=output_stem,
-            payload=packet,
-            renderer=lambda packet=packet: build_output_candidate_note(packet),
+            payload={"packet": packet, "output_synthesis": output_synthesis},
+            renderer=lambda packet=packet, output_synthesis=output_synthesis: build_output_candidate_note(packet, output_synthesis=output_synthesis),
             generated=True,
         )
         output_links_by_packet[packet["link"]].append(output_link)
@@ -5023,6 +5616,7 @@ def main() -> None:
                 "output_kind": output_kind,
                 "source_packet": packet["link"],
                 "evidence_score": packet.get("evidence_score", 0),
+                **output_business_value,
             }
         )
     progress.record(
@@ -5033,6 +5627,16 @@ def main() -> None:
         intermediate_packets=len(packet_records),
         output_candidates=len(output_candidate_records),
         shard_linked_packets=sum(1 for packet in packet_records if packet.get("shard_insight_count", 0)),
+    )
+    business_value_report = build_business_value_report(product_ontology, capability_rows, output_candidate_records)
+    write_json(paths.json_dir / "business_value_report.json", business_value_report)
+    add_note_render(
+        paths.vault / "20 Product" / "Product Ontology.md",
+        namespace="note_render.aggregate",
+        key=f"product-ontology-{DATE}",
+        payload={"product_ontology": product_ontology, "business_value_report": business_value_report, "force": DATE},
+        renderer=lambda: build_product_ontology_note(product_ontology, business_value_report),
+        generated=True,
     )
 
     for packet in packet_records:
@@ -5270,6 +5874,7 @@ def main() -> None:
                 "capabilities": CAPABILITIES,
                 "semantic_clustering": semantic_config,
                 "code_intelligence": profile["code_intelligence"],
+                "business_value": profile["business_value"],
                 "generation_performance": generation_config,
                 "retrieval_index": retrieval_config,
                 "rate_limits": rate_limit_config,
@@ -5331,6 +5936,7 @@ def main() -> None:
                     4,
                 ),
                 "recommendations": performance_recommendations,
+                "business_value_report": business_value_report,
                 "rate_limit_summary": rate_limit_inventory.get("summary", {}),
                 "timings_path": str(paths.json_dir / "rebuild_timings.json"),
             }
@@ -5366,6 +5972,7 @@ def main() -> None:
                 "archive_records": archive_records_written,
                 "repo_notes": len(repo_snapshots),
                 "product_ontology": str(paths.json_dir / "product_ontology.json"),
+                "business_value_report": str(paths.json_dir / "business_value_report.json"),
                 "code_intelligence": code_intel.get("summary", {}),
                 "semantic_clusters": len(semantic_result.get("clusters", [])),
                 "semantic_stats": semantic_result.get("stats", {}),
