@@ -36,6 +36,7 @@ import evidence_index
 import generation_performance
 import generation_progress
 import generation_shards
+import hierarchical_reducers
 import incremental_cache
 import note_rendering
 import openai_responses
@@ -1080,6 +1081,7 @@ def load_product_profile(manifest: dict[str, Any]) -> dict[str, Any]:
         "semantic_clustering": semantic_clustering.default_semantic_config(data),
         "code_intelligence": code_intelligence.default_code_config(data),
         "business_value": default_business_value_config(data),
+        "evidence_scaling": hierarchical_reducers.default_evidence_scaling_config(data),
     }
 
 
@@ -5392,13 +5394,15 @@ def build_product_ontology(
     uploaded_documents: list[dict[str, Any]] | None = None,
     business_cache: dict[str, Any] | None = None,
     business_inventory: dict[str, Any] | None = None,
+    ontology_evidence_cards: list[dict[str, Any]] | None = None,
+    ontology_reducer: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     product = manifest.get("product") or {}
     product_name = str(product.get("name") or PRODUCT_CONTEXT["name"])
     product_slug = str(product.get("slug") or PRODUCT_CONTEXT["slug"])
     graph = code_intel.get("graph", {})
     files = code_intel.get("files", [])
-    evidence_cards_list = product_business_evidence_cards(
+    evidence_cards_list = ontology_evidence_cards or product_business_evidence_cards(
         support_records,
         wiki_records,
         repo_snapshots,
@@ -5409,6 +5413,8 @@ def build_product_ontology(
         docx_extracts,
         uploaded_documents or [],
     )
+    reducer_summary = ontology_reducer or {}
+    coverage_limitations = reducer_summary.get("coverage_limitations") if isinstance(reducer_summary.get("coverage_limitations"), list) else []
     repo_citations = [
         ontology_citation(
             title=f"Repo - {snapshot.get('name', 'repository')}",
@@ -5437,6 +5443,15 @@ def build_product_ontology(
             "schemas": [edge.get("to", "") for edge in graph.get("schemas", [])[:80] if edge.get("to")],
             "tests": [edge.get("to", "") for edge in graph.get("tests", [])[:80] if edge.get("to")],
         },
+        "hierarchical_reducer": {
+            "schema_version": reducer_summary.get("schema_version"),
+            "layer_stats": reducer_summary.get("layer_stats") if isinstance(reducer_summary.get("layer_stats"), dict) else {},
+            "coverage_limitations": coverage_limitations,
+            "source_kind_counts": (reducer_summary.get("evidence_graph") or {}).get("source_kind_counts")
+            if isinstance(reducer_summary.get("evidence_graph"), dict)
+            else {},
+        },
+        "generated_notes_feed_synthesis": False,
     }
     synthesis = synthesize_single_business_value_cached(
         "product_ontology",
@@ -5610,6 +5625,7 @@ def build_product_ontology(
         "test_map": test_map,
         "known_bugs": known_bugs,
         "risks_and_opportunities": risks_and_opportunities,
+        "coverage_limitations": coverage_limitations,
         "feature_areas": [row["title"] for row in capability_rows],
         "source_inventory": {
             "support_notes": len(support_records),
@@ -5617,6 +5633,8 @@ def build_product_ontology(
             "repositories": [snapshot.get("name") for snapshot in repo_snapshots],
             "docx_extracts": len(docx_extracts),
             "external_links": len(external_links),
+            "hierarchical_source_cards": len(evidence_cards_list),
+            "partial_reducer_count": len(coverage_limitations),
         },
         "fields": fields,
         "source_citations": parsed_citations,
@@ -5647,6 +5665,7 @@ def main() -> None:
     workspace_path = Path(str(manifest.get("product", {}).get("workspace_path") or paths.mirror.parent)).expanduser()
     repo_roots = repo_lookup(manifest)
     generation_config = profile["generation_performance"]
+    evidence_scaling_config = profile["evidence_scaling"]
     retrieval_config = profile["retrieval_index"]
     rate_limit_config = profile["rate_limits"]
     existing_rate_inventory = rate_limits.load_rate_limit_inventory(paths.json_dir / "rate_limit_events.json")
@@ -5659,6 +5678,7 @@ def main() -> None:
     timings: dict[str, Any] = {
         "generated_at": DATE,
         "generation_performance": generation_config,
+        "evidence_scaling": evidence_scaling_config,
         "retrieval_index": retrieval_config,
         "rate_limits": rate_limit_config,
         "force": bool(args.force),
@@ -6403,6 +6423,59 @@ def main() -> None:
         },
     )
     stage_started = time.perf_counter()
+
+    def record_reducer_progress(stage: str, completed: int, total: int) -> None:
+        progress.record(
+            stage,
+            "running",
+            completed_units=completed,
+            total_units=total,
+            source_cards=len(unified_evidence_cards),
+        )
+
+    hierarchical_result = hierarchical_reducers.run_hierarchical_reducers(
+        cards=unified_evidence_cards,
+        capabilities=CAPABILITIES,
+        evidence_config=evidence_scaling_config,
+        generation_config=generation_config,
+        business_config=profile["business_value"],
+        cache=render_cache,
+        output_dir=paths.json_dir,
+        rate_limiter=rate_limiter,
+        rate_limit_config=rate_limit_config,
+        force=args.force,
+        progress_callback=record_reducer_progress,
+    )
+    record_timing(
+        timings,
+        "hierarchical_reducers",
+        stage_started,
+        source_shards=len((hierarchical_result.get("source_shards") or {}).get("shards", [])),
+        theme_reducers=len((hierarchical_result.get("theme_shards") or {}).get("shards", [])),
+        capability_reducers=len((hierarchical_result.get("capability_shards") or {}).get("shards", [])),
+        ontology_reducers=len((hierarchical_result.get("ontology_reducer") or {}).get("shards", [])),
+        cache_hits=hierarchical_result.get("cache_hits", 0),
+        cache_misses=hierarchical_result.get("cache_misses", 0),
+        gpt_call_count=hierarchical_result.get("gpt_call_count", 0),
+        partial_count=hierarchical_result.get("partial_count", 0),
+    )
+    for reducer_stage, inventory_name in (
+        ("source_shards", "source_shards"),
+        ("theme_reducers", "theme_shards"),
+        ("capability_reducers", "capability_shards"),
+        ("ontology_reducer", "ontology_reducer"),
+    ):
+        inventory = hierarchical_result.get(inventory_name) if isinstance(hierarchical_result.get(inventory_name), dict) else {}
+        stats = inventory.get("stats") if isinstance(inventory.get("stats"), dict) else {}
+        total = max(1, int(stats.get("input_shards", 0) or len(inventory.get("shards", [])) or 1))
+        progress.record(
+            reducer_stage,
+            "completed",
+            completed_units=total,
+            total_units=total,
+            status_counts=stats.get("status_counts", {}),
+        )
+    stage_started = time.perf_counter()
     planned_shard_units = max(1, int(generation_config.get("agent_shards", {}).get("max_shards", 12) or 12))
     progress.record(
         "generation_shards",
@@ -6604,6 +6677,11 @@ def main() -> None:
     business_stage_started = time.perf_counter()
     business_config = BUSINESS_VALUE_CONFIG or default_business_value_config({})
     business_inventory = new_business_value_synthesis_inventory(business_config)
+    business_inventory["hierarchical_reducers"] = hierarchical_result.get("layer_stats", {})
+    business_inventory["hierarchical_cache_hits"] = hierarchical_result.get("cache_hits", 0)
+    business_inventory["hierarchical_cache_misses"] = hierarchical_result.get("cache_misses", 0)
+    business_inventory["hierarchical_gpt_call_count"] = hierarchical_result.get("gpt_call_count", 0)
+    business_inventory["hierarchical_partial_count"] = hierarchical_result.get("partial_count", 0)
     planned_business_units = max(1, len(capability_note_inputs) + len(packet_records) + min(12, len(packet_records)) + 1)
     progress.record(
         "business_value_synthesis",
@@ -6626,6 +6704,8 @@ def main() -> None:
         uploaded_documents=uploaded_documents,
         business_cache=render_cache,
         business_inventory=business_inventory,
+        ontology_evidence_cards=hierarchical_result.get("ontology_evidence_cards", []),
+        ontology_reducer=hierarchical_result,
     )
     ontology_capabilities = {
         str(item.get("title") or "").casefold(): item

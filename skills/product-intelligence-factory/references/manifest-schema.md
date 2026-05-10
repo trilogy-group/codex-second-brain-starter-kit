@@ -61,6 +61,14 @@ profile:
 #   timeout_seconds: 180
 #   max_repair_attempts: 1
 #   require_user_problem_for_output: true
+# evidence_scaling:
+#   generated_notes_feed_synthesis: false
+#   max_cards_per_source_shard: 80
+#   max_cards_per_theme_shard: 80
+#   max_theme_summaries_per_capability_shard: 40
+#   max_capability_summaries_for_ontology: 60
+#   max_summary_chars: 1800
+#   unlimited_total_shards: true
 # retrieval_index:
 #   enabled: true
 #   max_candidates_per_source: 30
@@ -74,6 +82,11 @@ profile:
 #   note_render_workers: 32
 #   embedding_workers: 8
 #   llm_synthesis_workers: 10
+#   source_shard_workers: 40
+#   theme_reducer_workers: 24
+#   capability_reducer_workers: 16
+#   ontology_reducer_workers: 4
+#   max_concurrent_openai_reducers: 24
 #   embedding_batch_size: 512
 #   incremental_rebuild: true
 #   changed_scope_rebuild: true

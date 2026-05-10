@@ -169,6 +169,11 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                     "note_render_workers",
                     "embedding_workers",
                     "llm_synthesis_workers",
+                    "source_shard_workers",
+                    "theme_reducer_workers",
+                    "capability_reducer_workers",
+                    "ontology_reducer_workers",
+                    "max_concurrent_openai_reducers",
                     "embedding_batch_size",
                 ]
                 for field in worker_fields:
@@ -223,6 +228,26 @@ def validate_manifest(data: dict[str, object], check_paths: bool) -> tuple[list[
                             max_cards = 0
                         if max_cards <= 0:
                             errors.append("profile generation_performance.agent_shards.max_cards_per_shard must be positive.")
+                evidence_scaling = profile_data.get("evidence_scaling") or {}
+                if isinstance(evidence_scaling, dict):
+                    for field in [
+                        "max_cards_per_source_shard",
+                        "max_cards_per_theme_shard",
+                        "max_theme_summaries_per_capability_shard",
+                        "max_capability_summaries_for_ontology",
+                        "max_summary_chars",
+                    ]:
+                        if field not in evidence_scaling:
+                            continue
+                        if str(evidence_scaling[field]).strip().lower() == "auto":
+                            errors.append(f"profile evidence_scaling.{field} must be an explicit positive integer; auto mode is disabled.")
+                            continue
+                        try:
+                            value = int(evidence_scaling[field])
+                        except (TypeError, ValueError):
+                            value = 0
+                        if value <= 0:
+                            errors.append(f"profile evidence_scaling.{field} must be positive.")
                 rate_limits_config = profile_data.get("rate_limits") or {}
                 if isinstance(rate_limits_config, dict):
                     for field in [

@@ -508,7 +508,7 @@ class GenericToolingTests(unittest.TestCase):
                     ]
                 )
             )
-            env = {**os.environ, "PRODUCT_BASB_EMBEDDING_FIXTURE": "1"}
+            env = {**os.environ, "PRODUCT_BASB_EMBEDDING_FIXTURE": "1", "PRODUCT_BASB_LLM_FIXTURE": "1"}
 
             subprocess.run([sys.executable, str(BUILD_SCRIPT), "--manifest", str(manifest)], check=True, env=env, capture_output=True, text=True)
             subprocess.run([sys.executable, str(REBUILD_SCRIPT), "--manifest", str(manifest)], check=True, env=env, capture_output=True, text=True)
@@ -646,7 +646,7 @@ class GenericToolingTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            env = {**os.environ, "PRODUCT_BASB_EMBEDDING_FIXTURE": "1"}
+            env = {**os.environ, "PRODUCT_BASB_EMBEDDING_FIXTURE": "1", "PRODUCT_BASB_LLM_FIXTURE": "1"}
 
             subprocess.run([sys.executable, str(BUILD_SCRIPT), "--manifest", str(manifest)], check=True, env=env, capture_output=True, text=True)
             subprocess.run([sys.executable, str(REBUILD_SCRIPT), "--manifest", str(manifest)], check=True, env=env, capture_output=True, text=True)

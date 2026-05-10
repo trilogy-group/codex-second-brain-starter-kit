@@ -14,6 +14,11 @@ DEFAULT_GENERATION_PERFORMANCE: dict[str, Any] = {
     "note_render_workers": 32,
     "embedding_workers": 8,
     "llm_synthesis_workers": 10,
+    "source_shard_workers": 40,
+    "theme_reducer_workers": 24,
+    "capability_reducer_workers": 16,
+    "ontology_reducer_workers": 4,
+    "max_concurrent_openai_reducers": 24,
     "embedding_batch_size": 512,
     "incremental_rebuild": True,
     "changed_scope_rebuild": True,
@@ -52,6 +57,17 @@ ENV_OVERRIDES = {
     "note_render_workers": ("PRODUCT_BASB_NOTE_RENDER_WORKERS", "TYLER_SECOND_BRAIN_NOTE_WORKERS"),
     "embedding_workers": ("PRODUCT_BASB_EMBEDDING_WORKERS",),
     "llm_synthesis_workers": ("PRODUCT_BASB_LLM_SYNTHESIS_WORKERS", "TYLER_SECOND_BRAIN_LLM_WORKERS"),
+    "source_shard_workers": ("PRODUCT_BASB_SOURCE_SHARD_WORKERS", "TYLER_SECOND_BRAIN_SOURCE_SHARD_WORKERS"),
+    "theme_reducer_workers": ("PRODUCT_BASB_THEME_REDUCER_WORKERS", "TYLER_SECOND_BRAIN_THEME_REDUCER_WORKERS"),
+    "capability_reducer_workers": (
+        "PRODUCT_BASB_CAPABILITY_REDUCER_WORKERS",
+        "TYLER_SECOND_BRAIN_CAPABILITY_REDUCER_WORKERS",
+    ),
+    "ontology_reducer_workers": ("PRODUCT_BASB_ONTOLOGY_REDUCER_WORKERS", "TYLER_SECOND_BRAIN_ONTOLOGY_REDUCER_WORKERS"),
+    "max_concurrent_openai_reducers": (
+        "PRODUCT_BASB_MAX_CONCURRENT_OPENAI_REDUCERS",
+        "TYLER_SECOND_BRAIN_MAX_CONCURRENT_OPENAI_REDUCERS",
+    ),
     "embedding_batch_size": ("PRODUCT_BASB_EMBEDDING_BATCH_SIZE",),
     "changed_scope_rebuild": ("PRODUCT_BASB_CHANGED_SCOPE_REBUILD", "TYLER_SECOND_BRAIN_CHANGED_SCOPE_REBUILD"),
     "agent_shards.enabled": ("PRODUCT_BASB_AGENT_SHARDS_ENABLED", "TYLER_SECOND_BRAIN_AGENT_SHARDS_ENABLED"),
@@ -184,6 +200,30 @@ def default_generation_config(profile: dict[str, Any] | None = None) -> dict[str
         "llm_synthesis_workers": _explicit_positive_int(
             _configured_value(configured, "llm_synthesis_workers", DEFAULT_GENERATION_PERFORMANCE["llm_synthesis_workers"]),
             field="llm_synthesis_workers",
+        ),
+        "source_shard_workers": _explicit_positive_int(
+            _configured_value(configured, "source_shard_workers", DEFAULT_GENERATION_PERFORMANCE["source_shard_workers"]),
+            field="source_shard_workers",
+        ),
+        "theme_reducer_workers": _explicit_positive_int(
+            _configured_value(configured, "theme_reducer_workers", DEFAULT_GENERATION_PERFORMANCE["theme_reducer_workers"]),
+            field="theme_reducer_workers",
+        ),
+        "capability_reducer_workers": _explicit_positive_int(
+            _configured_value(configured, "capability_reducer_workers", DEFAULT_GENERATION_PERFORMANCE["capability_reducer_workers"]),
+            field="capability_reducer_workers",
+        ),
+        "ontology_reducer_workers": _explicit_positive_int(
+            _configured_value(configured, "ontology_reducer_workers", DEFAULT_GENERATION_PERFORMANCE["ontology_reducer_workers"]),
+            field="ontology_reducer_workers",
+        ),
+        "max_concurrent_openai_reducers": _explicit_positive_int(
+            _configured_value(
+                configured,
+                "max_concurrent_openai_reducers",
+                DEFAULT_GENERATION_PERFORMANCE["max_concurrent_openai_reducers"],
+            ),
+            field="max_concurrent_openai_reducers",
         ),
         "embedding_batch_size": _explicit_positive_int(
             _configured_value(configured, "embedding_batch_size", DEFAULT_GENERATION_PERFORMANCE["embedding_batch_size"]),

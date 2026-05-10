@@ -26,6 +26,8 @@ BENCHMARK_REBUILD_SCRIPT = TOOLS_DIR / "benchmark_rebuild.py"
 BUILD_SOURCE_INDICES_SCRIPT = TOOLS_DIR / "build_source_indices.py"
 SEMANTIC_SCRIPT = TOOLS_DIR / "semantic_clustering.py"
 EVIDENCE_INDEX_SCRIPT = TOOLS_DIR / "evidence_index.py"
+EVIDENCE_CARDS_SCRIPT = TOOLS_DIR / "evidence_cards.py"
+HIERARCHICAL_REDUCERS_SCRIPT = TOOLS_DIR / "hierarchical_reducers.py"
 REBUILD_PRODUCT_BRAIN_SCRIPT = TOOLS_DIR / "rebuild_product_brain.py"
 
 
@@ -1338,6 +1340,226 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(first["summary"]["cache_hits"], 0)
         self.assertGreaterEqual(second["summary"]["cache_hits"], 1)
         self.assertEqual(first["files"], second["files"])
+
+    def test_hierarchical_reducers_create_unbounded_bounded_source_shards(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_unbounded_test")
+        cache_module = sys.modules["incremental_cache"]
+        cards = [
+            {
+                "id": f"repo-doc:{index:04d}",
+                "source_kind": "repo-doc",
+                "title": f"Product document {index}",
+                "summary": f"Document section {index} explains onboarding workflow value.",
+                "source_uri": f"repo/docs/{index:04d}.md",
+                "terms": ["onboarding", "workflow"],
+            }
+            for index in range(130)
+        ]
+        cards.append(
+            {
+                "id": "generated-note:ignored",
+                "source_kind": "generated-note",
+                "title": "Generated packet",
+                "summary": "This generated note must not feed upstream synthesis by default.",
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            result = reducers.run_hierarchical_reducers(
+                cards=cards,
+                capabilities=[{"key": "onboarding", "title": "Onboarding", "keywords": ["onboarding"]}],
+                evidence_config={
+                    "generated_notes_feed_synthesis": False,
+                    "max_cards_per_source_shard": 10,
+                    "max_cards_per_theme_shard": 6,
+                    "max_theme_summaries_per_capability_shard": 4,
+                    "max_capability_summaries_for_ontology": 3,
+                    "max_summary_chars": 300,
+                    "unlimited_total_shards": True,
+                },
+                generation_config={
+                    "source_shard_workers": 8,
+                    "theme_reducer_workers": 4,
+                    "capability_reducer_workers": 2,
+                    "ontology_reducer_workers": 1,
+                    "max_concurrent_openai_reducers": 8,
+                },
+                business_config={"llm_model": "gpt-5.5", "reasoning_effort": "high"},
+                cache=cache_module.empty_incremental_cache(),
+                output_dir=output_dir,
+                client=reducers.FixtureHierarchicalReducerClient(),
+            )
+            source_inventory = json.loads((output_dir / "source_shards.json").read_text(encoding="utf-8"))
+            evidence_graph = json.loads((output_dir / "evidence_graph.json").read_text(encoding="utf-8"))
+
+        self.assertGreater(len(source_inventory["shards"]), 12)
+        self.assertTrue(all(shard["input_count"] <= 10 for shard in source_inventory["shards"]))
+        self.assertEqual(evidence_graph["source_card_count"], 130)
+        self.assertNotIn("generated-note", evidence_graph["source_kind_counts"])
+        self.assertGreater(len(result["ontology_evidence_cards"]), 0)
+
+    def test_hierarchical_reducer_cache_reuses_unchanged_layers(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_cache_test")
+        cache_module = sys.modules["incremental_cache"]
+
+        class CountingClient(reducers.FixtureHierarchicalReducerClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            def reduce(self, spec: dict[str, object], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, object]:
+                self.calls += 1
+                return super().reduce(spec, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
+
+        client = CountingClient()
+        cache = cache_module.empty_incremental_cache()
+        cards = [
+            {
+                "id": f"support:{index}",
+                "source_kind": "support-article",
+                "title": f"Branding support article {index}",
+                "summary": "Branding setup helps admins launch branded customer programs.",
+                "source_uri": f"https://support.example.test/article/{index}",
+                "terms": ["branding"],
+            }
+            for index in range(24)
+        ]
+        config = {
+            "generated_notes_feed_synthesis": False,
+            "max_cards_per_source_shard": 8,
+            "max_cards_per_theme_shard": 4,
+            "max_theme_summaries_per_capability_shard": 3,
+            "max_capability_summaries_for_ontology": 3,
+            "max_summary_chars": 300,
+            "unlimited_total_shards": True,
+        }
+        generation_config = {
+            "source_shard_workers": 4,
+            "theme_reducer_workers": 4,
+            "capability_reducer_workers": 2,
+            "ontology_reducer_workers": 1,
+            "max_concurrent_openai_reducers": 4,
+        }
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            first = reducers.run_hierarchical_reducers(
+                cards=cards,
+                capabilities=[{"key": "branding", "title": "Branding", "keywords": ["branding"]}],
+                evidence_config=config,
+                generation_config=generation_config,
+                business_config={"llm_model": "gpt-5.5", "reasoning_effort": "high"},
+                cache=cache,
+                output_dir=Path(tmp_dir) / "first",
+                client=client,
+            )
+            calls_after_first = client.calls
+            second = reducers.run_hierarchical_reducers(
+                cards=cards,
+                capabilities=[{"key": "branding", "title": "Branding", "keywords": ["branding"]}],
+                evidence_config=config,
+                generation_config=generation_config,
+                business_config={"llm_model": "gpt-5.5", "reasoning_effort": "high"},
+                cache=cache,
+                output_dir=Path(tmp_dir) / "second",
+                client=client,
+            )
+
+        self.assertGreater(calls_after_first, 0)
+        self.assertEqual(client.calls, calls_after_first)
+        self.assertEqual(first["gpt_call_count"], calls_after_first)
+        self.assertEqual(second["gpt_call_count"], 0)
+        self.assertGreater(second["cache_hits"], 0)
+
+    def test_hierarchical_reducer_partial_source_failure_records_coverage_limitation(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_partial_test")
+        cache_module = sys.modules["incremental_cache"]
+
+        class OneShardFailureClient(reducers.FixtureHierarchicalReducerClient):
+            def reduce(self, spec: dict[str, object], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, object]:
+                if spec.get("layer") == "source" and str(spec.get("id", "")).endswith("0001"):
+                    raise RuntimeError("source timeout")
+                return super().reduce(spec, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
+
+        cards = [
+            {
+                "id": f"wiki:{index}",
+                "source_kind": "wiki-page",
+                "title": f"Workflow page {index}",
+                "summary": "The workflow page describes customer-facing rollout steps.",
+                "source_uri": f"wiki/{index}.md",
+                "terms": ["workflow"],
+            }
+            for index in range(6)
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = reducers.run_hierarchical_reducers(
+                cards=cards,
+                capabilities=[{"key": "workflow", "title": "Workflow", "keywords": ["workflow"]}],
+                evidence_config={
+                    "generated_notes_feed_synthesis": False,
+                    "max_cards_per_source_shard": 2,
+                    "max_cards_per_theme_shard": 3,
+                    "max_theme_summaries_per_capability_shard": 3,
+                    "max_capability_summaries_for_ontology": 3,
+                    "max_summary_chars": 300,
+                    "unlimited_total_shards": True,
+                },
+                generation_config={
+                    "source_shard_workers": 3,
+                    "theme_reducer_workers": 2,
+                    "capability_reducer_workers": 1,
+                    "ontology_reducer_workers": 1,
+                    "max_concurrent_openai_reducers": 3,
+                },
+                business_config={"llm_model": "gpt-5.5", "reasoning_effort": "high"},
+                cache=cache_module.empty_incremental_cache(),
+                output_dir=Path(tmp_dir),
+                client=OneShardFailureClient(),
+            )
+
+        self.assertEqual(result["partial_count"], 1)
+        self.assertEqual(result["coverage_limitations"][0]["layer"], "source")
+        self.assertIn("source timeout", result["coverage_limitations"][0]["reason"])
+        self.assertGreater(len(result["ontology_evidence_cards"]), 0)
+
+    def test_stable_business_payload_excludes_generated_notes_from_upstream_keys(self) -> None:
+        evidence = load_module(EVIDENCE_CARDS_SCRIPT, "evidence_cards_generated_cache_key_test")
+        base_payload = {
+            "evidence_cards": [
+                {"id": "repo-doc:1", "source_kind": "repo-doc", "title": "Plan", "summary": "Business plan"},
+                {"id": "generated-note:1", "source_kind": "generated-note", "title": "Packet", "summary": "Old generated text"},
+            ],
+            "run_id": "first",
+            "generated_output_candidates": ["[[Candidate A]]"],
+        }
+        changed_generated_note = {
+            **base_payload,
+            "evidence_cards": [
+                {"id": "repo-doc:1", "source_kind": "repo-doc", "title": "Plan", "summary": "Business plan"},
+                {"id": "generated-note:1", "source_kind": "generated-note", "title": "Packet", "summary": "New generated text"},
+            ],
+            "run_id": "second",
+        }
+        enabled_payload = {**base_payload, "generated_notes_feed_synthesis": True}
+        enabled_changed = {**changed_generated_note, "generated_notes_feed_synthesis": True}
+
+        self.assertEqual(evidence.stable_business_payload(base_payload), evidence.stable_business_payload(changed_generated_note))
+        self.assertNotEqual(evidence.stable_business_payload(enabled_payload), evidence.stable_business_payload(enabled_changed))
+        self.assertNotEqual(
+            evidence.stable_business_payload(
+                {
+                    "evidence_cards": [
+                        {"id": "reducer-summary:1", "source_kind": "reducer-summary", "title": "Theme", "summary": "Old theme"}
+                    ]
+                }
+            ),
+            evidence.stable_business_payload(
+                {
+                    "evidence_cards": [
+                        {"id": "reducer-summary:1", "source_kind": "reducer-summary", "title": "Theme", "summary": "New theme"}
+                    ]
+                }
+            ),
+        )
 
 
 if __name__ == "__main__":

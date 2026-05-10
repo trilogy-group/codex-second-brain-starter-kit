@@ -19,6 +19,7 @@ SUPPORTED_EVIDENCE_KINDS = {
     "docx",
     "pdf",
     "generated-note",
+    "reducer-summary",
 }
 VOLATILE_KEYS = {
     "date",
@@ -240,7 +241,12 @@ def source_kind_counts(cards: list[dict[str, Any]]) -> dict[str, int]:
     return dict(Counter(str(card.get("source_kind") or card.get("kind") or "generated-note") for card in cards))
 
 
-def stable_cards(cards: list[dict[str, Any]], *, limit: int | None = None) -> list[dict[str, Any]]:
+def stable_cards(
+    cards: list[dict[str, Any]],
+    *,
+    limit: int | None = None,
+    include_generated_notes: bool = True,
+) -> list[dict[str, Any]]:
     normalized = [normalize_card(card) for card in cards]
     compact = [
         {
@@ -254,6 +260,7 @@ def stable_cards(cards: list[dict[str, Any]], *, limit: int | None = None) -> li
             "code_anchors": sorted(set(card["code_anchors"])),
         }
         for card in normalized
+        if include_generated_notes or card["source_kind"] != "generated-note"
     ]
     compact.sort(key=lambda item: (item["source_kind"], item["id"], item["title"]))
     return compact[:limit] if limit is not None else compact
@@ -264,7 +271,13 @@ def stable_business_payload(payload: Any) -> Any:
         return sorted((stable_business_payload(item) for item in payload), key=lambda item: json.dumps(item, sort_keys=True, default=str))
     if isinstance(payload, dict):
         if "evidence_cards" in payload and isinstance(payload["evidence_cards"], list):
-            payload = {**payload, "evidence_cards": stable_cards(payload["evidence_cards"])}
+            payload = {
+                **payload,
+                "evidence_cards": stable_cards(
+                    payload["evidence_cards"],
+                    include_generated_notes=bool(payload.get("generated_notes_feed_synthesis", False)),
+                ),
+            }
         cleaned: dict[str, Any] = {}
         for key, value in payload.items():
             key_text = str(key)

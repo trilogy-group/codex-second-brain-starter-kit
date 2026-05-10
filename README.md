@@ -98,11 +98,25 @@ business_value:
   max_repair_attempts: 1
   require_user_problem_for_output: true
 
+evidence_scaling:
+  generated_notes_feed_synthesis: false
+  max_cards_per_source_shard: 80
+  max_cards_per_theme_shard: 80
+  max_theme_summaries_per_capability_shard: 40
+  max_capability_summaries_for_ontology: 60
+  max_summary_chars: 1800
+  unlimited_total_shards: true
+
 code_intelligence:
   source_file_mode: git-tracked
   include_untracked_code: false
 
 generation_performance:
+  source_shard_workers: 40
+  theme_reducer_workers: 24
+  capability_reducer_workers: 16
+  ontology_reducer_workers: 4
+  max_concurrent_openai_reducers: 24
   agent_shards:
     worker_mode: llm-synthesis
     shard_model: gpt-5.5
@@ -115,7 +129,7 @@ The validator rejects `gpt-4.1-mini` for synthesis fields because it produces th
 
 Second brains are product-scoped, not codebase-scoped. Code intelligence is valuable when code exists, but the generator must also produce useful ontology, workflows, capabilities, packets, and output candidates from documents, URLs, uploads, support content, wiki pages, and mixed source sets.
 
-The source-index and rebuild scripts now normalize every useful input into evidence cards. These cards feed Product Ontology v2, semantic clustering, intermediate packets, output candidates, business-value synthesis, retrieval, and diagnostics.
+The source-index and rebuild scripts now normalize every useful input into evidence cards. These cards feed an unlimited-source reducer tree before Product Ontology v2, semantic clustering, intermediate packets, output candidates, business-value synthesis, retrieval, and diagnostics. Larger products create more source/theme/capability reducer shards; they do not create one giant ontology prompt.
 
 Supported evidence kinds include:
 - `repo-code`: source files, routes, schemas, tests, dependencies, ownership/churn, and code-reference notes
@@ -126,12 +140,17 @@ Supported evidence kinds include:
 - `crawled-url`: reachable or blocked URL references discovered from indexed sources
 - `support-article`: support Markdown/articles and their linked evidence
 - `wiki-page`: engineering or product wiki pages
-- `generated-note`: generated packets, shard insights, output candidates, and hub notes that remain useful as evidence
+- `generated-note`: generated packets, shard insights, output candidates, and hub notes; these are indexed for retrieval but excluded from upstream synthesis by default
 
 For code-heavy products, generated capability and output notes should include implementation leverage, code surfaces, routes, schemas, tests, and risk signals. For non-code or mixed-source products, the same notes should use document anchors, workflow evidence, decision/process evidence, risks, owners, and recommended next actions instead of failing because code anchors are absent.
 
 Key generated artifacts:
 - `sources.mirror_path/inventories/evidence_cards.json`
+- `sources.mirror_path/inventories/evidence_graph.json`
+- `sources.mirror_path/inventories/source_shards.json`
+- `sources.mirror_path/inventories/theme_shards.json`
+- `sources.mirror_path/inventories/capability_shards.json`
+- `sources.mirror_path/inventories/ontology_reducer.json`
 - `sources.mirror_path/inventories/repo_documents.json`
 - `sources.mirror_path/inventories/uploaded_documents.json`
 - `sources.mirror_path/inventories/business_value_synthesis.json`
@@ -184,6 +203,11 @@ generation_performance:
   note_render_workers: 32
   embedding_workers: 8
   llm_synthesis_workers: 10
+  source_shard_workers: 40
+  theme_reducer_workers: 24
+  capability_reducer_workers: 16
+  ontology_reducer_workers: 4
+  max_concurrent_openai_reducers: 24
   embedding_batch_size: 512
   incremental_rebuild: true
   agent_shards:
@@ -200,9 +224,17 @@ business_value:
   cache_enabled: true
   timeout_seconds: 180
   max_repair_attempts: 1
+evidence_scaling:
+  generated_notes_feed_synthesis: false
+  max_cards_per_source_shard: 80
+  max_cards_per_theme_shard: 80
+  max_theme_summaries_per_capability_shard: 40
+  max_capability_summaries_for_ontology: 60
+  max_summary_chars: 1800
+  unlimited_total_shards: true
 ```
 
-If `business_value_synthesis.json` shows low cache hit ratios on an unchanged warm rebuild, inspect the unstable payload warnings first. Business-value cache keys intentionally ignore run IDs, dates, scratch paths, generated output links, and ordering, so repeated GPT calls usually mean the underlying evidence-card payload changed.
+If `business_value_synthesis.json` or `ontology_reducer.json` shows low cache hit ratios on an unchanged warm rebuild, inspect the unstable payload warnings first. Business-value and reducer cache keys intentionally ignore run IDs, dates, scratch paths, generated note links, rendered Markdown, output candidate backlinks, and ordering, so repeated GPT calls usually mean the underlying evidence-card or reducer payload changed.
 
 Use `--force` only when you intentionally want a clean rebuild: after changing generation logic, after deleting or repairing corrupted cache files, during a clean benchmark, or when you suspect stale generated output. A forced run is expected to be slower because it bypasses source-index, semantic, shard, and rebuild reuse.
 

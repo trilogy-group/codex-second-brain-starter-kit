@@ -190,7 +190,7 @@ def plan_generation_shards(
     shard_config = generation_config["agent_shards"]
     if not shard_config.get("enabled", True):
         return []
-    max_shards = min(12, int(shard_config["max_shards"]))
+    max_shards = int(shard_config["max_shards"])
     max_cards_per_shard = int(shard_config.get("max_cards_per_shard", 80))
     worker_mode = str(shard_config.get("worker_mode", "llm-synthesis"))
     shard_model = openai_responses.ensure_allowed_synthesis_model(
@@ -647,7 +647,7 @@ def run_generation_shards(
     changed_scope: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     shard_config = generation_config["agent_shards"]
-    max_shards = min(12, int(shard_config["max_shards"]))
+    max_shards = int(shard_config["max_shards"])
     max_concurrent = min(6, int(shard_config["max_concurrent_shards"]), max_shards)
     timeout_seconds = int(shard_config.get("timeout_seconds", 1800))
     worker_mode = str(shard_config.get("worker_mode", "llm-synthesis"))
