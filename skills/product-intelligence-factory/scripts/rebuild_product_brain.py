@@ -705,6 +705,93 @@ def rank_code_hits_for_keywords(
     return prune_code_hits([hit for _, hit in ranked], limit)
 
 
+def _flatten_code_values(value: Any) -> list[str]:
+    flattened: list[str] = []
+    if isinstance(value, dict):
+        for nested in value.values():
+            flattened.extend(_flatten_code_values(nested))
+    elif isinstance(value, list):
+        for nested in value:
+            flattened.extend(_flatten_code_values(nested))
+    elif value not in (None, ""):
+        flattened.append(str(value))
+    return flattened
+
+
+def code_intelligence_hits_for_capability(
+    code_files: list[dict[str, Any]],
+    capability: dict[str, Any],
+    repo_roots: dict[str, Path],
+    *,
+    limit: int = 40,
+) -> list[dict[str, Any]]:
+    allowed_repos = set(capability.get("repos") or [])
+    query_tokens: set[str] = set()
+    for phrase in [capability.get("title", ""), capability.get("description", ""), *capability.get("keywords", [])]:
+        query_tokens.update(text_tokens(str(phrase)))
+    if not query_tokens:
+        return []
+
+    ranked: list[tuple[int, dict[str, Any]]] = []
+    for item in code_files:
+        repo = str(item.get("repo") or "")
+        relative_path = str(item.get("relative_path") or "")
+        if not repo or not relative_path:
+            continue
+        if allowed_repos and repo not in allowed_repos:
+            continue
+        haystack_values = [
+            repo,
+            relative_path,
+            str(item.get("language") or ""),
+            *code_terms_for_file(item),
+            *_flatten_code_values(item.get("imports") or []),
+            *_flatten_code_values(item.get("calls") or []),
+            *_flatten_code_values(item.get("tests") or []),
+            *_flatten_code_values(item.get("env_vars") or []),
+            *_flatten_code_values(item.get("migrations") or []),
+        ]
+        haystack = " ".join(haystack_values)
+        matched_tokens = query_tokens.intersection(text_tokens(haystack))
+        if not matched_tokens:
+            continue
+        repo_root = repo_roots.get(repo)
+        absolute_path = str(item.get("absolute_path") or (repo_root / relative_path if repo_root else ""))
+        if not absolute_path:
+            continue
+        richness = (
+            int(item.get("symbol_count") or 0)
+            + int(item.get("route_count") or 0) * 3
+            + int(item.get("schema_count") or 0) * 2
+            + int(item.get("test_anchor_count") or 0)
+            + min(int(item.get("dependency_count") or 0), 10)
+        )
+        score = len(matched_tokens) * 10 + min(richness, 30)
+        sample_terms = unique_lines(
+            [
+                *sorted(matched_tokens),
+                *code_terms_for_file(item)[:6],
+            ],
+            8,
+        )
+        ranked.append(
+            (
+                score,
+                {
+                    "repo": repo,
+                    "absolute_path": absolute_path,
+                    "relative_path": relative_path,
+                    "line_number": int(item.get("line_start") or 1),
+                    "score": score,
+                    "sample": ", ".join(sample_terms),
+                    "retrieval_source": "code-intelligence",
+                },
+            )
+        )
+    ranked.sort(key=lambda entry: (-entry[0], entry[1]["repo"], entry[1]["relative_path"]))
+    return prune_code_hits([hit for _, hit in ranked], limit)
+
+
 def is_low_signal_code_hit(hit: dict[str, Any]) -> bool:
     haystack = " ".join(
         [
@@ -3325,6 +3412,12 @@ def build_product_capability_map(capability_rows: list[dict[str, Any]]) -> str:
         lines.append(f"- Wiki notes: `{row['wiki_count']}`")
         lines.append(f"- Repositories: {', '.join(f'`{repo}`' for repo in row['repos'])}")
         lines.append(f"- Code hits: `{row['code_count']}`")
+        code_reference_links = row.get("code_reference_links") or []
+        if code_reference_links:
+            lines.append("- Representative code references:")
+            lines.extend(f"  - {link}" for link in code_reference_links[:8])
+        else:
+            lines.append("- Representative code references: none generated yet")
         lines.append("")
     lines.extend(["## Related notes", "", "- [[Support Articles Hub]]", "- [[Wiki Pages Hub]]", "- [[Code Intelligence Hub]]", "- [[Intelligence Home]]"])
     return "\n".join(lines)
@@ -3419,6 +3512,12 @@ def build_support_to_code_map(rows: list[dict[str, Any]]) -> str:
         lines.append(f"- Wiki notes: `{row['wiki_count']}`")
         lines.append(f"- Code hits: `{row['code_count']}`")
         lines.append(f"- Repositories: {', '.join(f'`{repo}`' for repo in row['repos'])}")
+        code_reference_links = row.get("code_reference_links") or []
+        if code_reference_links:
+            lines.append("- Representative code references:")
+            lines.extend(f"  - {link}" for link in code_reference_links[:8])
+        else:
+            lines.append("- Representative code references: none generated yet")
         lines.append("")
     lines.extend(["## Related notes", "", "- [[Product Capability Map]]", "- [[Code Intelligence Hub]]", "- [[Code Reference Index]]", "- [[Conflict Log]]", "- [[Engineering Readiness]]"])
     return "\n".join(lines)
@@ -4171,7 +4270,15 @@ def main() -> None:
     code_hits_by_cap: dict[str, list[dict[str, Any]]] = {}
     for capability in CAPABILITIES:
         fallback_hits = prune_code_hits(
-            rg_code_hits(repo_roots, capability["repos"], capability["keywords"], limit=40),
+            [
+                *rg_code_hits(repo_roots, capability["repos"], capability["keywords"], limit=40),
+                *code_intelligence_hits_for_capability(
+                    code_intel.get("files", []),
+                    capability,
+                    repo_roots,
+                    limit=40,
+                ),
+            ],
             40,
         )
         if retrieval_config.get("enabled", True):
@@ -4689,7 +4796,8 @@ def main() -> None:
                 "support_count": len(support_links),
                 "wiki_count": len(wiki_links),
                 "repos": capability["repos"],
-                "code_count": len(code_hits),
+                "code_count": len(code_reference_links),
+                "code_reference_links": code_reference_links[:20],
             }
         )
 

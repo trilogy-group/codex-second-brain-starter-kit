@@ -737,6 +737,7 @@ def analyze_file(
     return {
         "repo": repo_name,
         "relative_path": relative_path,
+        "absolute_path": str(path),
         "language": language,
         "parse_quality": parse_quality,
         "parser_errors": parser_errors,
@@ -1007,6 +1008,12 @@ def analyze_repositories(
         incremental_cache.write_incremental_cache(cache_path, cache)
 
     files = [*cached_files, *analyzed_files]
+    for item in files:
+        repo_name = str(item.get("repo") or "")
+        relative_path = str(item.get("relative_path") or "")
+        repo_path = repo_roots.get(repo_name)
+        if repo_path is not None and relative_path and not item.get("absolute_path"):
+            item["absolute_path"] = str(repo_path / relative_path)
 
     files.sort(key=lambda item: (item["repo"], item["relative_path"]))
     if cache is not None:

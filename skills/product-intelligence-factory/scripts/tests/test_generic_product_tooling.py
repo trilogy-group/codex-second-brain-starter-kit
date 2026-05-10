@@ -653,9 +653,56 @@ class GenericToolingTests(unittest.TestCase):
 
             code_refs = list((vault / "40 Research" / "Code Intelligence" / "References").glob("*.md"))
             capability_note = (vault / "20 Product" / "Capabilities" / "Capability - Platform Core.md").read_text(encoding="utf-8")
+            capability_map = (vault / "20 Product" / "Product Capability Map.md").read_text(encoding="utf-8")
 
         self.assertTrue(code_refs)
         self.assertIn("[[Code Ref - repo-one - src -- settings.py|repo-one/src/settings.py:1]]", capability_note)
+        self.assertIn("- Code hits: `1`", capability_map)
+        self.assertIn("[[Code Ref - repo-one - src -- settings.py|repo-one/src/settings.py:1]]", capability_map)
+
+    def test_code_intelligence_hits_can_anchor_capabilities_without_rg_hits(self) -> None:
+        module = load_module(REBUILD_SCRIPT, "rebuild_product_brain_code_intelligence_hits_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_root = Path(tmp_dir) / "repo-one"
+            source_path = repo_root / "src" / "auth" / "sessions.py"
+            source_path.parent.mkdir(parents=True)
+            source_path.write_text("def authenticate_session():\n    return True\n", encoding="utf-8")
+            capability = {
+                "key": "identity-and-access",
+                "title": "Identity And Access",
+                "description": "Authentication, authorization, roles, sessions, and sign-in flows.",
+                "keywords": ["login", "authentication", "session"],
+                "repos": ["repo-one"],
+            }
+            code_files = [
+                {
+                    "repo": "repo-one",
+                    "relative_path": "src/auth/sessions.py",
+                    "language": "python",
+                    "symbols": {"functions": ["authenticate_session"]},
+                    "symbol_count": 1,
+                    "routes": [],
+                    "schemas": [],
+                    "tests": [],
+                    "dependencies": [],
+                    "imports": [],
+                    "calls": [],
+                    "line_start": 1,
+                }
+            ]
+
+            hits = module.code_intelligence_hits_for_capability(
+                code_files,
+                capability,
+                {"repo-one": repo_root},
+                limit=10,
+            )
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["repo"], "repo-one")
+        self.assertEqual(hits[0]["relative_path"], "src/auth/sessions.py")
+        self.assertEqual(hits[0]["absolute_path"], str(source_path))
+        self.assertEqual(hits[0]["retrieval_source"], "code-intelligence")
 
     def test_repo_snapshots_tolerate_missing_repo_paths(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_missing_repo_test")
