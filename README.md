@@ -114,7 +114,7 @@ evidence_scaling:
     max_reducer_gpt_calls_per_layer_soft: 80
     preserve_raw_inventory: true
   hierarchical_reducers:
-    batch_size: 4
+    batch_size: 8
     split_on_timeout: true
     live_events_enabled: true
     source_reasoning_effort: medium
@@ -213,7 +213,7 @@ Keep these paths stable between runs:
 
 Treat those paths as local product-evidence caches. They make warm rebuilds much faster, but they should not be committed or copied to shared storage unless your team explicitly wants the underlying source evidence there. The generated Markdown, rebuild cache, and SQLite evidence index redact credentialed URL userinfo, OpenAI-style API keys, private IPs, and email addresses before writing reusable artifacts; if real credentials were present in source material, rotate them and rerun with `--force` so every cache and index is rebuilt from sanitized inputs.
 
-Tune workers in `profile.intelligence_path` gradually. Start from the defaults, raise one knob at a time, and watch `source_index_timings.json`, `rebuild_timings.json`, `performance_summary.json`, and `rate_limit_events.json` before increasing concurrency again.
+Tune workers in `profile.intelligence_path` gradually. Start from the defaults, raise one knob at a time, and watch `source_index_timings.json`, `rebuild_timings.json`, `performance_summary.json`, and `rate_limit_events.json` before increasing concurrency again. Hierarchical reducer batching defaults to `batch_size: 8`, which is the recommended fast path; try `12` only after `reducer_events.json` shows no timeout splits, no malformed batch responses, stable p95 latency, and enough OpenAI request/token headroom. Keep `max_concurrent_openai_reducers: 24` unless reducer diagnostics recommend testing `36` or `48`.
 
 ```yaml
 generation_performance:
@@ -263,7 +263,7 @@ evidence_scaling:
     max_reducer_gpt_calls_per_layer_soft: 80
     preserve_raw_inventory: true
   hierarchical_reducers:
-    batch_size: 4
+    batch_size: 8
     split_on_timeout: true
     live_events_enabled: true
     source_reasoning_effort: medium

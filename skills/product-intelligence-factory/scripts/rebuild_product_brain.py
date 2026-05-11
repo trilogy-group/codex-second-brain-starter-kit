@@ -7164,6 +7164,11 @@ def main() -> None:
     business_inventory["hierarchical_partial_count"] = hierarchical_result.get("partial_count", 0)
     business_inventory["source_compaction"] = hierarchical_result.get("source_compaction", {})
     business_inventory["reducer_events"] = hierarchical_result.get("reducer_events", {})
+    business_inventory["reducer_batch_metrics"] = hierarchical_result.get("reducer_batch_metrics", {})
+    business_inventory["recommended_max_concurrent_openai_reducers"] = hierarchical_result.get(
+        "recommended_max_concurrent_openai_reducers"
+    )
+    business_inventory["concurrency_recommendation_reason"] = hierarchical_result.get("concurrency_recommendation_reason")
     planned_business_units = max(1, len(capability_note_inputs) + len(packet_records) + min(12, len(packet_records)) + 1)
     progress.record(
         "business_value_synthesis",

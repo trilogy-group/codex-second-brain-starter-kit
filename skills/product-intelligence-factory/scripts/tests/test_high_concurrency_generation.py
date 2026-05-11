@@ -30,6 +30,7 @@ EVIDENCE_INDEX_SCRIPT = TOOLS_DIR / "evidence_index.py"
 EVIDENCE_CARDS_SCRIPT = TOOLS_DIR / "evidence_cards.py"
 HIERARCHICAL_REDUCERS_SCRIPT = TOOLS_DIR / "hierarchical_reducers.py"
 REBUILD_PRODUCT_BRAIN_SCRIPT = TOOLS_DIR / "rebuild_product_brain.py"
+INIT_INTELLIGENCE_PROFILE_SCRIPT = TOOLS_DIR / "init_intelligence_profile.py"
 
 
 def load_module(module_path: Path, module_name: str):
@@ -837,6 +838,159 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(generation_config["embedding_workers"], 8)
         self.assertEqual(generation_config["llm_synthesis_workers"], 10)
         self.assertEqual(generation_config["agent_shards"]["max_concurrent_shards"], 6)
+
+    def test_hierarchical_reducer_defaults_use_batch_size_eight(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducer_batch_defaults_test")
+        profile_module = load_module(INIT_INTELLIGENCE_PROFILE_SCRIPT, "init_profile_batch_defaults_test")
+
+        reducer_config = reducers.default_evidence_scaling_config({})["hierarchical_reducers"]
+        profile = profile_module.build_profile()
+
+        self.assertEqual(reducer_config["batch_size"], 8)
+        self.assertEqual(profile["evidence_scaling"]["hierarchical_reducers"]["batch_size"], 8)
+
+    def test_hierarchical_reducer_batches_eight_specs_per_gpt_request(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducer_batch_grouping_test")
+        specs = [
+            {
+                "id": f"source-repo-doc-docs-{index:04d}",
+                "layer": "source",
+                "source_kind": "repo-doc",
+                "input_count": 1,
+                "cards": [{"id": f"repo-doc:{index}", "source_kind": "repo-doc", "summary": "Product docs."}],
+            }
+            for index in range(16)
+        ]
+
+        class CountingClient(reducers.FixtureHierarchicalReducerClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.batch_sizes: list[int] = []
+
+            def reduce_many(self, specs, *, model, reasoning_effort, worker_count):  # type: ignore[no-untyped-def]
+                self.batch_sizes.append(len(specs))
+                return super().reduce_many(specs, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
+
+        client = CountingClient()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            event_recorder = reducers.ReducerEventRecorder(Path(tmp_dir), enabled=True)
+            _results, stats = reducers._run_layer(
+                layer="source_shards",
+                specs=specs,
+                cache=None,
+                client=client,
+                model="gpt-5.5",
+                reasoning_effort="medium",
+                worker_count=1,
+                force=False,
+                progress_callback=None,
+                batch_size=8,
+                split_on_timeout=True,
+                event_recorder=event_recorder,
+            )
+
+        self.assertEqual(client.batch_sizes, [8, 8])
+        self.assertEqual(stats["effective_batch_sizes"], {"8": 2})
+        self.assertEqual(stats["gpt_call_count"], 2)
+        self.assertEqual(stats["gpt_call_count_saved_vs_batch_size_4"], 2)
+
+    def test_hierarchical_reducer_split_retry_reports_timeout_metrics(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducer_split_metrics_test")
+        specs = [
+            {
+                "id": f"source-wiki-page-{index:04d}",
+                "layer": "source",
+                "source_kind": "wiki-page",
+                "input_count": 1,
+                "cards": [{"id": f"wiki:{index}", "source_kind": "wiki-page", "summary": "Workflow docs."}],
+            }
+            for index in range(3)
+        ]
+
+        class FlakyBatchClient(reducers.FixtureHierarchicalReducerClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.batch_sizes: list[int] = []
+
+            def reduce_many(self, specs, *, model, reasoning_effort, worker_count):  # type: ignore[no-untyped-def]
+                self.batch_sizes.append(len(specs))
+                if len(specs) > 1:
+                    raise TimeoutError("reducer timed out")
+                return super().reduce_many(specs, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
+
+        client = FlakyBatchClient()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            event_recorder = reducers.ReducerEventRecorder(Path(tmp_dir), enabled=True)
+            _results, stats = reducers._run_layer(
+                layer="source_shards",
+                specs=specs,
+                cache=None,
+                client=client,
+                model="gpt-5.5",
+                reasoning_effort="medium",
+                worker_count=1,
+                force=False,
+                progress_callback=None,
+                batch_size=8,
+                split_on_timeout=True,
+                event_recorder=event_recorder,
+            )
+
+        self.assertEqual(client.batch_sizes, [3, 1, 1, 1])
+        self.assertEqual(stats["split_count"], 1)
+        self.assertEqual(stats["timeout_count"], 1)
+        self.assertEqual(stats["effective_batch_sizes"], {"1": 3, "3": 1})
+        self.assertEqual(stats["gpt_call_count"], 4)
+
+    def test_reducer_concurrency_recommendation_uses_provider_headroom_and_latency(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducer_recommendation_test")
+        batch_metrics = {
+            "split_count": 0,
+            "timeout_count": 0,
+            "malformed_response_count": 0,
+            "p50_elapsed_seconds": 10.0,
+            "p95_elapsed_seconds": 20.0,
+        }
+        reducer_events = [
+            {
+                "provider_headers": {
+                    "limit_requests": 3000,
+                    "remaining_requests": 1800,
+                    "limit_tokens": 3000000,
+                    "remaining_tokens": 1800000,
+                }
+            }
+        ]
+
+        stable = reducers.reducer_concurrency_recommendation(
+            current_max_concurrent_openai_reducers=24,
+            batch_metrics=batch_metrics,
+            reducer_events=reducer_events,
+            rate_limit_events=[],
+        )
+        missing_headers = reducers.reducer_concurrency_recommendation(
+            current_max_concurrent_openai_reducers=24,
+            batch_metrics=batch_metrics,
+            reducer_events=[],
+            rate_limit_events=[],
+        )
+        throttled = reducers.reducer_concurrency_recommendation(
+            current_max_concurrent_openai_reducers=24,
+            batch_metrics=batch_metrics,
+            reducer_events=reducer_events,
+            rate_limit_events=[{"event": "provider_retry_after"}],
+        )
+        split = reducers.reducer_concurrency_recommendation(
+            current_max_concurrent_openai_reducers=24,
+            batch_metrics={**batch_metrics, "split_count": 1},
+            reducer_events=reducer_events,
+            rate_limit_events=[],
+        )
+
+        self.assertEqual(stable["recommended_max_concurrent_openai_reducers"], 48)
+        self.assertEqual(missing_headers["recommended_max_concurrent_openai_reducers"], 24)
+        self.assertEqual(throttled["recommended_max_concurrent_openai_reducers"], 24)
+        self.assertEqual(split["recommended_max_concurrent_openai_reducers"], 24)
 
     def test_provider_rate_limit_header_parser_handles_limits_remaining_and_resets(self) -> None:
         rate_module = load_module(RATE_LIMITS_SCRIPT, "rate_limits_header_parse_test")

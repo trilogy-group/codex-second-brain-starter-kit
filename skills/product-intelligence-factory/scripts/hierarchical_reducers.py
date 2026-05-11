@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -42,7 +43,7 @@ DEFAULT_EVIDENCE_SCALING: dict[str, Any] = {
         "preserve_raw_inventory": True,
     },
     "hierarchical_reducers": {
-        "batch_size": 4,
+        "batch_size": 8,
         "split_on_timeout": True,
         "live_events_enabled": True,
         "source_reasoning_effort": "medium",
@@ -807,7 +808,7 @@ class ReducerEventRecorder:
             self.events.append(payload)
             status_counts = Counter(str(item.get("status") or item.get("event") or "unknown") for item in self.events)
             running = sum(1 for item in self.events if item.get("status") == "running") - sum(
-                1 for item in self.events if item.get("event") in {"batch_succeeded", "batch_failed", "cache_hit"}
+                1 for item in self.events if item.get("event") in {"batch_succeeded", "batch_failed", "batch_split", "cache_hit"}
             )
             completed_calls = [item for item in self.events if isinstance(item.get("elapsed_seconds"), (int, float))]
             slowest = max(completed_calls, key=lambda item: float(item.get("elapsed_seconds") or 0), default=None)
@@ -821,6 +822,158 @@ class ReducerEventRecorder:
             }
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self.path.write_text(json.dumps(self.summary, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
+    def events_snapshot(self) -> list[dict[str, Any]]:
+        with self.lock:
+            return list(self.events)
+
+    def finalize(self, **updates: Any) -> dict[str, Any]:
+        if not self.enabled:
+            return self.summary
+        with self.lock:
+            self.summary = {**self.summary, **updates, "events": self.events[-200:]}
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.summary, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+            return dict(self.summary)
+
+
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return round(ordered[0], 4)
+    rank = (len(ordered) - 1) * percentile
+    lower = math.floor(rank)
+    upper = math.ceil(rank)
+    if lower == upper:
+        return round(ordered[int(rank)], 4)
+    weight = rank - lower
+    return round(ordered[lower] * (1 - weight) + ordered[upper] * weight, 4)
+
+
+def _exception_kind(exc: BaseException) -> str:
+    text = str(exc).casefold()
+    if any(marker in text for marker in ("timeout", "timed out", "deadline", "fail_fast")):
+        return "timeout"
+    if any(marker in text for marker in ("json", "malformed", "items array", "missing ids", "unexpected")):
+        return "malformed_response"
+    return "error"
+
+
+def _batch_metrics_from_events(
+    events: list[dict[str, Any]],
+    *,
+    configured_batch_size: int,
+    pending_shard_count: int,
+    gpt_call_count: int,
+) -> dict[str, Any]:
+    batch_started = [event for event in events if event.get("event") == "batch_started"]
+    completed_events = [
+        event
+        for event in events
+        if event.get("event") in {"batch_succeeded", "batch_failed", "batch_split"}
+        and isinstance(event.get("elapsed_seconds"), (int, float))
+    ]
+    batch_sizes = Counter(str(int(event.get("batch_size") or len(event.get("shard_ids") or []) or 1)) for event in batch_started)
+    split_events = [event for event in events if event.get("event") == "batch_split"]
+    failed_events = [event for event in events if event.get("event") == "batch_failed"]
+    timeout_events = [
+        event
+        for event in [*split_events, *failed_events]
+        if str(event.get("failure_kind") or "").casefold() == "timeout"
+    ]
+    malformed_events = [
+        event
+        for event in [*split_events, *failed_events]
+        if str(event.get("failure_kind") or "").casefold() == "malformed_response"
+    ]
+    latencies = [float(event["elapsed_seconds"]) for event in completed_events]
+    baseline_calls = math.ceil(max(0, pending_shard_count) / 4) if pending_shard_count else 0
+    return {
+        "configured_batch_size": configured_batch_size,
+        "effective_batch_sizes": dict(sorted(batch_sizes.items(), key=lambda item: int(item[0]))),
+        "split_count": len(split_events),
+        "timeout_count": len(timeout_events),
+        "malformed_response_count": len(malformed_events),
+        "p50_elapsed_seconds": _percentile(latencies, 0.50),
+        "p95_elapsed_seconds": _percentile(latencies, 0.95),
+        "gpt_call_count_saved_vs_batch_size_4": max(0, baseline_calls - int(gpt_call_count or 0)),
+        "baseline_gpt_call_count_at_batch_size_4": baseline_calls,
+    }
+
+
+def _provider_remaining_ratios(events: list[dict[str, Any]]) -> tuple[list[float], list[float]]:
+    request_ratios: list[float] = []
+    token_ratios: list[float] = []
+    for event in events:
+        headers = event.get("provider_headers")
+        if not isinstance(headers, dict):
+            continue
+        limit_requests = headers.get("limit_requests")
+        remaining_requests = headers.get("remaining_requests")
+        if isinstance(limit_requests, int) and limit_requests > 0 and isinstance(remaining_requests, int):
+            request_ratios.append(max(0.0, min(1.0, remaining_requests / limit_requests)))
+        limit_tokens = headers.get("limit_tokens")
+        remaining_tokens = headers.get("remaining_tokens")
+        if isinstance(limit_tokens, int) and limit_tokens > 0 and isinstance(remaining_tokens, int):
+            token_ratios.append(max(0.0, min(1.0, remaining_tokens / limit_tokens)))
+    return request_ratios, token_ratios
+
+
+def reducer_concurrency_recommendation(
+    *,
+    current_max_concurrent_openai_reducers: int,
+    batch_metrics: dict[str, Any],
+    reducer_events: list[dict[str, Any]],
+    rate_limit_events: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    rate_limit_events = list(rate_limit_events or [])
+    provider_retry_after_count = sum(1 for event in rate_limit_events if event.get("event") == "provider_retry_after")
+    request_ratios, token_ratios = _provider_remaining_ratios(reducer_events)
+    provider_headers_observed = bool(request_ratios or token_ratios)
+    min_request_remaining = min(request_ratios) if request_ratios else None
+    min_token_remaining = min(token_ratios) if token_ratios else None
+    split_count = int(batch_metrics.get("split_count") or 0)
+    timeout_count = int(batch_metrics.get("timeout_count") or 0)
+    malformed_response_count = int(batch_metrics.get("malformed_response_count") or 0)
+    p50 = batch_metrics.get("p50_elapsed_seconds")
+    p95 = batch_metrics.get("p95_elapsed_seconds")
+    recommended = current_max_concurrent_openai_reducers
+    reason = "provider headers unavailable; keep explicit reducer concurrency unchanged"
+    can_raise = (
+        provider_headers_observed
+        and provider_retry_after_count == 0
+        and split_count == 0
+        and timeout_count == 0
+        and malformed_response_count == 0
+        and (min_request_remaining is None or min_request_remaining > 0.35)
+        and (min_token_remaining is None or min_token_remaining > 0.35)
+    )
+    stable_latency = (
+        isinstance(p50, (int, float))
+        and isinstance(p95, (int, float))
+        and float(p95) <= 45.0
+        and float(p95) <= max(1.0, float(p50) * 2.5)
+    )
+    if can_raise and stable_latency:
+        recommended = max(current_max_concurrent_openai_reducers, 48)
+        reason = "provider headroom and stable reducer latency support testing 48 concurrent reducers"
+    elif can_raise:
+        recommended = max(current_max_concurrent_openai_reducers, 36)
+        reason = "provider headroom supports testing 36 concurrent reducers"
+    elif provider_headers_observed:
+        reason = "provider throttling, low remaining capacity, or batch splits occurred; keep concurrency unchanged"
+    return {
+        "current_max_concurrent_openai_reducers": current_max_concurrent_openai_reducers,
+        "recommended_max_concurrent_openai_reducers": recommended,
+        "reason": reason,
+        "provider_headers_observed": provider_headers_observed,
+        "provider_retry_after_count": provider_retry_after_count,
+        "min_provider_remaining_request_ratio": round(min_request_remaining, 4) if min_request_remaining is not None else None,
+        "min_provider_remaining_token_ratio": round(min_token_remaining, 4) if min_token_remaining is not None else None,
+        "stable_latency": stable_latency,
+    }
 
 
 def _partial_result(spec: dict[str, Any], layer: str, exc: Exception) -> dict[str, Any]:
@@ -873,6 +1026,7 @@ def _run_layer(
         "cache_miss_reasons": {},
         "gpt_call_count": 0,
         "batch_count": 0,
+        "configured_batch_size": max(1, int(batch_size or 1)),
         "failed": 0,
     }
     results: list[dict[str, Any]] = []
@@ -924,6 +1078,7 @@ def _run_layer(
                 status="running",
                 layer=layer,
                 shard_ids=shard_ids,
+                batch_size=len(batch),
                 input_card_count=sum(int(spec.get("input_count", 0) or 0) for spec in specs_batch),
                 payload_bytes=payload_size,
                 model=model,
@@ -970,6 +1125,7 @@ def _run_layer(
                 )
             return normalized_results, 1
         except Exception as exc:
+            failure_kind = _exception_kind(exc)
             if split_on_timeout and len(batch) > 1:
                 if event_recorder is not None:
                     event_recorder.record(
@@ -979,10 +1135,12 @@ def _run_layer(
                         shard_ids=shard_ids,
                         batch_size=len(batch),
                         elapsed_seconds=round(time.perf_counter() - batch_started, 4),
+                        payload_bytes=payload_size,
+                        failure_kind=failure_kind,
                         reason=str(exc)[:300],
                     )
                 split_results: list[dict[str, Any]] = []
-                gpt_calls = 0
+                gpt_calls = 1
                 for item in batch:
                     item_results, item_calls = run_batch([item])
                     split_results.extend(item_results)
@@ -997,6 +1155,7 @@ def _run_layer(
                     batch_size=len(batch),
                     elapsed_seconds=round(time.perf_counter() - batch_started, 4),
                     payload_bytes=payload_size,
+                    failure_kind=failure_kind,
                     reason=str(exc)[:500],
                 )
             return [_partial_result(spec, layer, exc) for spec in specs_batch], 1
@@ -1015,9 +1174,70 @@ def _run_layer(
                 progress_callback(layer, completed, max(1, len(specs)))
 
     results.sort(key=lambda item: str(item.get("id") or ""))
+    layer_events = [
+        event
+        for event in (event_recorder.events_snapshot() if event_recorder is not None else [])
+        if event.get("layer") == layer
+    ]
+    stats.update(
+        _batch_metrics_from_events(
+            layer_events,
+            configured_batch_size=max(1, int(batch_size or 1)),
+            pending_shard_count=len(pending),
+            gpt_call_count=int(stats.get("gpt_call_count", 0) or 0),
+        )
+    )
     stats["elapsed_seconds"] = round(time.perf_counter() - started, 4)
     stats["status_counts"] = dict(Counter(str(item.get("status") or "unknown") for item in results))
     return results, stats
+
+
+def _aggregate_reducer_batch_metrics(
+    *,
+    layer_stats: dict[str, dict[str, Any]],
+    reducer_events: list[dict[str, Any]],
+    current_max_concurrent_openai_reducers: int,
+    rate_limit_events: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    pending_shard_count = sum(int(stats.get("cache_misses", 0) or 0) for stats in layer_stats.values())
+    gpt_call_count = sum(int(stats.get("gpt_call_count", 0) or 0) for stats in layer_stats.values())
+    configured_batch_sizes = [
+        int(stats.get("configured_batch_size") or 0)
+        for stats in layer_stats.values()
+        if int(stats.get("configured_batch_size") or 0) > 0
+    ]
+    configured_batch_size = max(configured_batch_sizes) if configured_batch_sizes else int(DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["batch_size"])
+    metrics = _batch_metrics_from_events(
+        reducer_events,
+        configured_batch_size=configured_batch_size,
+        pending_shard_count=pending_shard_count,
+        gpt_call_count=gpt_call_count,
+    )
+    metrics["gpt_call_count"] = gpt_call_count
+    metrics["pending_shard_count"] = pending_shard_count
+    metrics["timeout_pressure"] = bool(metrics.get("split_count") or metrics.get("timeout_count"))
+    metrics["layer_metrics"] = {
+        layer: {
+            "configured_batch_size": stats.get("configured_batch_size"),
+            "effective_batch_sizes": stats.get("effective_batch_sizes", {}),
+            "split_count": stats.get("split_count", 0),
+            "timeout_count": stats.get("timeout_count", 0),
+            "malformed_response_count": stats.get("malformed_response_count", 0),
+            "p50_elapsed_seconds": stats.get("p50_elapsed_seconds"),
+            "p95_elapsed_seconds": stats.get("p95_elapsed_seconds"),
+            "gpt_call_count": stats.get("gpt_call_count", 0),
+            "gpt_call_count_saved_vs_batch_size_4": stats.get("gpt_call_count_saved_vs_batch_size_4", 0),
+        }
+        for layer, stats in layer_stats.items()
+    }
+    recommendation = reducer_concurrency_recommendation(
+        current_max_concurrent_openai_reducers=current_max_concurrent_openai_reducers,
+        batch_metrics=metrics,
+        reducer_events=reducer_events,
+        rate_limit_events=rate_limit_events,
+    )
+    metrics.update(recommendation)
+    return metrics
 
 
 def _coverage_limitations(*layers: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1225,6 +1445,22 @@ def run_hierarchical_reducers(
         "capability_reducers": capability_stats,
         "ontology_reducer": ontology_stats,
     }
+    reducer_events = event_recorder.events_snapshot()
+    rate_limit_events = []
+    recorder = getattr(rate_limiter, "recorder", None)
+    if recorder is not None and hasattr(recorder, "events"):
+        rate_limit_events = recorder.events()
+    reducer_batch_metrics = _aggregate_reducer_batch_metrics(
+        layer_stats=layer_stats,
+        reducer_events=reducer_events,
+        current_max_concurrent_openai_reducers=max_openai_reducers,
+        rate_limit_events=rate_limit_events,
+    )
+    reducer_event_summary = event_recorder.finalize(
+        reducer_batch_metrics=reducer_batch_metrics,
+        recommended_max_concurrent_openai_reducers=reducer_batch_metrics.get("recommended_max_concurrent_openai_reducers"),
+        concurrency_recommendation_reason=reducer_batch_metrics.get("reason"),
+    )
     return {
         "schema_version": REDUCER_SCHEMA_VERSION,
         "elapsed_seconds": round(time.perf_counter() - started, 4),
@@ -1243,7 +1479,10 @@ def run_hierarchical_reducers(
         },
         "layer_stats": layer_stats,
         "source_compaction": compaction_inventory,
-        "reducer_events": event_recorder.summary,
+        "reducer_events": reducer_event_summary,
+        "reducer_batch_metrics": reducer_batch_metrics,
+        "recommended_max_concurrent_openai_reducers": reducer_batch_metrics.get("recommended_max_concurrent_openai_reducers"),
+        "concurrency_recommendation_reason": reducer_batch_metrics.get("reason"),
         "cache_hits": sum(int(stats.get("cache_hits", 0) or 0) for stats in layer_stats.values()),
         "cache_misses": sum(int(stats.get("cache_misses", 0) or 0) for stats in layer_stats.values()),
         "gpt_call_count": sum(int(stats.get("gpt_call_count", 0) or 0) for stats in layer_stats.values()),

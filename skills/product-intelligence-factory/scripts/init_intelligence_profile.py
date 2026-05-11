@@ -145,7 +145,7 @@ def build_profile() -> dict[str, object]:
                 "preserve_raw_inventory": True,
             },
             "hierarchical_reducers": {
-                "batch_size": 4,
+                "batch_size": 8,
                 "split_on_timeout": True,
                 "live_events_enabled": True,
             },
