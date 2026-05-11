@@ -65,6 +65,7 @@ def _new_stage(stage: str, label: str | None = None, total_units: int = 1) -> di
         "completed_units": 0,
         "total_units": total,
         "missing_units": total,
+        "weight_units": total,
     }
 
 
@@ -146,6 +147,8 @@ class ProgressRecorder:
         stage_record = self.stages.setdefault(stage, _new_stage(stage, total_units=details.get("total_units", 1)))
         previous_total_units = _positive_int(stage_record.get("total_units", 1))
         total_units = _positive_int(details.get("total_units", stage_record.get("total_units", 1)))
+        if "weight_units" not in stage_record:
+            stage_record["weight_units"] = _positive_int(details.get("weight_units", previous_total_units), previous_total_units)
         if total_units > previous_total_units:
             stage_record["scope_expanded"] = True
             self.scope_expanded = True
@@ -197,7 +200,14 @@ class ProgressRecorder:
         total_units = sum(_positive_int(stage.get("total_units")) for stage in stages)
         completed_units = sum(max(0, min(_positive_int(stage.get("completed_units"), 0), _positive_int(stage.get("total_units")))) for stage in stages)
         remaining_units = max(0, total_units - completed_units)
-        progress_percent = int(round((completed_units / total_units) * 100)) if total_units else 0
+        total_weight = sum(_positive_int(stage.get("weight_units"), _positive_int(stage.get("total_units"))) for stage in stages)
+        completed_weight = 0.0
+        for stage in stages:
+            stage_total = _positive_int(stage.get("total_units"))
+            stage_completed = max(0, min(_positive_int(stage.get("completed_units"), 0), stage_total))
+            stage_weight = _positive_int(stage.get("weight_units"), stage_total)
+            completed_weight += stage_weight * (stage_completed / stage_total if stage_total else 0)
+        progress_percent = int(round((completed_weight / total_weight) * 100)) if total_weight else 0
         progress_percent = max(0, min(progress_percent, 100))
         status = str(event.get("status") or "")
         if status in ACTIVE_STATUSES:
@@ -224,6 +234,8 @@ class ProgressRecorder:
             "completed_units": completed_units,
             "total_units": total_units,
             "remaining_units": remaining_units,
+            "completed_weight_units": round(completed_weight, 4),
+            "total_weight_units": total_weight,
             "discovered_total_units": self.discovered_total_units,
             "scope_expanded": self.scope_expanded or any(bool(stage.get("scope_expanded")) for stage in stages),
             "unit_label": UNIT_LABEL,

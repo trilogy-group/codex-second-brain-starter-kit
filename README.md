@@ -106,6 +106,19 @@ evidence_scaling:
   max_capability_summaries_for_ontology: 60
   max_summary_chars: 1800
   unlimited_total_shards: true
+  evidence_compaction:
+    enabled: true
+    max_raw_cards_per_source_group: 160
+    max_compacted_cards_per_group: 24
+    max_reducer_gpt_calls_per_layer_soft: 80
+    preserve_raw_inventory: true
+  hierarchical_reducers:
+    batch_size: 4
+    split_on_timeout: true
+    live_events_enabled: true
+  generated_note_policy:
+    max_repo_document_notes: 600
+    max_uploaded_document_notes: 600
 
 code_intelligence:
   source_file_mode: git-tracked
@@ -147,6 +160,8 @@ For code-heavy products, generated capability and output notes should include im
 Key generated artifacts:
 - `sources.mirror_path/inventories/evidence_cards.json`
 - `sources.mirror_path/inventories/evidence_graph.json`
+- `sources.mirror_path/inventories/source_compaction.json`
+- `sources.mirror_path/inventories/reducer_events.json`
 - `sources.mirror_path/inventories/source_shards.json`
 - `sources.mirror_path/inventories/theme_shards.json`
 - `sources.mirror_path/inventories/capability_shards.json`
@@ -155,6 +170,7 @@ Key generated artifacts:
 - `sources.mirror_path/inventories/uploaded_documents.json`
 - `sources.mirror_path/inventories/business_value_synthesis.json`
 - `sources.mirror_path/inventories/business_value_report.json`
+- `sources.mirror_path/inventories/source_note_policy.json`
 - `20 Product/Product Ontology.md`
 - `20 Product/Workflow Map.md`
 - `20 Product/Value Traceability Matrix.md`
@@ -188,6 +204,7 @@ Keep these paths stable between runs:
 - the repository clone paths listed in the manifest
 - generated cache files such as `source_extract_cache.json`, `source_index_cache.json`, `rebuild_cache.json`, `embedding_cache.json`, `llm_cluster_cache.json`, `semantic_result_cache.json`, `generation_shard_cache.json`, and `generated_notes_manifest.json`
 - generated evidence and business-value inventories such as `evidence_cards.json`, `repo_documents.json`, `uploaded_documents.json`, `business_value_synthesis.json`, and `business_value_report.json`
+- compaction and reducer diagnostics such as `source_compaction.json`, `reducer_events.json`, and `source_note_policy.json`
 
 Treat those paths as local product-evidence caches. They make warm rebuilds much faster, but they should not be committed or copied to shared storage unless your team explicitly wants the underlying source evidence there. The generated Markdown, rebuild cache, and SQLite evidence index redact credentialed URL userinfo, OpenAI-style API keys, private IPs, and email addresses before writing reusable artifacts; if real credentials were present in source material, rotate them and rerun with `--force` so every cache and index is rebuilt from sanitized inputs.
 
@@ -232,9 +249,26 @@ evidence_scaling:
   max_capability_summaries_for_ontology: 60
   max_summary_chars: 1800
   unlimited_total_shards: true
+  evidence_compaction:
+    enabled: true
+    max_raw_cards_per_source_group: 160
+    max_compacted_cards_per_group: 24
+    max_reducer_gpt_calls_per_layer_soft: 80
+    preserve_raw_inventory: true
+  hierarchical_reducers:
+    batch_size: 4
+    split_on_timeout: true
+    live_events_enabled: true
+  generated_note_policy:
+    max_repo_document_notes: 600
+    max_uploaded_document_notes: 600
 ```
 
-If `business_value_synthesis.json` or `ontology_reducer.json` shows low cache hit ratios on an unchanged warm rebuild, inspect the unstable payload warnings first. Business-value and reducer cache keys intentionally ignore run IDs, dates, scratch paths, generated note links, rendered Markdown, output candidate backlinks, and ordering, so repeated GPT calls usually mean the underlying evidence-card or reducer payload changed.
+Evidence compaction is now on by default. Raw provenance remains in inventories, but large groups of near-duplicate repo docs, support pages, wiki pages, uploads, or URL cards are summarized into compact source cards before GPT reducers run. This keeps Influitive-sized `repo-doc` sets from exploding into hundreds of source-reducer calls while preserving traceable evidence IDs.
+
+Generated vault notes also use a selective source-note policy. Low-signal raw source records stay available in inventories and source indexes, but the vault defaults to intelligence-bearing notes, compact source indexes, cited evidence, blocked/stale diagnostics, packets, output candidates, and hubs. Unchanged generated notes are byte-compared and skipped during writes, which reduces S3 sync and Tyler indexing churn.
+
+If `business_value_synthesis.json`, `source_shards.json`, or `ontology_reducer.json` shows low cache hit ratios on an unchanged warm rebuild, inspect unstable payload warnings and `reducer_events.json` first. Business-value and reducer cache keys intentionally ignore run IDs, dates, scratch paths, generated note links, rendered Markdown, output candidate backlinks, timing stats, status counts, and ordering, so repeated GPT calls usually mean the underlying evidence-card or reducer payload changed.
 
 Use `--force` only when you intentionally want a clean rebuild: after changing generation logic, after deleting or repairing corrupted cache files, during a clean benchmark, or when you suspect stale generated output. A forced run is expected to be slower because it bypasses source-index, semantic, shard, and rebuild reuse.
 

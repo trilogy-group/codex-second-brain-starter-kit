@@ -172,7 +172,10 @@ def write_rendered_notes(
             "cache_namespace": item.cache_namespace,
             "cache_key": item.cache_key,
         }
-        if item.path.exists() and item.path.read_text(encoding="utf-8", errors="ignore") == item.body:
+        previous_entry = previous_entries.get(key) if isinstance(previous_entries.get(key), dict) else {}
+        if item.generated and previous_entry.get("body_sha256") == body_hash and item.path.exists():
+            skipped_unchanged += 1
+        elif item.path.exists() and item.path.read_text(encoding="utf-8", errors="ignore") == item.body:
             skipped_unchanged += 1
         else:
             writer(item.path, item.body)
@@ -181,6 +184,8 @@ def write_rendered_notes(
             cache_hits += 1
     for key, entry in previous_entries.items():
         if key in current_entries:
+            continue
+        if not isinstance(entry, dict) or not bool(entry.get("generated")):
             continue
         stale_path = Path(str(entry.get("path") or key))
         try:

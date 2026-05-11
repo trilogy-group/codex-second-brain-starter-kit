@@ -137,6 +137,22 @@ def build_profile() -> dict[str, object]:
             "max_capability_summaries_for_ontology": 60,
             "max_summary_chars": 1800,
             "unlimited_total_shards": True,
+            "evidence_compaction": {
+                "enabled": True,
+                "max_raw_cards_per_source_group": 160,
+                "max_compacted_cards_per_group": 24,
+                "max_reducer_gpt_calls_per_layer_soft": 80,
+                "preserve_raw_inventory": True,
+            },
+            "hierarchical_reducers": {
+                "batch_size": 4,
+                "split_on_timeout": True,
+                "live_events_enabled": True,
+            },
+            "generated_note_policy": {
+                "max_repo_document_notes": 600,
+                "max_uploaded_document_notes": 600,
+            },
         },
         "retrieval_index": {
             "enabled": True,

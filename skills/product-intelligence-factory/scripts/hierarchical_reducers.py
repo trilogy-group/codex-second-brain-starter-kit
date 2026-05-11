@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.request
 from collections import Counter, defaultdict
@@ -33,6 +34,22 @@ DEFAULT_EVIDENCE_SCALING: dict[str, Any] = {
     "max_capability_summaries_for_ontology": 60,
     "max_summary_chars": 1800,
     "unlimited_total_shards": True,
+    "evidence_compaction": {
+        "enabled": True,
+        "max_raw_cards_per_source_group": 160,
+        "max_compacted_cards_per_group": 24,
+        "max_reducer_gpt_calls_per_layer_soft": 80,
+        "preserve_raw_inventory": True,
+    },
+    "hierarchical_reducers": {
+        "batch_size": 4,
+        "split_on_timeout": True,
+        "live_events_enabled": True,
+    },
+    "generated_note_policy": {
+        "max_repo_document_notes": 600,
+        "max_uploaded_document_notes": 600,
+    },
 }
 
 EVIDENCE_SCALING_ENV_OVERRIDES = {
@@ -43,6 +60,16 @@ EVIDENCE_SCALING_ENV_OVERRIDES = {
     "max_capability_summaries_for_ontology": ("PRODUCT_BASB_MAX_CAPABILITY_SUMMARIES_FOR_ONTOLOGY",),
     "max_summary_chars": ("PRODUCT_BASB_MAX_SUMMARY_CHARS",),
     "unlimited_total_shards": ("PRODUCT_BASB_UNLIMITED_TOTAL_SHARDS",),
+    "evidence_compaction.enabled": ("PRODUCT_BASB_EVIDENCE_COMPACTION_ENABLED",),
+    "evidence_compaction.max_raw_cards_per_source_group": ("PRODUCT_BASB_MAX_RAW_CARDS_PER_SOURCE_GROUP",),
+    "evidence_compaction.max_compacted_cards_per_group": ("PRODUCT_BASB_MAX_COMPACTED_CARDS_PER_GROUP",),
+    "evidence_compaction.max_reducer_gpt_calls_per_layer_soft": ("PRODUCT_BASB_MAX_REDUCER_GPT_CALLS_PER_LAYER_SOFT",),
+    "evidence_compaction.preserve_raw_inventory": ("PRODUCT_BASB_PRESERVE_RAW_EVIDENCE_INVENTORY",),
+    "hierarchical_reducers.batch_size": ("PRODUCT_BASB_HIERARCHICAL_REDUCER_BATCH_SIZE",),
+    "hierarchical_reducers.split_on_timeout": ("PRODUCT_BASB_HIERARCHICAL_REDUCER_SPLIT_ON_TIMEOUT",),
+    "hierarchical_reducers.live_events_enabled": ("PRODUCT_BASB_HIERARCHICAL_REDUCER_LIVE_EVENTS_ENABLED",),
+    "generated_note_policy.max_repo_document_notes": ("PRODUCT_BASB_MAX_REPO_DOCUMENT_NOTES",),
+    "generated_note_policy.max_uploaded_document_notes": ("PRODUCT_BASB_MAX_UPLOADED_DOCUMENT_NOTES",),
 }
 
 REDUCER_CACHE_NAMESPACE = "hierarchical_reducers"
@@ -65,8 +92,40 @@ def _positive_int(configured: dict[str, Any], key: str, default: int) -> int:
     return parsed
 
 
+def _config_bool(configured: dict[str, Any], key: str, default: bool) -> bool:
+    field = key.rsplit(".", 1)[-1]
+    value: Any = configured.get(key, configured.get(field, default))
+    for env_name in EVIDENCE_SCALING_ENV_OVERRIDES.get(key, ()):
+        env_value = os.environ.get(env_name)
+        if env_value not in (None, ""):
+            value = env_value
+            break
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _nested_positive_int(configured: dict[str, Any], key: str, default: int) -> int:
+    field = key.rsplit(".", 1)[-1]
+    aliased = {key: configured.get(key, configured.get(field, default))}
+    return _positive_int(aliased, key, default)
+
+
 def default_evidence_scaling_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
     configured = dict((profile or {}).get("evidence_scaling") or {})
+    compaction_config = {
+        **dict(DEFAULT_EVIDENCE_SCALING["evidence_compaction"]),
+        **dict((profile or {}).get("evidence_compaction") or {}),
+        **dict(configured.get("evidence_compaction") or {}),
+    }
+    reducer_config = {
+        **dict(DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]),
+        **dict((profile or {}).get("hierarchical_reducers") or {}),
+        **dict(configured.get("hierarchical_reducers") or {}),
+    }
+    note_policy_config = {
+        **dict(DEFAULT_EVIDENCE_SCALING["generated_note_policy"]),
+        **dict((profile or {}).get("generated_note_policy") or {}),
+        **dict(configured.get("generated_note_policy") or {}),
+    }
     generated_notes_value: Any = configured.get(
         "generated_notes_feed_synthesis",
         DEFAULT_EVIDENCE_SCALING["generated_notes_feed_synthesis"],
@@ -106,6 +165,46 @@ def default_evidence_scaling_config(profile: dict[str, Any] | None = None) -> di
         ),
         "max_summary_chars": _positive_int(configured, "max_summary_chars", DEFAULT_EVIDENCE_SCALING["max_summary_chars"]),
         "unlimited_total_shards": str(unlimited_value).strip().lower() in {"1", "true", "yes", "on"},
+        "evidence_compaction": {
+            "enabled": _config_bool(compaction_config, "evidence_compaction.enabled", True),
+            "max_raw_cards_per_source_group": _nested_positive_int(
+                compaction_config,
+                "evidence_compaction.max_raw_cards_per_source_group",
+                int(DEFAULT_EVIDENCE_SCALING["evidence_compaction"]["max_raw_cards_per_source_group"]),
+            ),
+            "max_compacted_cards_per_group": _nested_positive_int(
+                compaction_config,
+                "evidence_compaction.max_compacted_cards_per_group",
+                int(DEFAULT_EVIDENCE_SCALING["evidence_compaction"]["max_compacted_cards_per_group"]),
+            ),
+            "max_reducer_gpt_calls_per_layer_soft": _nested_positive_int(
+                compaction_config,
+                "evidence_compaction.max_reducer_gpt_calls_per_layer_soft",
+                int(DEFAULT_EVIDENCE_SCALING["evidence_compaction"]["max_reducer_gpt_calls_per_layer_soft"]),
+            ),
+            "preserve_raw_inventory": _config_bool(compaction_config, "evidence_compaction.preserve_raw_inventory", True),
+        },
+        "hierarchical_reducers": {
+            "batch_size": _nested_positive_int(
+                reducer_config,
+                "hierarchical_reducers.batch_size",
+                int(DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["batch_size"]),
+            ),
+            "split_on_timeout": _config_bool(reducer_config, "hierarchical_reducers.split_on_timeout", True),
+            "live_events_enabled": _config_bool(reducer_config, "hierarchical_reducers.live_events_enabled", True),
+        },
+        "generated_note_policy": {
+            "max_repo_document_notes": _nested_positive_int(
+                note_policy_config,
+                "generated_note_policy.max_repo_document_notes",
+                int(DEFAULT_EVIDENCE_SCALING["generated_note_policy"]["max_repo_document_notes"]),
+            ),
+            "max_uploaded_document_notes": _nested_positive_int(
+                note_policy_config,
+                "generated_note_policy.max_uploaded_document_notes",
+                int(DEFAULT_EVIDENCE_SCALING["generated_note_policy"]["max_uploaded_document_notes"]),
+            ),
+        },
     }
 
 
@@ -138,6 +237,177 @@ def _bounded_cards(cards: list[dict[str, Any]], *, max_summary_chars: int, inclu
             }
         )
     return bounded
+
+
+def _path_family(card: dict[str, Any]) -> str:
+    source_kind = str(card.get("source_kind") or "generated-note")
+    uri = str(card.get("source_uri") or card.get("path") or card.get("id") or "")
+    if source_kind == "crawled-url":
+        parsed = urlparse(uri)
+        parts = [part for part in parsed.path.split("/") if part]
+        return "/".join(parts[:2]) or parsed.netloc or "url"
+    parts = [part for part in uri.split("/") if part]
+    if source_kind in {"repo-code", "repo-doc"} and len(parts) > 1:
+        return "/".join(parts[1:4]) or parts[-1]
+    if parts:
+        return "/".join(parts[:3])
+    return _source_group(card)
+
+
+def _card_fingerprint(card: dict[str, Any]) -> str:
+    return evidence_cards.stable_hash(
+        {
+            "source_kind": card.get("source_kind"),
+            "title": card.get("title"),
+            "summary": card.get("summary"),
+            "source_uri": card.get("source_uri"),
+        }
+    )
+
+
+def _salience_score(card: dict[str, Any]) -> int:
+    title = str(card.get("title") or "")
+    summary = str(card.get("summary") or "")
+    terms = card.get("terms") if isinstance(card.get("terms"), list) else []
+    score = min(30, len(summary) // 80) + min(20, len(terms) * 2)
+    if card.get("code_anchors"):
+        score += 30
+    if str(card.get("confidence") or "").casefold() == "high":
+        score += 10
+    if re.search(r"\b(readme|overview|guide|workflow|architecture|product|customer|user|support|runbook)\b", title, re.I):
+        score += 12
+    return score
+
+
+def _dedupe_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for card in cards:
+        fingerprint = _card_fingerprint(card)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        deduped.append(card)
+    return deduped
+
+
+def _compact_card_family(
+    *,
+    source_kind: str,
+    group: str,
+    family: str,
+    cards: list[dict[str, Any]],
+    max_summary_chars: int,
+) -> dict[str, Any]:
+    selected = sorted(cards, key=lambda item: (-_salience_score(item), str(item.get("id") or "")))[:6]
+    terms = sorted({term for card in selected for term in card.get("terms", []) if str(term).strip()})[:24]
+    code_anchors = sorted({anchor for card in selected for anchor in card.get("code_anchors", []) if str(anchor).strip()})[:24]
+    evidence_ids = [str(card.get("id")) for card in selected if card.get("id")]
+    summary_parts = [str(card.get("summary") or card.get("title") or "") for card in selected if str(card.get("summary") or card.get("title") or "").strip()]
+    summary = evidence_cards.compact_text(
+        f"{len(cards)} evidence card(s) from {source_kind}/{group}/{family}. "
+        f"Representative evidence ids: {', '.join(evidence_ids[:8])}. "
+        + " ".join(summary_parts),
+        max_summary_chars,
+    )
+    return evidence_cards.normalize_card(
+        {
+            "id": f"compacted:{source_kind}:{_safe_id(group)}:{_safe_id(family)}:{evidence_cards.stable_hash(evidence_ids)[:12]}",
+            "source_kind": source_kind,
+            "title": f"{source_kind} {group} {family}".strip(),
+            "summary": summary,
+            "source_uri": f"{group}/{family}".strip("/"),
+            "confidence": "medium",
+            "terms": terms,
+            "code_anchors": code_anchors,
+            "compacted_evidence_ids": evidence_ids,
+            "compacted_source_count": len(cards),
+        }
+    )
+
+
+def compact_source_evidence_cards(
+    cards: list[dict[str, Any]],
+    *,
+    config: dict[str, Any],
+    output_dir: Path,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    compaction_config = dict(config.get("evidence_compaction") or {})
+    enabled = bool(compaction_config.get("enabled", True))
+    max_raw = max(1, int(compaction_config.get("max_raw_cards_per_source_group", 160) or 160))
+    max_compacted = max(1, int(compaction_config.get("max_compacted_cards_per_group", 24) or 24))
+    max_summary_chars = max(1, int(config.get("max_summary_chars", 1800) or 1800))
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for card in _dedupe_cards(cards):
+        grouped[(str(card.get("source_kind") or "generated-note"), _source_group(card))].append(card)
+
+    compacted_cards: list[dict[str, Any]] = []
+    groups: list[dict[str, Any]] = []
+    for (source_kind, group), grouped_cards in sorted(grouped.items()):
+        if not enabled or len(grouped_cards) <= max_raw:
+            compacted_cards.extend(grouped_cards)
+            groups.append(
+                {
+                    "source_kind": source_kind,
+                    "group": group,
+                    "raw_card_count": len(grouped_cards),
+                    "compacted_card_count": len(grouped_cards),
+                    "mode": "raw",
+                }
+            )
+            continue
+
+        family_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for card in grouped_cards:
+            family_groups[_path_family(card)].append(card)
+        ranked_families = sorted(
+            family_groups.items(),
+            key=lambda item: (-len(item[1]), -sum(_salience_score(card) for card in item[1]), item[0]),
+        )
+        selected_families = ranked_families[:max_compacted]
+        for family, family_cards in selected_families:
+            compacted_cards.append(
+                _compact_card_family(
+                    source_kind=source_kind,
+                    group=group,
+                    family=family,
+                    cards=family_cards,
+                    max_summary_chars=max_summary_chars,
+                )
+            )
+        groups.append(
+            {
+                "source_kind": source_kind,
+                "group": group,
+                "raw_card_count": len(grouped_cards),
+                "family_count": len(family_groups),
+                "selected_family_count": len(selected_families),
+                "compacted_card_count": len(selected_families),
+                "mode": "compacted",
+                "omitted_family_count": max(0, len(family_groups) - len(selected_families)),
+            }
+        )
+
+    soft_call_target = max(1, int(compaction_config.get("max_reducer_gpt_calls_per_layer_soft", 80) or 80))
+    inventory = {
+        "schema_version": REDUCER_SCHEMA_VERSION,
+        "enabled": enabled,
+        "raw_card_count": len(cards),
+        "deduped_card_count": sum(group["raw_card_count"] for group in groups),
+        "compacted_card_count": len(compacted_cards),
+        "source_kind_counts_before": evidence_cards.source_kind_counts(cards),
+        "source_kind_counts_after": evidence_cards.source_kind_counts(compacted_cards),
+        "max_raw_cards_per_source_group": max_raw,
+        "max_compacted_cards_per_group": max_compacted,
+        "max_reducer_gpt_calls_per_layer_soft": soft_call_target,
+        "groups": groups,
+    }
+    projected_specs = _source_shard_specs(compacted_cards, config) if compacted_cards else []
+    inventory["estimated_source_reducer_calls"] = len(projected_specs)
+    inventory["soft_target_exceeded"] = len(projected_specs) > soft_call_target
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "source_compaction.json").write_text(json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return evidence_cards.stable_cards(compacted_cards), inventory
 
 
 def _chunks(items: list[Any], size: int) -> list[list[Any]]:
@@ -249,27 +519,35 @@ class OpenAIHierarchicalReducerClient:
         self.rate_limiter = rate_limiter
         self.recorder = rate_limiter.recorder if rate_limiter is not None else rate_limits.RateLimitRecorder()
 
-    def reduce(self, spec: dict[str, Any], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, Any]:
+    def reduce_many(self, specs: list[dict[str, Any]], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, dict[str, Any]]:
         if not self.api_key:
             raise RuntimeError("OPENAI_API_KEY is required for hierarchical evidence reducers.")
+        if not specs:
+            return {}
         request_body = openai_responses.build_json_response_payload(
             model=model,
             reasoning_effort=reasoning_effort,
             instructions=(
                 "You are a Product BASB hierarchical reducer. Use only the compact cards provided. "
-                "Return JSON only with theme, summary, source_kind_counts, evidence_ids, confidence, "
-                "business_value, workflow_candidates, capability_candidates, risks, limitations, and code_surfaces. "
-                "Keep summaries concise and cite evidence_ids exactly."
+                "Return JSON only with an items array. Each item must include id, theme, summary, "
+                "source_kind_counts, evidence_ids, confidence, business_value, workflow_candidates, "
+                "capability_candidates, risks, limitations, and code_surfaces. Keep summaries concise "
+                "and cite evidence_ids exactly."
             ),
             user_content=json.dumps(
                 {
                     "prompt_version": REDUCER_PROMPT_VERSION,
-                    "layer": spec.get("layer"),
-                    "shard_id": spec.get("id"),
-                    "source_kind": spec.get("source_kind"),
-                    "group": spec.get("group"),
-                    "capability": spec.get("capability"),
-                    "cards": spec.get("cards", []),
+                    "shards": [
+                        {
+                            "id": spec.get("id"),
+                            "layer": spec.get("layer"),
+                            "source_kind": spec.get("source_kind"),
+                            "group": spec.get("group"),
+                            "capability": spec.get("capability"),
+                            "cards": spec.get("cards", []),
+                        }
+                        for spec in specs
+                    ],
                 },
                 sort_keys=True,
             ),
@@ -277,7 +555,7 @@ class OpenAIHierarchicalReducerClient:
         payload = json.dumps(request_body).encode("utf-8")
         if self.rate_limiter is not None:
             self.rate_limiter.acquire_openai(
-                stage=f"{spec.get('layer', 'hierarchical')}_reducer",
+                stage=f"{specs[0].get('layer', 'hierarchical')}_reducer",
                 worker_count=worker_count,
                 tokens=max(1, len(payload) // 4),
                 recommended_knob="max_concurrent_openai_reducers",
@@ -289,12 +567,15 @@ class OpenAIHierarchicalReducerClient:
             method="POST",
         )
         timeout_seconds = float(self.rate_config.get("fail_fast_seconds") or 120.0)
-        stage = f"{spec.get('layer', 'hierarchical')}_reducer"
+        stage = f"{specs[0].get('layer', 'hierarchical')}_reducer"
+        provider_headers: dict[str, Any] = {}
 
         def send_request() -> dict[str, Any]:
+            nonlocal provider_headers
             try:
                 with openai_requests.urlopen(request, timeout=timeout_seconds, opener=urllib.request.urlopen) as response:
                     raw_response = json.loads(response.read().decode("utf-8"))
+                    provider_headers = rate_limits.parse_provider_rate_limit_headers(response.headers)
                     if self.rate_limiter is not None:
                         self.rate_limiter.observe_openai_response_headers(
                             response.headers,
@@ -309,7 +590,7 @@ class OpenAIHierarchicalReducerClient:
                     raise provider_error from exc
                 raise
 
-        raw, _retry_count, _wait_seconds = rate_limits.with_retries(
+        raw, retry_count, wait_seconds = rate_limits.with_retries(
             action=send_request,
             config=self.rate_config,
             recorder=self.recorder,
@@ -317,7 +598,27 @@ class OpenAIHierarchicalReducerClient:
             worker_count=worker_count,
             recommended_knob="max_concurrent_openai_reducers",
         )
-        return openai_responses.parse_json_response(raw)
+        parsed = openai_responses.parse_json_response(raw)
+        items = parsed.get("items")
+        if not isinstance(items, list):
+            raise ValueError("OpenAI hierarchical reducer response must include an items array.")
+        results: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            results[str(item["id"])] = item
+        missing = [str(spec["id"]) for spec in specs if str(spec["id"]) not in results]
+        if missing:
+            raise ValueError(f"OpenAI hierarchical reducer response missing ids: {', '.join(missing[:8])}")
+        results["__meta__"] = {
+            "retry_count": retry_count,
+            "rate_limit_wait_seconds": round(wait_seconds, 4),
+            "provider_headers": provider_headers,
+        }
+        return results
+
+    def reduce(self, spec: dict[str, Any], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, Any]:
+        return self.reduce_many([spec], model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)[str(spec["id"])]
 
 
 class FixtureHierarchicalReducerClient:
@@ -346,6 +647,12 @@ class FixtureHierarchicalReducerClient:
             "risks": [],
             "limitations": [] if cards else ["No usable cards reached this reducer."],
             "code_surfaces": [anchor for card in cards for anchor in card.get("code_anchors", [])][:12],
+        }
+
+    def reduce_many(self, specs: list[dict[str, Any]], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, dict[str, Any]]:
+        return {
+            str(spec["id"]): {"id": spec["id"], **self.reduce(spec, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)}
+            for spec in specs
         }
 
 
@@ -387,18 +694,96 @@ def _normalise_reducer_response(spec: dict[str, Any], response: dict[str, Any]) 
     }
 
 
+def _stable_reducer_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "schema_version": REDUCER_SCHEMA_VERSION,
+        "layer": spec.get("layer"),
+        "id": spec.get("id"),
+        "source_kind": spec.get("source_kind"),
+        "group": spec.get("group"),
+        "capability": spec.get("capability"),
+        "input_count": spec.get("input_count"),
+        "cards": evidence_cards.stable_cards([card for card in spec.get("cards", []) if isinstance(card, dict)]),
+    }
+
+
 def _cache_key(spec: dict[str, Any], *, model: str, reasoning_effort: str) -> str:
+    stable_spec = _stable_reducer_spec(spec)
     return incremental_cache.stable_hash(
         {
             "schema_version": REDUCER_SCHEMA_VERSION,
             "prompt_version": REDUCER_PROMPT_VERSION,
-            "layer": spec.get("layer"),
-            "id": spec.get("id"),
+            "layer": stable_spec.get("layer"),
+            "id": stable_spec.get("id"),
             "model": model,
             "reasoning_effort": reasoning_effort,
-            "payload_hash": incremental_cache.stable_hash(spec),
+            "payload_hash": incremental_cache.stable_hash(stable_spec),
         }
     )
+
+
+class ReducerEventRecorder:
+    def __init__(self, output_dir: Path, *, enabled: bool) -> None:
+        self.path = output_dir / "reducer_events.json"
+        self.enabled = enabled
+        self.lock = threading.Lock()
+        self.events: list[dict[str, Any]] = []
+        self.summary: dict[str, Any] = {
+            "schema_version": REDUCER_SCHEMA_VERSION,
+            "event_count": 0,
+            "active_batches": 0,
+            "status_counts": {},
+            "slowest_call": None,
+            "events": [],
+        }
+
+    def record(self, **event: Any) -> None:
+        if not self.enabled:
+            return
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        payload = {"observed_at": now, **event}
+        with self.lock:
+            self.events.append(payload)
+            status_counts = Counter(str(item.get("status") or item.get("event") or "unknown") for item in self.events)
+            running = sum(1 for item in self.events if item.get("status") == "running") - sum(
+                1 for item in self.events if item.get("event") in {"batch_succeeded", "batch_failed", "cache_hit"}
+            )
+            completed_calls = [item for item in self.events if isinstance(item.get("elapsed_seconds"), (int, float))]
+            slowest = max(completed_calls, key=lambda item: float(item.get("elapsed_seconds") or 0), default=None)
+            self.summary = {
+                "schema_version": REDUCER_SCHEMA_VERSION,
+                "event_count": len(self.events),
+                "active_batches": max(0, running),
+                "status_counts": dict(status_counts),
+                "slowest_call": slowest,
+                "events": self.events[-200:],
+            }
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.summary, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+
+
+def _partial_result(spec: dict[str, Any], layer: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "id": spec["id"],
+        "layer": spec["layer"],
+        "status": "partial",
+        "source_kind": spec.get("source_kind"),
+        "group": spec.get("group"),
+        "capability": spec.get("capability"),
+        "input_count": int(spec.get("input_count", 0) or 0),
+        "theme": spec["id"],
+        "summary": "",
+        "source_kind_counts": evidence_cards.source_kind_counts(spec.get("cards", [])),
+        "evidence_ids": [str(card.get("id")) for card in spec.get("cards", [])[:40] if isinstance(card, dict) and card.get("id")],
+        "confidence": "low",
+        "business_value": "",
+        "workflow_candidates": [],
+        "capability_candidates": [],
+        "risks": [],
+        "limitations": [f"{layer} reducer failed: {str(exc)[:240]}"],
+        "code_surfaces": [],
+        "failure_reason": str(exc)[:500],
+    }
 
 
 def _run_layer(
@@ -412,71 +797,157 @@ def _run_layer(
     worker_count: int,
     force: bool,
     progress_callback: Callable[[str, int, int], None] | None,
+    batch_size: int = 1,
+    split_on_timeout: bool = True,
+    event_recorder: ReducerEventRecorder | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     started = time.perf_counter()
-    stats = {"layer": layer, "input_shards": len(specs), "cache_hits": 0, "cache_misses": 0, "gpt_call_count": 0, "failed": 0}
+    stats = {
+        "layer": layer,
+        "input_shards": len(specs),
+        "cache_hits": 0,
+        "cache_misses": 0,
+        "cache_miss_reasons": {},
+        "gpt_call_count": 0,
+        "batch_count": 0,
+        "failed": 0,
+    }
     results: list[dict[str, Any]] = []
     pending: list[tuple[dict[str, Any], str, dict[str, Any]]] = []
+    cache_lock = threading.Lock() if cache is not None else None
     completed = 0
     for spec in specs:
         cache_key = _cache_key(spec, model=model, reasoning_effort=reasoning_effort)
+        stable_spec = _stable_reducer_spec(spec)
         cache_input = {
             "prompt_version": REDUCER_PROMPT_VERSION,
             "model": model,
             "reasoning_effort": reasoning_effort,
-            "spec": spec,
+            "spec": stable_spec,
         }
-        cached = None if force or cache is None else incremental_cache.lookup(cache, REDUCER_CACHE_NAMESPACE, cache_key, cache_input, dependencies=spec)
+        cached = None
+        if not force and cache is not None:
+            assert cache_lock is not None
+            with cache_lock:
+                cached = incremental_cache.lookup(cache, REDUCER_CACHE_NAMESPACE, cache_key, cache_input, dependencies=stable_spec)
         if cached is not None:
             stats["cache_hits"] += 1
             results.append({**dict(cached.value), "cache_hit": True})
+            if event_recorder is not None:
+                event_recorder.record(
+                    event="cache_hit",
+                    status="cache_hit",
+                    layer=layer,
+                    shard_ids=[str(spec.get("id"))],
+                    input_card_count=int(spec.get("input_count", 0) or 0),
+                )
             completed += 1
             if progress_callback is not None:
                 progress_callback(layer, completed, max(1, len(specs)))
         else:
             stats["cache_misses"] += 1
+            reason = "forced" if force else "new_or_changed"
+            stats["cache_miss_reasons"][reason] = int(stats["cache_miss_reasons"].get(reason, 0)) + 1
             pending.append((spec, cache_key, cache_input))
 
-    def run_one(spec: dict[str, Any], cache_key: str, cache_input: dict[str, Any]) -> dict[str, Any]:
+    def run_batch(batch: list[tuple[dict[str, Any], str, dict[str, Any]]]) -> tuple[list[dict[str, Any]], int]:
+        specs_batch = [item[0] for item in batch]
+        shard_ids = [str(spec.get("id")) for spec in specs_batch]
+        payload_size = len(json.dumps([_stable_reducer_spec(spec) for spec in specs_batch], sort_keys=True, default=str).encode("utf-8"))
+        batch_started = time.perf_counter()
+        if event_recorder is not None:
+            event_recorder.record(
+                event="batch_started",
+                status="running",
+                layer=layer,
+                shard_ids=shard_ids,
+                input_card_count=sum(int(spec.get("input_count", 0) or 0) for spec in specs_batch),
+                payload_bytes=payload_size,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
         try:
-            response = client.reduce(spec, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
-            result = _normalise_reducer_response(spec, response)
-            if cache is not None:
-                incremental_cache.store(cache, REDUCER_CACHE_NAMESPACE, cache_key, cache_input, result, dependencies=spec)
-            return result
-        except Exception as exc:
-            return {
-                "id": spec["id"],
-                "layer": spec["layer"],
-                "status": "partial",
-                "source_kind": spec.get("source_kind"),
-                "group": spec.get("group"),
-                "capability": spec.get("capability"),
-                "input_count": int(spec.get("input_count", 0) or 0),
-                "theme": spec["id"],
-                "summary": "",
-                "source_kind_counts": evidence_cards.source_kind_counts(spec.get("cards", [])),
-                "evidence_ids": [str(card.get("id")) for card in spec.get("cards", [])[:40] if isinstance(card, dict) and card.get("id")],
-                "confidence": "low",
-                "business_value": "",
-                "workflow_candidates": [],
-                "capability_candidates": [],
-                "risks": [],
-                "limitations": [f"{layer} reducer failed: {str(exc)[:240]}"],
-                "code_surfaces": [],
-                "failure_reason": str(exc)[:500],
-            }
-
-    with ThreadPoolExecutor(max_workers=max(1, min(worker_count, len(pending) or 1)), thread_name_prefix=f"basb-{layer}-reducer") as executor:
-        futures = [executor.submit(run_one, spec, cache_key, cache_input) for spec, cache_key, cache_input in pending]
-        for future in as_completed(futures):
-            result = future.result()
-            results.append(result)
-            if result.get("status") == "partial":
-                stats["failed"] += 1
+            if hasattr(client, "reduce_many"):
+                responses = client.reduce_many(specs_batch, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
             else:
-                stats["gpt_call_count"] += 1
-            completed += 1
+                responses = {
+                    str(spec["id"]): client.reduce(spec, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
+                    for spec in specs_batch
+                }
+            response_meta = {}
+            if isinstance(responses, dict) and isinstance(responses.get("__meta__"), dict):
+                response_meta = dict(responses.pop("__meta__"))
+            normalized_results: list[dict[str, Any]] = []
+            for spec, cache_key, cache_input in batch:
+                result = _normalise_reducer_response(spec, responses[str(spec["id"])])
+                normalized_results.append(result)
+                if cache is not None:
+                    assert cache_lock is not None
+                    with cache_lock:
+                        incremental_cache.store(
+                            cache,
+                            REDUCER_CACHE_NAMESPACE,
+                            cache_key,
+                            cache_input,
+                            result,
+                            dependencies=_stable_reducer_spec(spec),
+                        )
+            if event_recorder is not None:
+                event_recorder.record(
+                    event="batch_succeeded",
+                    status="succeeded",
+                    layer=layer,
+                    shard_ids=shard_ids,
+                    batch_size=len(batch),
+                    elapsed_seconds=round(time.perf_counter() - batch_started, 4),
+                    payload_bytes=payload_size,
+                    retry_count=response_meta.get("retry_count", 0),
+                    rate_limit_wait_seconds=response_meta.get("rate_limit_wait_seconds", 0.0),
+                    provider_headers=response_meta.get("provider_headers", {}),
+                )
+            return normalized_results, 1
+        except Exception as exc:
+            if split_on_timeout and len(batch) > 1:
+                if event_recorder is not None:
+                    event_recorder.record(
+                        event="batch_split",
+                        status="split",
+                        layer=layer,
+                        shard_ids=shard_ids,
+                        batch_size=len(batch),
+                        elapsed_seconds=round(time.perf_counter() - batch_started, 4),
+                        reason=str(exc)[:300],
+                    )
+                split_results: list[dict[str, Any]] = []
+                gpt_calls = 0
+                for item in batch:
+                    item_results, item_calls = run_batch([item])
+                    split_results.extend(item_results)
+                    gpt_calls += item_calls
+                return split_results, gpt_calls
+            if event_recorder is not None:
+                event_recorder.record(
+                    event="batch_failed",
+                    status="failed",
+                    layer=layer,
+                    shard_ids=shard_ids,
+                    batch_size=len(batch),
+                    elapsed_seconds=round(time.perf_counter() - batch_started, 4),
+                    payload_bytes=payload_size,
+                    reason=str(exc)[:500],
+                )
+            return [_partial_result(spec, layer, exc) for spec in specs_batch], 1
+
+    pending_batches = _chunks(pending, max(1, int(batch_size or 1)))
+    stats["batch_count"] = len(pending_batches)
+    with ThreadPoolExecutor(max_workers=max(1, min(worker_count, len(pending_batches) or 1)), thread_name_prefix=f"basb-{layer}-reducer") as executor:
+        futures = [executor.submit(run_batch, batch) for batch in pending_batches]
+        for future in as_completed(futures):
+            batch_results, gpt_calls = future.result()
+            results.extend(batch_results)
+            stats["gpt_call_count"] += gpt_calls
+            stats["failed"] += sum(1 for result in batch_results if result.get("status") == "partial")
+            completed += len(batch_results)
             if progress_callback is not None:
                 progress_callback(layer, completed, max(1, len(specs)))
 
@@ -547,6 +1018,19 @@ def run_hierarchical_reducers(
     )
     if not bounded_cards:
         raise SystemExit("No usable evidence cards reached hierarchical reducers; cannot synthesize Product Ontology v2.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    reducer_config = dict(evidence_config.get("hierarchical_reducers") or {})
+    batch_size = max(1, int(reducer_config.get("batch_size", 1) or 1))
+    split_on_timeout = bool(reducer_config.get("split_on_timeout", True))
+    event_recorder = ReducerEventRecorder(
+        output_dir,
+        enabled=bool(reducer_config.get("live_events_enabled", True)),
+    )
+    bounded_cards, compaction_inventory = compact_source_evidence_cards(
+        bounded_cards,
+        config=evidence_config,
+        output_dir=output_dir,
+    )
     active_client = client or reducer_client(rate_limiter=rate_limiter, rate_config=rate_limit_config)
     model = str(business_config.get("llm_model") or openai_responses.DEFAULT_REASONING_MODEL)
     reasoning_effort = str(business_config.get("reasoning_effort") or openai_responses.DEFAULT_REASONING_EFFORT)
@@ -562,6 +1046,9 @@ def run_hierarchical_reducers(
         worker_count=min(max_openai_reducers, int(generation_config.get("source_shard_workers", 40))),
         force=force,
         progress_callback=progress_callback,
+        batch_size=batch_size,
+        split_on_timeout=split_on_timeout,
+        event_recorder=event_recorder,
     )
     if not any(item.get("status") == "succeeded" for item in source_results):
         raise SystemExit("All source reducers failed; cannot synthesize Product Ontology v2.")
@@ -577,6 +1064,9 @@ def run_hierarchical_reducers(
         worker_count=min(max_openai_reducers, int(generation_config.get("theme_reducer_workers", 24))),
         force=force,
         progress_callback=progress_callback,
+        batch_size=batch_size,
+        split_on_timeout=split_on_timeout,
+        event_recorder=event_recorder,
     )
     capability_specs = _capability_shard_specs(theme_results, capabilities, evidence_config)
     capability_results, capability_stats = _run_layer(
@@ -589,6 +1079,9 @@ def run_hierarchical_reducers(
         worker_count=min(max_openai_reducers, int(generation_config.get("capability_reducer_workers", 16))),
         force=force,
         progress_callback=progress_callback,
+        batch_size=batch_size,
+        split_on_timeout=split_on_timeout,
+        event_recorder=event_recorder,
     )
     ontology_specs = _ontology_shard_specs(capability_results, evidence_config)
     ontology_results, ontology_stats = _run_layer(
@@ -601,11 +1094,13 @@ def run_hierarchical_reducers(
         worker_count=min(max_openai_reducers, int(generation_config.get("ontology_reducer_workers", 4))),
         force=force,
         progress_callback=progress_callback,
+        batch_size=batch_size,
+        split_on_timeout=split_on_timeout,
+        event_recorder=event_recorder,
     )
     if not any(item.get("status") == "succeeded" for item in ontology_results):
         raise SystemExit("All ontology reducers failed; cannot synthesize Product Ontology v2.")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     source_inventory = {"schema_version": REDUCER_SCHEMA_VERSION, "stats": source_stats, "shards": source_results}
     theme_inventory = {"schema_version": REDUCER_SCHEMA_VERSION, "stats": theme_stats, "shards": theme_results}
     capability_inventory = {"schema_version": REDUCER_SCHEMA_VERSION, "stats": capability_stats, "shards": capability_results}
@@ -616,6 +1111,14 @@ def run_hierarchical_reducers(
         "generated_notes_feed_synthesis": include_generated,
         "source_kind_counts": evidence_cards.source_kind_counts(bounded_cards),
         "source_card_count": len(bounded_cards),
+        "raw_source_card_count": compaction_inventory.get("raw_card_count", len(cards)),
+        "source_compaction": {
+            "enabled": compaction_inventory.get("enabled", False),
+            "raw_card_count": compaction_inventory.get("raw_card_count", len(cards)),
+            "compacted_card_count": compaction_inventory.get("compacted_card_count", len(bounded_cards)),
+            "estimated_source_reducer_calls": compaction_inventory.get("estimated_source_reducer_calls"),
+            "soft_target_exceeded": compaction_inventory.get("soft_target_exceeded", False),
+        },
         "source_cards": bounded_cards,
         "layers": {
             "source_shards": {"count": len(source_results), "status_counts": source_stats["status_counts"]},
@@ -647,6 +1150,8 @@ def run_hierarchical_reducers(
         "ontology_evidence_cards": _ontology_cards(ontology_results, capability_results, evidence_config),
         "coverage_limitations": coverage_limitations,
         "layer_stats": layer_stats,
+        "source_compaction": compaction_inventory,
+        "reducer_events": event_recorder.summary,
         "cache_hits": sum(int(stats.get("cache_hits", 0) or 0) for stats in layer_stats.values()),
         "cache_misses": sum(int(stats.get("cache_misses", 0) or 0) for stats in layer_stats.values()),
         "gpt_call_count": sum(int(stats.get("gpt_call_count", 0) or 0) for stats in layer_stats.values()),

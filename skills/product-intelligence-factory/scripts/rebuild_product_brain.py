@@ -1596,6 +1596,8 @@ def generated_note_manifest_rows(manifest_path: Path) -> list[evidence_index.Evi
         return []
     rows: list[evidence_index.EvidenceRow] = []
     for key, entry in sorted((manifest.get("entries") or {}).items()):
+        if not isinstance(entry, dict) or not bool(entry.get("generated")):
+            continue
         path = str(entry.get("path") or key)
         title = Path(path).stem
         rows.append(
@@ -5776,11 +5778,11 @@ def build_product_ontology(
         },
         "hierarchical_reducer": {
             "schema_version": reducer_summary.get("schema_version"),
-            "layer_stats": reducer_summary.get("layer_stats") if isinstance(reducer_summary.get("layer_stats"), dict) else {},
             "coverage_limitations": coverage_limitations,
             "source_kind_counts": (reducer_summary.get("evidence_graph") or {}).get("source_kind_counts")
             if isinstance(reducer_summary.get("evidence_graph"), dict)
             else {},
+            "source_compaction": reducer_summary.get("source_compaction") if isinstance(reducer_summary.get("source_compaction"), dict) else {},
         },
         "generated_notes_feed_synthesis": False,
     }
@@ -6122,6 +6124,17 @@ def main() -> None:
     note_specs: list[note_rendering.NoteRenderSpec] = []
     rendered_note_stats: dict[str, int] = {"written": 0, "cache_hits": 0, "cache_misses": 0}
     generated_notes_manifest_path = paths.json_dir / "generated_notes_manifest.json"
+    source_note_policy = dict(evidence_scaling_config.get("generated_note_policy") or {})
+    max_repo_document_notes = max(0, int(source_note_policy.get("max_repo_document_notes", 600) or 0))
+    max_uploaded_document_notes = max(0, int(source_note_policy.get("max_uploaded_document_notes", 600) or 0))
+    source_note_policy_stats: dict[str, int] = {
+        "repo_document_records": 0,
+        "repo_document_notes_selected": 0,
+        "repo_document_notes_skipped_low_signal": 0,
+        "uploaded_document_records": 0,
+        "uploaded_document_notes_selected": 0,
+        "uploaded_document_notes_skipped_low_signal": 0,
+    }
 
     def add_note_render(
         path: Path,
@@ -6291,6 +6304,57 @@ def main() -> None:
             repo_doc_links_by_cap[key].append(note_link(record["stem"]))
 
     repo_links = [note_link(stem_for_repo(snapshot["name"])) for snapshot in repo_snapshots]
+
+    def source_note_signal(record: dict[str, Any]) -> int:
+        item = record.get("item") if isinstance(record.get("item"), dict) else {}
+        title = " ".join(str(value or "") for value in [item.get("title"), item.get("relative_path"), item.get("source_uri")])
+        text = str(record.get("text") or item.get("summary") or "")
+        combined = f"{title} {text[:2000]}"
+        score = min(40, len(text) // 600)
+        score += len(record.get("capabilities") or []) * 20
+        if re.search(r"\b(readme|overview|architecture|workflow|runbook|decision|strategy|customer|persona|pricing|billing|security|launch|roadmap|support|migration)\b", combined, re.I):
+            score += 35
+        if re.search(r"\b(todo|fixme|risk|blocked|deprecated|incident|outage|known issue)\b", combined, re.I):
+            score += 20
+        if item.get("confidence") == "high":
+            score += 10
+        return score
+
+    def selected_source_refs(records: list[dict[str, Any]], *, max_notes: int) -> set[str]:
+        if max_notes <= 0:
+            return set()
+        ranked = sorted(
+            records,
+            key=lambda record: (-source_note_signal(record), str(record.get("source_ref") or record.get("stem") or "")),
+        )
+        return {
+            str(record.get("source_ref") or record.get("stem") or "")
+            for record in ranked[:max_notes]
+            if source_note_signal(record) > 0 and str(record.get("source_ref") or record.get("stem") or "").strip()
+        }
+
+    selected_repo_document_refs = selected_source_refs(repo_document_records, max_notes=max_repo_document_notes)
+    selected_uploaded_document_refs = selected_source_refs(uploaded_document_records, max_notes=max_uploaded_document_notes)
+    source_note_policy_stats = {
+        "repo_document_records": len(repo_document_records),
+        "repo_document_notes_selected": len(selected_repo_document_refs),
+        "repo_document_notes_skipped_low_signal": max(0, len(repo_document_records) - len(selected_repo_document_refs)),
+        "uploaded_document_records": len(uploaded_document_records),
+        "uploaded_document_notes_selected": len(selected_uploaded_document_refs),
+        "uploaded_document_notes_skipped_low_signal": max(0, len(uploaded_document_records) - len(selected_uploaded_document_refs)),
+    }
+    write_json(
+        paths.json_dir / "source_note_policy.json",
+        {
+            "schema_version": 1,
+            "policy": {
+                "max_repo_document_notes": max_repo_document_notes,
+                "max_uploaded_document_notes": max_uploaded_document_notes,
+                "raw_provenance_preserved_in_inventories": True,
+            },
+            "stats": source_note_policy_stats,
+        },
+    )
 
     evidence_index_path = paths.json_dir / "evidence_index.sqlite"
     evidence_manifest_path = paths.json_dir / "evidence_index_manifest.json"
@@ -6632,6 +6696,8 @@ def main() -> None:
         )
 
     for record in repo_document_records:
+        if str(record.get("source_ref") or "") not in selected_repo_document_refs:
+            continue
         add_note_render(
             repo_docs_dir / f"{record['stem']}.md",
             namespace="note_render.repo_document",
@@ -6649,6 +6715,8 @@ def main() -> None:
         )
 
     for record in uploaded_document_records:
+        if str(record.get("source_ref") or "") not in selected_uploaded_document_refs:
+            continue
         add_note_render(
             uploaded_docs_dir / f"{record['stem']}.md",
             namespace="note_render.uploaded_document",
@@ -7013,6 +7081,8 @@ def main() -> None:
     business_inventory["hierarchical_cache_misses"] = hierarchical_result.get("cache_misses", 0)
     business_inventory["hierarchical_gpt_call_count"] = hierarchical_result.get("gpt_call_count", 0)
     business_inventory["hierarchical_partial_count"] = hierarchical_result.get("partial_count", 0)
+    business_inventory["source_compaction"] = hierarchical_result.get("source_compaction", {})
+    business_inventory["reducer_events"] = hierarchical_result.get("reducer_events", {})
     planned_business_units = max(1, len(capability_note_inputs) + len(packet_records) + min(12, len(packet_records)) + 1)
     progress.record(
         "business_value_synthesis",
@@ -7590,6 +7660,8 @@ def main() -> None:
         cache_hits=rendered_note_stats["cache_hits"],
         cache_misses=rendered_note_stats["cache_misses"],
         skipped_unchanged=rendered_note_stats.get("skipped_unchanged", 0),
+        source_notes_skipped_low_signal=source_note_policy_stats["repo_document_notes_skipped_low_signal"]
+        + source_note_policy_stats["uploaded_document_notes_skipped_low_signal"],
     )
     progress.record(
         "note_rendering",
@@ -7679,6 +7751,10 @@ def main() -> None:
         output_candidates=len(output_candidate_records),
         note_render_cache_hits=rendered_note_stats["cache_hits"],
         note_render_cache_misses=rendered_note_stats["cache_misses"],
+        repo_document_notes_selected=source_note_policy_stats["repo_document_notes_selected"],
+        repo_document_notes_skipped_low_signal=source_note_policy_stats["repo_document_notes_skipped_low_signal"],
+        uploaded_document_notes_selected=source_note_policy_stats["uploaded_document_notes_selected"],
+        uploaded_document_notes_skipped_low_signal=source_note_policy_stats["uploaded_document_notes_skipped_low_signal"],
     )
     cache_metadata = {
         "schema_version": 1,
@@ -7691,6 +7767,7 @@ def main() -> None:
                 "semantic_clustering": semantic_config,
                 "code_intelligence": profile["code_intelligence"],
                 "business_value": profile["business_value"],
+                "evidence_scaling": evidence_scaling_config,
                 "generation_performance": generation_config,
                 "retrieval_index": retrieval_config,
                 "rate_limits": rate_limit_config,
@@ -7751,6 +7828,7 @@ def main() -> None:
                     "status_counts": shard_inventory.get("status_counts", {}),
                 },
                 "note_rendering": rendered_note_stats,
+                "source_note_policy": source_note_policy_stats,
                 "cache_hit_ratio": round(
                     int(rebuild_cache_stats.get("hits", 0) or 0)
                     / max(1, int(rebuild_cache_stats.get("hits", 0) or 0) + int(rebuild_cache_stats.get("misses", 0) or 0)),

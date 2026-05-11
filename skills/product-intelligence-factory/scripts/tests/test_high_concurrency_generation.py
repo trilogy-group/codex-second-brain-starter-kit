@@ -233,7 +233,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             manifest = vault / "80 Assets" / "generated_notes_manifest.json"
             rendered = [
                 note_rendering.RenderedNote(note, "# Alpha\n", False, False, "support", "alpha"),
-                note_rendering.RenderedNote(stale, "# Stale\n", False, False, "support", "stale"),
+                note_rendering.RenderedNote(stale, "# Stale\n", True, False, "support", "stale"),
             ]
 
             first = note_rendering.write_rendered_notes(
@@ -254,6 +254,35 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             self.assertEqual(second["deleted_stale"], 1)
             self.assertTrue(note.exists())
             self.assertFalse(stale.exists())
+
+    def test_note_render_manifest_never_deletes_stale_user_authored_notes(self) -> None:
+        note_rendering = load_module(NOTE_RENDERING_SCRIPT, "note_rendering_user_note_manifest_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            vault = root / "vault"
+            active = vault / "40 Research" / "Active.md"
+            user_note = vault / "40 Research" / "User Note.md"
+            manifest = vault / "80 Assets" / "generated_notes_manifest.json"
+            rendered = [
+                note_rendering.RenderedNote(active, "# Active\n", False, False, "support", "active"),
+                note_rendering.RenderedNote(user_note, "# User Note\n", False, False, "support", "user"),
+            ]
+
+            note_rendering.write_rendered_notes(
+                rendered,
+                write_note=lambda path, body: path.parent.mkdir(parents=True, exist_ok=True) or path.write_text(body, encoding="utf-8"),
+                write_generated_note=lambda path, body: path.parent.mkdir(parents=True, exist_ok=True) or path.write_text(body, encoding="utf-8"),
+                manifest_path=manifest,
+            )
+            second = note_rendering.write_rendered_notes(
+                [rendered[0]],
+                write_note=lambda path, body: path.parent.mkdir(parents=True, exist_ok=True) or path.write_text(body, encoding="utf-8"),
+                write_generated_note=lambda path, body: path.parent.mkdir(parents=True, exist_ok=True) or path.write_text(body, encoding="utf-8"),
+                manifest_path=manifest,
+            )
+
+            self.assertEqual(second["deleted_stale"], 0)
+            self.assertTrue(user_note.exists())
 
     def test_semantic_result_cache_skips_embedding_and_llm_clients_for_unchanged_inputs(self) -> None:
         semantic = load_module(SEMANTIC_SCRIPT, "semantic_result_cache_test")
@@ -1727,6 +1756,62 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertNotIn("generated-note", evidence_graph["source_kind_counts"])
         self.assertGreater(len(result["ontology_evidence_cards"]), 0)
 
+    def test_hierarchical_reducers_compact_large_repo_doc_sets_before_source_reducers(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_compaction_test")
+        cache_module = sys.modules["incremental_cache"]
+        cards = [
+            {
+                "id": f"repo-doc:{index:05d}",
+                "source_kind": "repo-doc",
+                "title": f"Operations guide {index}",
+                "summary": "Operations workflow, customer support value, and product process evidence.",
+                "source_uri": f"acme/docs/section-{index % 200:03d}/guide-{index:05d}.md",
+                "terms": ["operations", "workflow", "support"],
+            }
+            for index in range(2000)
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            result = reducers.run_hierarchical_reducers(
+                cards=cards,
+                capabilities=[{"key": "operations", "title": "Operations", "keywords": ["operations"]}],
+                evidence_config={
+                    "generated_notes_feed_synthesis": False,
+                    "max_cards_per_source_shard": 10,
+                    "max_cards_per_theme_shard": 6,
+                    "max_theme_summaries_per_capability_shard": 4,
+                    "max_capability_summaries_for_ontology": 3,
+                    "max_summary_chars": 300,
+                    "unlimited_total_shards": True,
+                    "evidence_compaction": {
+                        "enabled": True,
+                        "max_raw_cards_per_source_group": 50,
+                        "max_compacted_cards_per_group": 10,
+                        "max_reducer_gpt_calls_per_layer_soft": 80,
+                    },
+                    "hierarchical_reducers": {"batch_size": 4, "split_on_timeout": True, "live_events_enabled": True},
+                },
+                generation_config={
+                    "source_shard_workers": 8,
+                    "theme_reducer_workers": 4,
+                    "capability_reducer_workers": 2,
+                    "ontology_reducer_workers": 1,
+                    "max_concurrent_openai_reducers": 8,
+                },
+                business_config={"llm_model": "gpt-5.5", "reasoning_effort": "high"},
+                cache=cache_module.empty_incremental_cache(),
+                output_dir=output_dir,
+                client=reducers.FixtureHierarchicalReducerClient(),
+            )
+            compaction = json.loads((output_dir / "source_compaction.json").read_text(encoding="utf-8"))
+            source_inventory = json.loads((output_dir / "source_shards.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(compaction["raw_card_count"], 2000)
+        self.assertLessEqual(compaction["compacted_card_count"], 10)
+        self.assertLessEqual(compaction["estimated_source_reducer_calls"], 80)
+        self.assertLessEqual(len(source_inventory["shards"]), 80)
+        self.assertLess(result["gpt_call_count"], 80)
+
     def test_hierarchical_reducer_cache_reuses_unchanged_layers(self) -> None:
         reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_cache_test")
         cache_module = sys.modules["incremental_cache"]
@@ -1735,10 +1820,15 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
             def __init__(self) -> None:
                 super().__init__()
                 self.calls = 0
+                self.batch_calls = 0
 
             def reduce(self, spec: dict[str, object], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, object]:
                 self.calls += 1
                 return super().reduce(spec, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
+
+            def reduce_many(self, specs: list[dict[str, object]], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, dict[str, object]]:
+                self.batch_calls += 1
+                return super().reduce_many(specs, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
 
         client = CountingClient()
         cache = cache_module.empty_incremental_cache()
@@ -1781,6 +1871,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
                 client=client,
             )
             calls_after_first = client.calls
+            batch_calls_after_first = client.batch_calls
             second = reducers.run_hierarchical_reducers(
                 cards=cards,
                 capabilities=[{"key": "branding", "title": "Branding", "keywords": ["branding"]}],
@@ -1794,7 +1885,8 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
 
         self.assertGreater(calls_after_first, 0)
         self.assertEqual(client.calls, calls_after_first)
-        self.assertEqual(first["gpt_call_count"], calls_after_first)
+        self.assertEqual(client.batch_calls, batch_calls_after_first)
+        self.assertEqual(first["gpt_call_count"], batch_calls_after_first)
         self.assertEqual(second["gpt_call_count"], 0)
         self.assertGreater(second["cache_hits"], 0)
 
