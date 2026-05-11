@@ -77,7 +77,7 @@ Typical use cases:
 
 ## Intelligence model defaults
 
-Full-fidelity LLM synthesis defaults to `gpt-5.5` with `high` reasoning for semantic cluster synthesis, business-value synthesis, Product Ontology v2, and generation shards. The workflow uses OpenAI's Responses API for these reasoning calls so the requested reasoning effort is explicit instead of silently falling back to a lower-quality chat-completions path.
+Full-fidelity LLM synthesis defaults to `gpt-5.5` with hybrid reasoning: `medium` for high-fanout source/theme reducers, generation shards, and business-value entity synthesis, and `high` for capability reducers, ontology reducers, Product Ontology v2, and semantic cluster synthesis. The workflow uses OpenAI's Responses API for these reasoning calls so the requested reasoning effort is explicit instead of silently falling back to a lower-quality chat-completions path.
 
 Keep these settings in `profile.intelligence_path` unless you are intentionally testing a different quality/cost tradeoff:
 
@@ -90,7 +90,8 @@ semantic_clustering:
 business_value:
   enabled: true
   llm_model: gpt-5.5
-  reasoning_effort: high
+  reasoning_effort: medium
+  ontology_reasoning_effort: high
   synthesis_workers: 24
   batch_size: 12
   cache_enabled: true
@@ -116,6 +117,10 @@ evidence_scaling:
     batch_size: 4
     split_on_timeout: true
     live_events_enabled: true
+    source_reasoning_effort: medium
+    theme_reasoning_effort: medium
+    capability_reasoning_effort: high
+    ontology_reasoning_effort: high
   generated_note_policy:
     max_repo_document_notes: 600
     max_uploaded_document_notes: 600
@@ -133,7 +138,7 @@ generation_performance:
   agent_shards:
     worker_mode: llm-synthesis
     shard_model: gpt-5.5
-    reasoning_effort: high
+    reasoning_effort: medium
 ```
 
 The validator rejects `gpt-4.1-mini` for synthesis fields because it produces thinner intelligence and does not honor the reasoning-effort contract expected by this starter kit. Business-value intelligence and Product Ontology v2 fail clearly when OpenAI synthesis cannot run; they do not use deterministic template fallbacks. If you change model or reasoning settings, run `--force` once so stale semantic, shard, and generated-note caches do not hide the change.
@@ -230,12 +235,14 @@ generation_performance:
   agent_shards:
     worker_mode: llm-synthesis
     shard_model: gpt-5.5
-    reasoning_effort: high
+    reasoning_effort: medium
 rate_limits:
   openai_requests_per_minute: 3000
   openai_tokens_per_minute: 3000000
   source_fetch_requests_per_host_per_minute: 120
 business_value:
+  reasoning_effort: medium
+  ontology_reasoning_effort: high
   synthesis_workers: 24
   batch_size: 12
   cache_enabled: true
@@ -259,6 +266,10 @@ evidence_scaling:
     batch_size: 4
     split_on_timeout: true
     live_events_enabled: true
+    source_reasoning_effort: medium
+    theme_reasoning_effort: medium
+    capability_reasoning_effort: high
+    ontology_reasoning_effort: high
   generated_note_policy:
     max_repo_document_notes: 600
     max_uploaded_document_notes: 600

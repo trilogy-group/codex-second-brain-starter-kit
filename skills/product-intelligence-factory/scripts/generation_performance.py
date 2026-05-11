@@ -29,7 +29,7 @@ DEFAULT_GENERATION_PERFORMANCE: dict[str, Any] = {
         "timeout_seconds": 1800,
         "worker_mode": "llm-synthesis",
         "shard_model": "gpt-5.5",
-        "reasoning_effort": "high",
+        "reasoning_effort": "medium",
         "max_cards_per_shard": 80,
     },
 }
@@ -259,7 +259,7 @@ def default_generation_config(profile: dict[str, Any] | None = None) -> dict[str
                 _configured_value(
                     shard_config,
                     "agent_shards.reasoning_effort",
-                    "high",
+                    "medium",
                     config_key="reasoning_effort",
                 )
             ),

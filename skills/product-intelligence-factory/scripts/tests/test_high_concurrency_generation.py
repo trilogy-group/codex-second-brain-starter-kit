@@ -1132,6 +1132,17 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(contexts[0], str(certifi_path))
         self.assertEqual(contexts[1], {"cafile": str(certifi_path)})
 
+    def test_business_value_defaults_use_medium_entities_and_high_ontology_reasoning(self) -> None:
+        rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_reasoning_defaults_test")
+
+        config = rebuild.default_business_value_config({})
+
+        self.assertEqual(config["reasoning_effort"], "medium")
+        self.assertEqual(config["ontology_reasoning_effort"], "high")
+        self.assertEqual(rebuild.business_value_task_config(config, "capability")["reasoning_effort"], "medium")
+        self.assertEqual(rebuild.business_value_task_config(config, "product_ontology")["reasoning_effort"], "high")
+        self.assertEqual(rebuild.business_value_task_config(config, "product_ontology_repair")["reasoning_effort"], "high")
+
     def test_business_value_synthesis_batches_misses_and_reuses_cache(self) -> None:
         rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_batch_cache_test")
         cache = rebuild.incremental_cache.empty_incremental_cache()
@@ -1756,6 +1767,73 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertNotIn("generated-note", evidence_graph["source_kind_counts"])
         self.assertGreater(len(result["ontology_evidence_cards"]), 0)
 
+    def test_hierarchical_reducer_defaults_use_medium_fanout_and_high_final_reasoning(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_reasoning_config_test")
+
+        config = reducers.default_evidence_scaling_config({})
+
+        self.assertEqual(config["hierarchical_reducers"]["source_reasoning_effort"], "medium")
+        self.assertEqual(config["hierarchical_reducers"]["theme_reasoning_effort"], "medium")
+        self.assertEqual(config["hierarchical_reducers"]["capability_reasoning_effort"], "high")
+        self.assertEqual(config["hierarchical_reducers"]["ontology_reasoning_effort"], "high")
+
+    def test_hierarchical_reducers_pass_layer_specific_reasoning_effort(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_reasoning_runtime_test")
+        cache_module = sys.modules["incremental_cache"]
+
+        class RecordingClient(reducers.FixtureHierarchicalReducerClient):
+            def __init__(self) -> None:
+                super().__init__()
+                self.reasoning_by_layer: dict[str, str] = {}
+
+            def reduce_many(self, specs: list[dict[str, object]], *, model: str, reasoning_effort: str, worker_count: int) -> dict[str, dict[str, object]]:
+                self.reasoning_by_layer[str(specs[0]["layer"])] = reasoning_effort
+                return super().reduce_many(specs, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
+
+        client = RecordingClient()
+        cards = [
+            {
+                "id": f"repo-doc:{index}",
+                "source_kind": "repo-doc",
+                "title": f"Workspace setup {index}",
+                "summary": "Workspace setup documentation explains customer onboarding and source refresh workflows.",
+                "source_uri": f"docs/setup-{index}.md",
+                "terms": ["workspace", "onboarding"],
+            }
+            for index in range(5)
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            result = reducers.run_hierarchical_reducers(
+                cards=cards,
+                capabilities=[{"key": "workspace-setup", "title": "Workspace setup", "keywords": ["workspace"]}],
+                evidence_config=reducers.default_evidence_scaling_config({}),
+                generation_config={
+                    "source_shard_workers": 4,
+                    "theme_reducer_workers": 4,
+                    "capability_reducer_workers": 2,
+                    "ontology_reducer_workers": 1,
+                    "max_concurrent_openai_reducers": 4,
+                },
+                business_config={"llm_model": "gpt-5.5", "reasoning_effort": "medium", "ontology_reasoning_effort": "high"},
+                cache=cache_module.empty_incremental_cache(),
+                output_dir=Path(tmp_dir),
+                client=client,
+            )
+
+        self.assertEqual(client.reasoning_by_layer["source"], "medium")
+        self.assertEqual(client.reasoning_by_layer["theme"], "medium")
+        self.assertEqual(client.reasoning_by_layer["capability"], "high")
+        self.assertEqual(client.reasoning_by_layer["ontology"], "high")
+        self.assertEqual(
+            result["reasoning_efforts"],
+            {
+                "source_shards": "medium",
+                "theme_reducers": "medium",
+                "capability_reducers": "high",
+                "ontology_reducer": "high",
+            },
+        )
+
     def test_hierarchical_reducers_compact_large_repo_doc_sets_before_source_reducers(self) -> None:
         reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_compaction_test")
         cache_module = sys.modules["incremental_cache"]
@@ -1941,6 +2019,84 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(result["coverage_limitations"][0]["layer"], "source")
         self.assertIn("source timeout", result["coverage_limitations"][0]["reason"])
         self.assertGreater(len(result["ontology_evidence_cards"]), 0)
+
+    def test_openai_hierarchical_reducer_maps_single_item_without_id_to_requested_shard(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_single_missing_id_test")
+
+        class FakeResponse:
+            headers: dict[str, str] = {}
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "output_text": json.dumps(
+                            {
+                                "items": [
+                                    {
+                                        "theme": "AdvocateHub code shard",
+                                        "summary": "The reducer summarized the requested shard but omitted its id.",
+                                        "source_kind_counts": {"repo-code": 1},
+                                        "evidence_ids": ["code:one"],
+                                        "confidence": "medium",
+                                        "business_value": "Useful code intelligence.",
+                                        "workflow_candidates": ["runtime"],
+                                        "capability_candidates": ["runtime"],
+                                        "risks": [],
+                                        "limitations": [],
+                                        "code_surfaces": ["apps/hub/app/models/user.rb"],
+                                    },
+                                    {
+                                        "theme": "Extra diagnostic item",
+                                        "summary": "The model included an extra unkeyed item.",
+                                        "source_kind_counts": {"repo-code": 1},
+                                        "evidence_ids": ["code:one"],
+                                        "confidence": "low",
+                                        "business_value": "Diagnostic.",
+                                        "workflow_candidates": [],
+                                        "capability_candidates": [],
+                                        "risks": [],
+                                        "limitations": ["Extra item."],
+                                        "code_surfaces": [],
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                ).encode("utf-8")
+
+        def fake_urlopen(*_args: object, **_kwargs: object) -> FakeResponse:
+            return FakeResponse()
+
+        original_urlopen = reducers.openai_requests.urlopen
+        reducers.openai_requests.urlopen = fake_urlopen
+        try:
+            client = reducers.OpenAIHierarchicalReducerClient(api_key="test-key")
+            result = client.reduce_many(
+                [
+                    {
+                        "id": "source-repo-code-influitive-advocatehub-influitive-0001",
+                        "layer": "source",
+                        "source_kind": "repo-code",
+                        "cards": [{"id": "code:one", "source_kind": "repo-code", "summary": "Code card."}],
+                    }
+                ],
+                model="gpt-5.5",
+                reasoning_effort="high",
+                worker_count=1,
+            )
+        finally:
+            reducers.openai_requests.urlopen = original_urlopen
+
+        expected_id = "source-repo-code-influitive-advocatehub-influitive-0001"
+        self.assertIn(expected_id, result)
+        self.assertEqual(result[expected_id]["id"], expected_id)
+        self.assertEqual(result[expected_id]["theme"], "AdvocateHub code shard")
 
     def test_stable_business_payload_excludes_generated_notes_from_upstream_keys(self) -> None:
         evidence = load_module(EVIDENCE_CARDS_SCRIPT, "evidence_cards_generated_cache_key_test")

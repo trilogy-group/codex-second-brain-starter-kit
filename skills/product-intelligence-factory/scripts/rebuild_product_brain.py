@@ -234,6 +234,7 @@ BUSINESS_VALUE_CACHE_NAMESPACE = "business_value_synthesis"
 
 def default_business_value_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
     configured = dict((profile or {}).get("business_value") or {})
+
     def positive_int(field: str, default: int) -> int:
         env_names = {
             "synthesis_workers": ("PRODUCT_BASB_BUSINESS_VALUE_WORKERS", "TYLER_SECOND_BRAIN_BUSINESS_VALUE_WORKERS"),
@@ -255,15 +256,33 @@ def default_business_value_config(profile: dict[str, Any] | None = None) -> dict
             raise SystemExit(f"business_value.{field} must be greater than zero.")
         return parsed
 
+    def reasoning_effort(field: str, default: str) -> str:
+        env_names = {
+            "reasoning_effort": (
+                "PRODUCT_BASB_BUSINESS_VALUE_REASONING_EFFORT",
+                "TYLER_SECOND_BRAIN_BUSINESS_VALUE_REASONING_EFFORT",
+            ),
+            "ontology_reasoning_effort": (
+                "PRODUCT_BASB_ONTOLOGY_REASONING_EFFORT",
+                "TYLER_SECOND_BRAIN_ONTOLOGY_REASONING_EFFORT",
+            ),
+        }.get(field, ())
+        raw: Any = configured.get(field, default)
+        for env_name in env_names:
+            env_value = os.environ.get(env_name)
+            if env_value not in (None, ""):
+                raw = env_value
+                break
+        return openai_responses.normalize_reasoning_effort(raw)
+
     return {
         "enabled": bool(configured.get("enabled", True)),
         "llm_model": openai_responses.ensure_allowed_synthesis_model(
             str(configured.get("llm_model") or openai_responses.DEFAULT_REASONING_MODEL),
             field="business_value.llm_model",
         ),
-        "reasoning_effort": openai_responses.normalize_reasoning_effort(
-            configured.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT)
-        ),
+        "reasoning_effort": reasoning_effort("reasoning_effort", "medium"),
+        "ontology_reasoning_effort": reasoning_effort("ontology_reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT),
         "synthesis_workers": positive_int("synthesis_workers", 24),
         "batch_size": positive_int("batch_size", 12),
         "cache_enabled": bool(configured.get("cache_enabled", True)),
@@ -639,9 +658,9 @@ def business_value_client() -> OpenAIBusinessValueClient | FixtureBusinessValueC
 
 
 def synthesize_business_value(task: str, payload: dict[str, Any]) -> dict[str, Any]:
-    config = BUSINESS_VALUE_CONFIG or default_business_value_config({})
+    config = business_value_task_config(BUSINESS_VALUE_CONFIG or default_business_value_config({}), task)
     if not config.get("enabled", True):
-        raise SystemExit("business_value.enabled must remain true; generated intelligence requires GPT-5.5/high synthesis.")
+        raise SystemExit("business_value.enabled must remain true; generated intelligence requires GPT-5.5 synthesis.")
     return business_value_client().synthesize(
         task,
         payload,
@@ -654,6 +673,17 @@ def synthesize_business_value(task: str, payload: dict[str, Any]) -> dict[str, A
 class BusinessValueSynthesisResult:
     values: dict[str, dict[str, dict[str, Any]]]
     inventory: dict[str, Any]
+
+
+def business_value_task_config(config: dict[str, Any], task: str) -> dict[str, Any]:
+    active = dict(config)
+    if task.startswith("product_ontology"):
+        active["reasoning_effort"] = openai_responses.normalize_reasoning_effort(
+            active.get("ontology_reasoning_effort") or openai_responses.DEFAULT_REASONING_EFFORT
+        )
+    else:
+        active["reasoning_effort"] = openai_responses.normalize_reasoning_effort(active.get("reasoning_effort") or "medium")
+    return active
 
 
 def _truncate_clean_text(text: str, limit: int) -> str:
@@ -876,6 +906,7 @@ def new_business_value_synthesis_inventory(config: dict[str, Any]) -> dict[str, 
         "output_contract_version": BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION,
         "model": config["llm_model"],
         "reasoning_effort": config["reasoning_effort"],
+        "ontology_reasoning_effort": config.get("ontology_reasoning_effort"),
         "worker_count": int(config.get("synthesis_workers", 24) or 24),
         "batch_size": int(config.get("batch_size", 12) or 12),
         "cache_enabled": bool(config.get("cache_enabled", True)),
@@ -998,7 +1029,7 @@ def synthesize_single_business_value_cached(
     client: Any | None = None,
     inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    active_config = config or (BUSINESS_VALUE_CONFIG or default_business_value_config({}))
+    active_config = business_value_task_config(config or (BUSINESS_VALUE_CONFIG or default_business_value_config({})), task)
     active_client = client or business_value_client()
     cache_enabled = bool(active_config.get("cache_enabled", True)) and cache is not None
     task_stats = None
@@ -1097,7 +1128,7 @@ def synthesize_business_value_entities(
 ) -> BusinessValueSynthesisResult:
     active_config = config or (BUSINESS_VALUE_CONFIG or default_business_value_config({}))
     if not active_config.get("enabled", True):
-        raise SystemExit("business_value.enabled must remain true; generated intelligence requires GPT-5.5/high synthesis.")
+        raise SystemExit("business_value.enabled must remain true; generated intelligence requires GPT-5.5 synthesis.")
     active_client = client or business_value_client()
     batch_size = max(1, int(active_config.get("batch_size", 12) or 12))
     workers = max(1, int(active_config.get("synthesis_workers", 24) or 24))
@@ -5929,13 +5960,14 @@ def build_product_ontology(
         "schema_count": len(data_entities),
         "deployment_signals": environments,
     }
+    ontology_config = business_value_task_config(BUSINESS_VALUE_CONFIG or default_business_value_config({}), "product_ontology")
     return {
         "schema_version": 2,
         "source": "codex-second-brain-starter-kit",
         "generated_at": DATE,
         "prompt_version": BUSINESS_VALUE_PROMPT_VERSION,
-        "llm_model": (BUSINESS_VALUE_CONFIG or default_business_value_config({}))["llm_model"],
-        "llm_reasoning_effort": (BUSINESS_VALUE_CONFIG or default_business_value_config({}))["reasoning_effort"],
+        "llm_model": ontology_config["llm_model"],
+        "llm_reasoning_effort": ontology_config["reasoning_effort"],
         "product": {"name": product_name, "slug": product_slug},
         "product_purpose": purpose,
         "target_personas": target_personas,

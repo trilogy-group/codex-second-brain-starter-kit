@@ -47,7 +47,7 @@ class DeepCodeIntelligenceSemanticTests(unittest.TestCase):
         self.assertEqual(config["agent_shards"]["timeout_seconds"], 1800)
         self.assertEqual(config["agent_shards"]["worker_mode"], "llm-synthesis")
         self.assertEqual(config["agent_shards"]["shard_model"], "gpt-5.5")
-        self.assertEqual(config["agent_shards"]["reasoning_effort"], "high")
+        self.assertEqual(config["agent_shards"]["reasoning_effort"], "medium")
         self.assertEqual(config["agent_shards"]["max_cards_per_shard"], 80)
         self.assertTrue(config["changed_scope_rebuild"])
 

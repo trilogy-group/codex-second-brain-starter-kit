@@ -54,7 +54,8 @@ profile:
 # business_value:
 #   enabled: true
 #   llm_model: gpt-5.5
-#   reasoning_effort: high
+#   reasoning_effort: medium
+#   ontology_reasoning_effort: high
 #   synthesis_workers: 24
 #   batch_size: 12
 #   cache_enabled: true
@@ -69,6 +70,20 @@ profile:
 #   max_capability_summaries_for_ontology: 60
 #   max_summary_chars: 1800
 #   unlimited_total_shards: true
+#   evidence_compaction:
+#     enabled: true
+#     max_raw_cards_per_source_group: 160
+#     max_compacted_cards_per_group: 24
+#     max_reducer_gpt_calls_per_layer_soft: 80
+#     preserve_raw_inventory: true
+#   hierarchical_reducers:
+#     batch_size: 4
+#     split_on_timeout: true
+#     live_events_enabled: true
+#     source_reasoning_effort: medium
+#     theme_reasoning_effort: medium
+#     capability_reasoning_effort: high
+#     ontology_reasoning_effort: high
 # retrieval_index:
 #   enabled: true
 #   max_candidates_per_source: 30
@@ -97,7 +112,7 @@ profile:
 #     timeout_seconds: 1800
 #     worker_mode: llm-synthesis
 #     shard_model: gpt-5.5
-#     reasoning_effort: high
+#     reasoning_effort: medium
 #     max_cards_per_shard: 80
 # rate_limits:
 #   openai_requests_per_minute: 3000

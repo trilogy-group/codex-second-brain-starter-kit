@@ -45,6 +45,10 @@ DEFAULT_EVIDENCE_SCALING: dict[str, Any] = {
         "batch_size": 4,
         "split_on_timeout": True,
         "live_events_enabled": True,
+        "source_reasoning_effort": "medium",
+        "theme_reasoning_effort": "medium",
+        "capability_reasoning_effort": "high",
+        "ontology_reasoning_effort": "high",
     },
     "generated_note_policy": {
         "max_repo_document_notes": 600,
@@ -68,6 +72,22 @@ EVIDENCE_SCALING_ENV_OVERRIDES = {
     "hierarchical_reducers.batch_size": ("PRODUCT_BASB_HIERARCHICAL_REDUCER_BATCH_SIZE",),
     "hierarchical_reducers.split_on_timeout": ("PRODUCT_BASB_HIERARCHICAL_REDUCER_SPLIT_ON_TIMEOUT",),
     "hierarchical_reducers.live_events_enabled": ("PRODUCT_BASB_HIERARCHICAL_REDUCER_LIVE_EVENTS_ENABLED",),
+    "hierarchical_reducers.source_reasoning_effort": (
+        "PRODUCT_BASB_SOURCE_REDUCER_REASONING_EFFORT",
+        "TYLER_SECOND_BRAIN_SOURCE_REDUCER_REASONING_EFFORT",
+    ),
+    "hierarchical_reducers.theme_reasoning_effort": (
+        "PRODUCT_BASB_THEME_REDUCER_REASONING_EFFORT",
+        "TYLER_SECOND_BRAIN_THEME_REDUCER_REASONING_EFFORT",
+    ),
+    "hierarchical_reducers.capability_reasoning_effort": (
+        "PRODUCT_BASB_CAPABILITY_REDUCER_REASONING_EFFORT",
+        "TYLER_SECOND_BRAIN_CAPABILITY_REDUCER_REASONING_EFFORT",
+    ),
+    "hierarchical_reducers.ontology_reasoning_effort": (
+        "PRODUCT_BASB_ONTOLOGY_REDUCER_REASONING_EFFORT",
+        "TYLER_SECOND_BRAIN_ONTOLOGY_REDUCER_REASONING_EFFORT",
+    ),
     "generated_note_policy.max_repo_document_notes": ("PRODUCT_BASB_MAX_REPO_DOCUMENT_NOTES",),
     "generated_note_policy.max_uploaded_document_notes": ("PRODUCT_BASB_MAX_UPLOADED_DOCUMENT_NOTES",),
 }
@@ -107,6 +127,17 @@ def _nested_positive_int(configured: dict[str, Any], key: str, default: int) -> 
     field = key.rsplit(".", 1)[-1]
     aliased = {key: configured.get(key, configured.get(field, default))}
     return _positive_int(aliased, key, default)
+
+
+def _nested_reasoning_effort(configured: dict[str, Any], key: str, default: str) -> str:
+    field = key.rsplit(".", 1)[-1]
+    value: Any = configured.get(key, configured.get(field, default))
+    for env_name in EVIDENCE_SCALING_ENV_OVERRIDES.get(key, ()):
+        env_value = os.environ.get(env_name)
+        if env_value not in (None, ""):
+            value = env_value
+            break
+    return openai_responses.normalize_reasoning_effort(value)
 
 
 def default_evidence_scaling_config(profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -192,6 +223,26 @@ def default_evidence_scaling_config(profile: dict[str, Any] | None = None) -> di
             ),
             "split_on_timeout": _config_bool(reducer_config, "hierarchical_reducers.split_on_timeout", True),
             "live_events_enabled": _config_bool(reducer_config, "hierarchical_reducers.live_events_enabled", True),
+            "source_reasoning_effort": _nested_reasoning_effort(
+                reducer_config,
+                "hierarchical_reducers.source_reasoning_effort",
+                str(DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["source_reasoning_effort"]),
+            ),
+            "theme_reasoning_effort": _nested_reasoning_effort(
+                reducer_config,
+                "hierarchical_reducers.theme_reasoning_effort",
+                str(DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["theme_reasoning_effort"]),
+            ),
+            "capability_reasoning_effort": _nested_reasoning_effort(
+                reducer_config,
+                "hierarchical_reducers.capability_reasoning_effort",
+                str(DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["capability_reasoning_effort"]),
+            ),
+            "ontology_reasoning_effort": _nested_reasoning_effort(
+                reducer_config,
+                "hierarchical_reducers.ontology_reasoning_effort",
+                str(DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["ontology_reasoning_effort"]),
+            ),
         },
         "generated_note_policy": {
             "max_repo_document_notes": _nested_positive_int(
@@ -607,6 +658,16 @@ class OpenAIHierarchicalReducerClient:
             if not isinstance(item, dict) or not item.get("id"):
                 continue
             results[str(item["id"])] = item
+        unmatched_items = [
+            item
+            for item in items
+            if isinstance(item, dict) and str(item.get("id") or "") not in {str(spec["id"]) for spec in specs}
+        ]
+        for spec in specs:
+            expected_id = str(spec["id"])
+            if expected_id in results or not unmatched_items:
+                continue
+            results[expected_id] = {**unmatched_items.pop(0), "id": expected_id}
         missing = [str(spec["id"]) for spec in specs if str(spec["id"]) not in results]
         if missing:
             raise ValueError(f"OpenAI hierarchical reducer response missing ids: {', '.join(missing[:8])}")
@@ -805,6 +866,8 @@ def _run_layer(
     stats = {
         "layer": layer,
         "input_shards": len(specs),
+        "model": model,
+        "reasoning_effort": reasoning_effort,
         "cache_hits": 0,
         "cache_misses": 0,
         "cache_miss_reasons": {},
@@ -1033,7 +1096,30 @@ def run_hierarchical_reducers(
     )
     active_client = client or reducer_client(rate_limiter=rate_limiter, rate_config=rate_limit_config)
     model = str(business_config.get("llm_model") or openai_responses.DEFAULT_REASONING_MODEL)
-    reasoning_effort = str(business_config.get("reasoning_effort") or openai_responses.DEFAULT_REASONING_EFFORT)
+    source_reasoning_effort = openai_responses.normalize_reasoning_effort(
+        reducer_config.get(
+            "source_reasoning_effort",
+            DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["source_reasoning_effort"],
+        )
+    )
+    theme_reasoning_effort = openai_responses.normalize_reasoning_effort(
+        reducer_config.get(
+            "theme_reasoning_effort",
+            DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["theme_reasoning_effort"],
+        )
+    )
+    capability_reasoning_effort = openai_responses.normalize_reasoning_effort(
+        reducer_config.get(
+            "capability_reasoning_effort",
+            DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["capability_reasoning_effort"],
+        )
+    )
+    ontology_reasoning_effort = openai_responses.normalize_reasoning_effort(
+        reducer_config.get(
+            "ontology_reasoning_effort",
+            business_config.get("ontology_reasoning_effort", DEFAULT_EVIDENCE_SCALING["hierarchical_reducers"]["ontology_reasoning_effort"]),
+        )
+    )
     max_openai_reducers = max(1, int(generation_config.get("max_concurrent_openai_reducers", 24) or 24))
     source_specs = _source_shard_specs(bounded_cards, evidence_config)
     source_results, source_stats = _run_layer(
@@ -1042,7 +1128,7 @@ def run_hierarchical_reducers(
         cache=cache,
         client=active_client,
         model=model,
-        reasoning_effort=reasoning_effort,
+        reasoning_effort=source_reasoning_effort,
         worker_count=min(max_openai_reducers, int(generation_config.get("source_shard_workers", 40))),
         force=force,
         progress_callback=progress_callback,
@@ -1060,7 +1146,7 @@ def run_hierarchical_reducers(
         cache=cache,
         client=active_client,
         model=model,
-        reasoning_effort=reasoning_effort,
+        reasoning_effort=theme_reasoning_effort,
         worker_count=min(max_openai_reducers, int(generation_config.get("theme_reducer_workers", 24))),
         force=force,
         progress_callback=progress_callback,
@@ -1075,7 +1161,7 @@ def run_hierarchical_reducers(
         cache=cache,
         client=active_client,
         model=model,
-        reasoning_effort=reasoning_effort,
+        reasoning_effort=capability_reasoning_effort,
         worker_count=min(max_openai_reducers, int(generation_config.get("capability_reducer_workers", 16))),
         force=force,
         progress_callback=progress_callback,
@@ -1090,7 +1176,7 @@ def run_hierarchical_reducers(
         cache=cache,
         client=active_client,
         model=model,
-        reasoning_effort=reasoning_effort,
+        reasoning_effort=ontology_reasoning_effort,
         worker_count=min(max_openai_reducers, int(generation_config.get("ontology_reducer_workers", 4))),
         force=force,
         progress_callback=progress_callback,
@@ -1149,6 +1235,12 @@ def run_hierarchical_reducers(
         "ontology_reducer": ontology_inventory,
         "ontology_evidence_cards": _ontology_cards(ontology_results, capability_results, evidence_config),
         "coverage_limitations": coverage_limitations,
+        "reasoning_efforts": {
+            "source_shards": source_reasoning_effort,
+            "theme_reducers": theme_reasoning_effort,
+            "capability_reducers": capability_reasoning_effort,
+            "ontology_reducer": ontology_reasoning_effort,
+        },
         "layer_stats": layer_stats,
         "source_compaction": compaction_inventory,
         "reducer_events": event_recorder.summary,
