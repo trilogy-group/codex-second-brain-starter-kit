@@ -391,6 +391,68 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(second["stats"]["cache_misses"], 0)
         self.assertEqual(second["stats"]["llm_cache_misses"], 0)
 
+    def test_semantic_force_bypasses_embedding_and_llm_caches(self) -> None:
+        semantic = load_module(SEMANTIC_SCRIPT, "semantic_force_cache_test")
+
+        class CountingEmbeddingClient(semantic.FixtureEmbeddingClient):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def embed(self, texts: list[str], model: str) -> list[list[float]]:
+                self.calls += 1
+                return super().embed(texts, model)
+
+        class CountingLLMClient(semantic.FixtureLLMSynthesisClient):
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def synthesize_cluster(self, cluster: dict, model: str, reasoning_effort: str = "high") -> dict:
+                self.calls += 1
+                return super().synthesize_cluster(cluster, model, reasoning_effort)
+
+        cards = [
+            {"id": "support-1", "kind": "support", "title": "Login failure", "summary": "Session token expires", "capabilities": ["Identity"], "evidence_terms": ["auth"], "code_terms": ["session"]},
+            {"id": "wiki-1", "kind": "wiki", "title": "SSO setup", "summary": "Identity provider access", "capabilities": ["Identity"], "evidence_terms": ["sso"], "code_terms": ["permission"]},
+            {"id": "code-1", "kind": "code", "title": "AuthController", "summary": "Login session permissions", "capabilities": ["Identity"], "evidence_terms": ["login"], "code_terms": ["auth"]},
+        ]
+        config = semantic.default_semantic_config({"semantic_clustering": {"min_cluster_size": 3, "similarity_threshold": 0.4}})
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            semantic.cluster_cards(
+                cards,
+                config,
+                root / "embedding_cache.json",
+                client=CountingEmbeddingClient(),
+                llm_client=CountingLLMClient(),
+                result_cache_path=root / "semantic_result_cache.json",
+            )
+            result_cache_path = root / "semantic_result_cache.json"
+            result_cache = json.loads(result_cache_path.read_text(encoding="utf-8"))
+            result_cache["items"]["old-stale-fixture-entry"] = {
+                "prompt_version": "old",
+                "result": {"clusters": [{"limitations": ["Fixture LLM synthesis was used."]}]},
+            }
+            result_cache_path.write_text(json.dumps(result_cache), encoding="utf-8")
+            forced_embedding_client = CountingEmbeddingClient()
+            forced_llm_client = CountingLLMClient()
+            forced = semantic.cluster_cards(
+                cards,
+                config,
+                root / "embedding_cache.json",
+                client=forced_embedding_client,
+                llm_client=forced_llm_client,
+                result_cache_path=root / "semantic_result_cache.json",
+                force=True,
+            )
+            result_cache_payload = json.loads((root / "semantic_result_cache.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(forced["stats"]["result_cache_hits"], 0)
+        self.assertEqual(forced["stats"]["cache_misses"], 3)
+        self.assertEqual(forced["stats"]["llm_cache_misses"], 1)
+        self.assertEqual(forced_embedding_client.calls, 1)
+        self.assertEqual(forced_llm_client.calls, 1)
+        self.assertNotIn("old-stale-fixture-entry", result_cache_payload["items"])
+
     def test_generation_shards_reuse_cached_results_when_specs_match(self) -> None:
         performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_shard_cache_test")
         shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_cache_test")
@@ -498,6 +560,81 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(second["gpt_call_count"], 0)
         self.assertEqual(second["cache_reuse_ratio"], 1.0)
         self.assertTrue(second["current_shard_note_paths"])
+
+    def test_generation_shards_force_ignores_unsupported_cache_schema(self) -> None:
+        performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_shard_cache_force_test")
+        shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_cache_force_test")
+        calls = 0
+
+        def worker(spec: dict, scratch_dir: Path) -> dict:
+            nonlocal calls
+            calls += 1
+            return shards.default_shard_worker(spec, scratch_dir)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir) / "workspace"
+            cache_path = Path(tmp_dir) / "generation_shard_cache.json"
+            cache_path.write_text(json.dumps({"schema_version": 1, "entries": {}}), encoding="utf-8")
+            config = performance.default_generation_config({})
+            result = shards.run_generation_shards(
+                generation_config=config,
+                workspace_path=workspace,
+                repo_names=["repo"],
+                support_records=[{"stem": "Support Alpha", "capabilities": ["core"]}],
+                wiki_records=[],
+                semantic_cards=[],
+                run_id="forced",
+                worker=worker,
+                cache_path=cache_path,
+                force=True,
+            )
+            cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertGreater(calls, 0)
+        self.assertEqual(result["cache_miss_reasons"], {"force": len(result["shards"])})
+        self.assertEqual(cache_payload["schema_version"], 2)
+
+    def test_generation_shards_force_rewrites_supported_cache_without_stale_entries(self) -> None:
+        performance = load_module(GENERATION_PERFORMANCE_SCRIPT, "generation_performance_shard_cache_force_rewrite_test")
+        shards = load_module(GENERATION_SHARDS_SCRIPT, "generation_shards_cache_force_rewrite_test")
+
+        def worker(spec: dict, scratch_dir: Path) -> dict:
+            return shards.default_shard_worker(spec, scratch_dir)
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir) / "workspace"
+            cache_path = Path(tmp_dir) / "generation_shard_cache.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "entries": {
+                            "old": {
+                                "prompt_version": "old",
+                                "result": {"status": "succeeded", "llm_status": "fixture"},
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = performance.default_generation_config({})
+            result = shards.run_generation_shards(
+                generation_config=config,
+                workspace_path=workspace,
+                repo_names=["repo"],
+                support_records=[{"stem": "Support Alpha", "capabilities": ["core"]}],
+                wiki_records=[],
+                semantic_cards=[],
+                run_id="forced",
+                worker=worker,
+                cache_path=cache_path,
+                force=True,
+            )
+            cache_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(cache_payload["entries"]), len(result["shards"]))
+        self.assertNotIn('"llm_status": "fixture"', json.dumps(cache_payload))
 
     def test_stable_synthesis_payload_ignores_generated_notes_and_runtime_diagnostics(self) -> None:
         cards = load_module(EVIDENCE_CARDS_SCRIPT, "evidence_cards_stable_synthesis_payload_test")
@@ -1323,6 +1460,52 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             certifi_path = Path(tmp_dir) / "cacert.pem"
             certifi_path.write_text("test certificate bundle", encoding="utf-8")
+            request = helper.urllib.request.Request("https://api.openai.test/v1/responses")
+            with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
+                helper.ssl,
+                "get_default_verify_paths",
+                return_value=FakeDefaultPaths(),
+            ), mock.patch.object(
+                helper.ssl,
+                "create_default_context",
+                side_effect=fake_context,
+            ), mock.patch.object(helper.certifi, "where", return_value=str(certifi_path)):
+                with helper.urlopen(request, timeout=10, opener=fake_opener):
+                    pass
+
+        self.assertEqual(contexts[0], str(certifi_path))
+        self.assertEqual(contexts[1], {"cafile": str(certifi_path)})
+
+    def test_openai_request_helper_prefers_certifi_over_default_ca(self) -> None:
+        helper = load_module(OPENAI_REQUESTS_SCRIPT, "openai_requests_certifi_preference_test")
+        contexts: list[object] = []
+
+        class FakeDefaultPaths:
+            cafile = ""
+            openssl_cafile = ""
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_context(*, cafile=None):
+            contexts.append(cafile)
+            return {"cafile": cafile}
+
+        def fake_opener(request, timeout, context=None):
+            del request, timeout
+            contexts.append(context)
+            return FakeResponse()
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            certifi_path = Path(tmp_dir) / "certifi.pem"
+            default_path = Path(tmp_dir) / "default.pem"
+            certifi_path.write_text("certifi certificate bundle", encoding="utf-8")
+            default_path.write_text("default certificate bundle", encoding="utf-8")
+            FakeDefaultPaths.cafile = str(default_path)
             request = helper.urllib.request.Request("https://api.openai.test/v1/responses")
             with mock.patch.dict("os.environ", {}, clear=True), mock.patch.object(
                 helper.ssl,

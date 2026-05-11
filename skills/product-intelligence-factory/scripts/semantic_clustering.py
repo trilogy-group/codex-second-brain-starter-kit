@@ -296,11 +296,12 @@ def embed_cards(
     cache_path: Path,
     client: Any | None = None,
     limiter: rate_limits.WindowRateLimiter | None = None,
+    force: bool = False,
 ) -> tuple[list[list[float]], dict[str, int]]:
     if client is None:
         require_openai_or_fixture()
     model = str(config["embedding_model"])
-    cache = load_cache(cache_path)
+    cache = {"items": {}} if force else load_cache(cache_path)
     vectors: list[list[float] | None] = [None] * len(cards)
     misses: list[tuple[int, str, str]] = []
     cache_hits = 0
@@ -447,6 +448,7 @@ def synthesize_clusters_with_llm(
     llm_cache_path: Path,
     client: Any | None = None,
     limiter: rate_limits.WindowRateLimiter | None = None,
+    force: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     if not config.get("llm_cluster_synthesis", True):
         return [
@@ -462,7 +464,7 @@ def synthesize_clusters_with_llm(
     model = openai_responses.ensure_allowed_synthesis_model(str(config.get("llm_model", openai_responses.DEFAULT_REASONING_MODEL)), field="semantic_clustering.llm_model")
     reasoning_effort = openai_responses.normalize_reasoning_effort(config.get("reasoning_effort", openai_responses.DEFAULT_REASONING_EFFORT))
     max_llm_clusters = int(config.get("max_llm_clusters", 40))
-    cache = load_cache(llm_cache_path)
+    cache = {"items": {}} if force else load_cache(llm_cache_path)
     worker_count = int(config.get("llm_synthesis_workers", 10))
     client = client or (
         FixtureLLMSynthesisClient()
@@ -558,7 +560,7 @@ def cluster_cards(
     result_cache: dict[str, Any] | None = None
     result_cache_key = semantic_result_cache_key(cards, config)
     if result_cache_path is not None:
-        result_cache = load_cache(result_cache_path)
+        result_cache = {"items": {}} if force else load_cache(result_cache_path)
         cached_result = result_cache["items"].get(result_cache_key)
         if not force and isinstance(cached_result, dict) and isinstance(cached_result.get("result"), dict):
             result = dict(cached_result["result"])
@@ -573,7 +575,7 @@ def cluster_cards(
                 "cards_embedded": len(cards),
             }
             return result
-    vectors, stats = embed_cards(cards, config, cache_path, client=client, limiter=limiter)
+    vectors, stats = embed_cards(cards, config, cache_path, client=client, limiter=limiter, force=force)
     threshold = float(config["similarity_threshold"])
     min_size = int(config["min_cluster_size"])
     max_clusters = int(config["max_clusters"])
@@ -613,7 +615,7 @@ def cluster_cards(
         if len(clusters) >= max_clusters:
             break
     llm_cache_path = llm_cache_path or cache_path.with_name("llm_cluster_cache.json")
-    clusters, llm_stats = synthesize_clusters_with_llm(clusters, config, llm_cache_path, client=llm_client, limiter=limiter)
+    clusters, llm_stats = synthesize_clusters_with_llm(clusters, config, llm_cache_path, client=llm_client, limiter=limiter, force=force)
     stats.update(llm_stats)
     stats.update(
         {

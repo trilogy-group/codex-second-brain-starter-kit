@@ -24,14 +24,20 @@ def ca_bundle_path() -> str | None:
     explicit = _existing_file(os.environ.get("SSL_CERT_FILE") or os.environ.get("REQUESTS_CA_BUNDLE"))
     if explicit:
         return explicit
+    certifi_cafile = None
+    if certifi is not None:
+        try:
+            certifi_cafile = _existing_file(certifi.where())
+        except Exception:
+            certifi_cafile = None
+    if certifi_cafile:
+        return certifi_cafile
     paths = ssl.get_default_verify_paths()
     default_cafile = _existing_file(getattr(paths, "cafile", None)) or _existing_file(getattr(paths, "openssl_cafile", None))
     if default_cafile:
         return default_cafile
-    if certifi is None:
-        return None
     try:
-        return _existing_file(certifi.where())
+        return _existing_file(certifi.where()) if certifi is not None else None
     except Exception:
         return None
 

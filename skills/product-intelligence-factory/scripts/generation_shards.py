@@ -72,9 +72,15 @@ def _chunks(items: list[Any], count: int) -> list[list[Any]]:
     return [chunk for chunk in result if chunk]
 
 
-def _load_shard_cache(path: Path | None) -> dict[str, Any]:
+def _empty_shard_cache() -> dict[str, Any]:
+    return {"schema_version": SHARD_CACHE_SCHEMA_VERSION, "entries": {}}
+
+
+def _load_shard_cache(path: Path | None, *, force: bool = False) -> dict[str, Any]:
     if path is None or not path.exists():
-        return {"schema_version": SHARD_CACHE_SCHEMA_VERSION, "entries": {}}
+        return _empty_shard_cache()
+    if force:
+        return _empty_shard_cache()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -817,7 +823,7 @@ def run_generation_shards(
             "reducer": {"status": "not-run", "merged_count": 0, "rejected_count": 0},
         }
 
-    shard_cache = _load_shard_cache(cache_path)
+    shard_cache = _load_shard_cache(cache_path, force=force)
     results: list[dict[str, Any]] = []
     specs_to_run: list[dict[str, Any]] = []
     cache_hits = 0
