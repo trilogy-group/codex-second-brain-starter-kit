@@ -64,7 +64,7 @@ PLACEHOLDER_PARTS = (
 PLACEHOLDER_HOST_LABELS = {"hubname", "yourhub", "yourdomain", "yourcompany", "example"}
 TRAILING_CHARS = ".,;:)]}`\"'"
 USER_AGENT = "ProductIntelligenceFactory/1.0 (+https://github.com/trilogy-group/codex-second-brain-starter-kit)"
-SOURCE_EXTRACT_CACHE_SCHEMA_VERSION = 1
+SOURCE_EXTRACT_CACHE_SCHEMA_VERSION = 2
 SOURCE_EXTRACT_CACHE_LOCK = threading.Lock()
 FETCH_RETRY_ATTEMPTS = 3
 FETCH_RETRY_BACKOFF_SECONDS = 0.25
@@ -196,12 +196,12 @@ def manifest_paths(data: dict[str, Any]) -> Paths:
 def title_from_text(text: str, fallback: str) -> str:
     match = TITLE_RE.search(text)
     if match:
-        return WHITESPACE_RE.sub(" ", match.group(1)).strip()
+        return evidence_cards.normalize_title(WHITESPACE_RE.sub(" ", match.group(1)).strip(), fallback=fallback)
     for line in text.splitlines():
         line = line.strip()
         if line:
-            return line[:160]
-    return fallback
+            return evidence_cards.normalize_title(line[:160], fallback=fallback)
+    return evidence_cards.normalize_title(fallback, fallback=fallback)
 
 
 def redact_url_credentials(url: str) -> str:
@@ -702,9 +702,19 @@ def _first_meaningful_markdown_text(text: str, limit: int = 900) -> str:
     return evidence_cards.compact_text(" ".join(parts), limit)
 
 
-def collect_repo_documents(data: dict[str, Any], paths: Paths) -> list[dict[str, Any]]:
+def _empty_repo_document_quality_stats() -> dict[str, int]:
+    return {
+        "excluded_generated_summary_artifacts": 0,
+        "excluded_failed_file_summaries": 0,
+        "excluded_generated_or_ignored_files": 0,
+        "title_fallbacks": 0,
+    }
+
+
+def collect_repo_documents_with_stats(data: dict[str, Any], paths: Paths) -> tuple[list[dict[str, Any]], dict[str, int]]:
     del paths
     documents: list[dict[str, Any]] = []
+    stats = _empty_repo_document_quality_stats()
     markdown_exts = {".md", ".mdx", ".markdown"}
     for item in data.get("repositories", {}).get("items", []):
         repo_path = Path(str(item.get("local_path") or "")).expanduser()
@@ -714,14 +724,28 @@ def collect_repo_documents(data: dict[str, Any], paths: Paths) -> list[dict[str,
         for relative_path in _git_tracked_files(repo_path):
             if relative_path.suffix.lower() not in markdown_exts:
                 continue
-            if code_intelligence.is_generated_or_ignored_path(relative_path):
-                continue
             absolute_path = repo_path / relative_path
+            if evidence_cards.is_generated_summary_artifact_path(relative_path):
+                stats["excluded_generated_summary_artifacts"] += 1
+                if absolute_path.exists():
+                    artifact_text = absolute_path.read_text(encoding="utf-8", errors="ignore")
+                    if evidence_cards.is_failed_file_summary(artifact_text):
+                        stats["excluded_failed_file_summaries"] += 1
+                continue
+            if code_intelligence.is_generated_or_ignored_path(relative_path):
+                stats["excluded_generated_or_ignored_files"] += 1
+                continue
             if not absolute_path.exists() or not absolute_path.is_file():
                 continue
             text = absolute_path.read_text(encoding="utf-8", errors="ignore")
-            title = title_from_text(text, relative_path.stem)
+            raw_title = title_from_text(text, evidence_cards.title_from_path(relative_path))
+            title = evidence_cards.normalize_title(raw_title, fallback=evidence_cards.title_from_path(relative_path))
+            if title != evidence_cards.strip_markdown_formatting(raw_title):
+                stats["title_fallbacks"] += 1
             summary = _first_meaningful_markdown_text(text)
+            if evidence_cards.is_failed_file_summary(summary):
+                stats["excluded_failed_file_summaries"] += 1
+                continue
             if not summary:
                 continue
             source_uri = f"{repo_name}/{relative_path.as_posix()}"
@@ -741,7 +765,12 @@ def collect_repo_documents(data: dict[str, Any], paths: Paths) -> list[dict[str,
                     "sha256": hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest(),
                 }
             )
-    return sorted(documents, key=lambda entry: (entry["repo"], entry["relative_path"]))
+    return sorted(documents, key=lambda entry: (entry["repo"], entry["relative_path"])), stats
+
+
+def collect_repo_documents(data: dict[str, Any], paths: Paths) -> list[dict[str, Any]]:
+    documents, _stats = collect_repo_documents_with_stats(data, paths)
+    return documents
 
 
 def html_to_text(raw_html: str) -> str:
@@ -1461,8 +1490,8 @@ def main() -> None:
     record_timing(timings, "repo_snapshots", stage_started, repos=len(repo_snapshots))
 
     stage_started = time.perf_counter()
-    repo_documents = collect_repo_documents(manifest, paths)
-    record_timing(timings, "repo_documents", stage_started, documents=len(repo_documents))
+    repo_documents, repo_document_quality = collect_repo_documents_with_stats(manifest, paths)
+    record_timing(timings, "repo_documents", stage_started, documents=len(repo_documents), **repo_document_quality)
 
     stage_started = time.perf_counter()
     write_json(paths.json_dir / "docx_extracts.json", docx_extracts)
@@ -1472,6 +1501,13 @@ def main() -> None:
     write_json(paths.json_dir / "external_links.json", link_inventory)
     write_json(paths.json_dir / "repo_snapshots.json", repo_snapshots)
     write_json(paths.json_dir / "repo_documents.json", repo_documents)
+    write_json(
+        paths.json_dir / "repo_document_quality.json",
+        {
+            "schema_version": 1,
+            "stats": repo_document_quality,
+        },
+    )
     rate_limits.write_rate_limit_inventory(
         paths.json_dir / "rate_limit_events.json",
         config=rate_limit_config,
@@ -1536,6 +1572,7 @@ def main() -> None:
             "links": len(link_inventory),
             "repos": len(repo_snapshots),
             "repo_documents": len(repo_documents),
+            "repo_document_quality": repo_document_quality,
             "mirror_dir": str(paths.links_dir),
             "inventory_dir": str(paths.json_dir),
             "source_index_cache": source_cache.get("stats", {}),

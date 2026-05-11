@@ -776,9 +776,30 @@ class GenericToolingTests(unittest.TestCase):
                 "# Escalation Workflow\n\nThe workflow routes support questions to product owners and implementation teams.\n",
                 encoding="utf-8",
             )
+            (repo / "docs" / "runbook.md").write_text(
+                "# **Whole File Summary**\n\nRunbook owners coordinate launch evidence and customer-facing guidance.\n",
+                encoding="utf-8",
+            )
+            (repo / ".ai").mkdir()
+            (repo / ".ai" / "app.py.ai.md").write_text(
+                "**Whole File Summary**\n\nUnable to summarize file. Maybe too big?\n",
+                encoding="utf-8",
+            )
             (repo / "cdk.out").mkdir()
             (repo / "cdk.out" / "generated.md").write_text("# Generated\n\nIgnore me.\n", encoding="utf-8")
-            subprocess.run(["git", "add", "README.md", "docs/workflow.md", "cdk.out/generated.md"], cwd=repo, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "add",
+                    "README.md",
+                    "docs/workflow.md",
+                    "docs/runbook.md",
+                    ".ai/app.py.ai.md",
+                    "cdk.out/generated.md",
+                ],
+                cwd=repo,
+                check=True,
+            )
             manifest = {
                 "repositories": {
                     "items": [
@@ -802,13 +823,18 @@ class GenericToolingTests(unittest.TestCase):
                 json_dir=root / "mirror" / "inventories",
             )
 
-            documents = module.collect_repo_documents(manifest, paths)
+            documents, quality = module.collect_repo_documents_with_stats(manifest, paths)
 
         relative_paths = {item["relative_path"] for item in documents}
-        self.assertEqual(relative_paths, {"README.md", "docs/workflow.md"})
+        self.assertEqual(relative_paths, {"README.md", "docs/workflow.md", "docs/runbook.md"})
         self.assertTrue(all(item["source_kind"] == "repo-doc" for item in documents))
         self.assertTrue(all(item["confidence"] == "medium" for item in documents))
         self.assertIn("Support managers", documents[0]["summary"] + documents[1]["summary"])
+        titles = {item["relative_path"]: item["title"] for item in documents}
+        self.assertEqual(titles["docs/runbook.md"], "Runbook")
+        self.assertEqual(quality["excluded_generated_summary_artifacts"], 1)
+        self.assertEqual(quality["excluded_failed_file_summaries"], 1)
+        self.assertEqual(quality["excluded_generated_or_ignored_files"], 1)
 
     def test_uploaded_documents_collect_pdf_and_plaintext_source_evidence(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_uploaded_documents_test")

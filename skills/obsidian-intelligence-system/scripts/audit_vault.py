@@ -16,6 +16,8 @@ except ImportError:  # pragma: no cover
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]+)?(?:\|[^\]]+)?\]\]")
 PLACEHOLDER_TOKEN_RE = re.compile(r"\{\{\s*title\s*\}\}", re.IGNORECASE)
+FAILED_GENERATED_SUMMARY_RE = re.compile(r"(unable to summarize file|maybe too big)", re.IGNORECASE)
+GENERIC_GENERATED_SUMMARY_TITLE_RE = re.compile(r"(?im)^\s*#?\s*(?:\*\*)?whole file summary(?:\*\*)?\s*$")
 RAW_BUSINESS_FIELD_RE = re.compile(
     r"(?im)^(?:[-*]\s*)?(?:target_persona|user_problem|business_value|success_metric|"
     r"evidence_confidence|implementation_leverage|value_score)\s*[:|-]\s*"
@@ -381,6 +383,8 @@ def main() -> None:
             markers: list[str] = []
             if PLACEHOLDER_TOKEN_RE.search(text):
                 markers.append("unresolved title placeholder")
+            if FAILED_GENERATED_SUMMARY_RE.search(text) or GENERIC_GENERATED_SUMMARY_TITLE_RE.search(text):
+                markers.append("failed generated file summary")
             if RAW_BUSINESS_FIELD_RE.search(text):
                 markers.append("raw Python-style business field")
             if any(marker in text for marker in SCAFFOLD_RESIDUE_MARKERS):

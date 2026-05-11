@@ -17,9 +17,10 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import sanitize_vault_privacy
+import evidence_cards
 
 
-EVIDENCE_INDEX_SCHEMA_VERSION = 1
+EVIDENCE_INDEX_SCHEMA_VERSION = 2
 DEFAULT_RETRIEVAL_INDEX: dict[str, Any] = {
     "enabled": True,
     "max_candidates_per_source": 30,
@@ -38,6 +39,16 @@ RETRIEVAL_ENV_OVERRIDES = {
 
 def _sanitize_text(value: Any) -> str:
     return sanitize_vault_privacy.sanitize_markdown_text(str(value), set())
+
+
+def _is_bad_generated_evidence(row: "EvidenceRow") -> bool:
+    body = evidence_cards.strip_markdown_formatting(row.body)
+    return (
+        evidence_cards.is_generic_title(row.title)
+        or evidence_cards.is_failed_file_summary(row.title)
+        or evidence_cards.is_failed_file_summary(body)
+        or "whole file summary" in body.casefold()
+    )
 
 
 def _sanitize_metadata(value: Any) -> Any:
@@ -251,6 +262,8 @@ def _prepare_rows(rows: Iterable[EvidenceRow]) -> list[EvidenceRow]:
     for row in rows:
         normalized = row.normalized()
         if not normalized.evidence_id.strip():
+            continue
+        if _is_bad_generated_evidence(normalized):
             continue
         deduped[normalized.evidence_id] = normalized
     return [deduped[key] for key in sorted(deduped)]

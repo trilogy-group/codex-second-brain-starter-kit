@@ -42,6 +42,59 @@ def load_module(module_path: Path, module_name: str):
 
 
 class HighConcurrencyGenerationTests(unittest.TestCase):
+    def test_evidence_card_title_quality_rejects_failed_file_summaries(self) -> None:
+        evidence_cards = load_module(EVIDENCE_CARDS_SCRIPT, "evidence_cards_title_quality_test")
+
+        self.assertEqual(
+            evidence_cards.normalize_title("**Whole File Summary**", fallback="apps/auth/client.ai.md"),
+            "Client",
+        )
+        self.assertEqual(
+            evidence_cards.clean_summary("**Whole File Summary**\n\nUnable to summarize file. Maybe too big?"),
+            "",
+        )
+        self.assertTrue(
+            evidence_cards.is_invalid_evidence_card({
+                "kind": "repo-doc",
+                "source_path": ".ai/app.py.ai.md",
+                "title": "Whole File Summary",
+                "summary": "Unable to summarize file. Maybe too big?",
+            })
+        )
+
+    def test_evidence_index_skips_failed_generated_summary_rows(self) -> None:
+        evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_bad_summary_skip_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            index_path = root / "evidence_index.sqlite"
+            manifest_path = root / "evidence_index_manifest.json"
+            rows = [
+                evidence_index.EvidenceRow(
+                    evidence_id="bad:summary",
+                    kind="repo-doc",
+                    title="**Whole File Summary**",
+                    body="Unable to summarize file. Maybe too big?",
+                    source_ref=".ai/app.py.ai.md",
+                    path=".ai/app.py.ai.md",
+                ),
+                evidence_index.EvidenceRow(
+                    evidence_id="good:runbook",
+                    kind="repo-doc",
+                    title="Support Escalation Runbook",
+                    body="Support managers route unresolved issues to product owners.",
+                    source_ref="docs/runbook.md",
+                    path="docs/runbook.md",
+                ),
+            ]
+
+            stats = evidence_index.rebuild_index(index_path, rows, manifest_path=manifest_path)
+            results = evidence_index.search(index_path, "maybe too big", limit=5)
+            good_results = evidence_index.search(index_path, "support managers", limit=5)
+
+        self.assertEqual(stats["indexed_rows"], 1)
+        self.assertEqual(results, [])
+        self.assertEqual([item["evidence_id"] for item in good_results], ["good:runbook"])
+
     def test_evidence_index_upserts_searches_and_removes_stale_rows(self) -> None:
         evidence_index = load_module(EVIDENCE_INDEX_SCRIPT, "evidence_index_lifecycle_test")
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -85,7 +138,7 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual([item["evidence_id"] for item in results], ["code:auth", "support:alpha"])
         self.assertEqual(stale_stats["deleted_rows"], 1)
         self.assertEqual(stale_results, [])
-        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["schema_version"], evidence_index.EVIDENCE_INDEX_SCHEMA_VERSION)
         self.assertEqual(manifest["row_count"], 1)
 
     def test_evidence_index_redacts_sensitive_text_before_upsert(self) -> None:

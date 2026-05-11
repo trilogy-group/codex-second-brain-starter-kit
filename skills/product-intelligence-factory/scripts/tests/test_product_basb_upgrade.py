@@ -204,6 +204,10 @@ class ProductBasbUpgradeTests(unittest.TestCase):
                         "",
                         "success_metric: {'none': 0}",
                         "",
+                        "**Whole File Summary**",
+                        "",
+                        "Unable to summarize file. Maybe too big?",
+                        "",
                         "Every entity should eventually have an _intelligence_summary.md.",
                         "",
                         "- [[Target]]",
@@ -246,6 +250,7 @@ class ProductBasbUpgradeTests(unittest.TestCase):
         self.assertIn("unresolved title placeholder", completed.stdout)
         self.assertIn("raw Python-style business field", completed.stdout)
         self.assertIn("scaffold operations text", completed.stdout)
+        self.assertIn("failed generated file summary", completed.stdout)
         self.assertNotIn("Capability Template.md", completed.stdout)
 
     def test_manifest_defaults_include_product_basb_readiness_categories(self) -> None:

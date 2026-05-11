@@ -93,8 +93,8 @@ EVIDENCE_SCALING_ENV_OVERRIDES = {
 }
 
 REDUCER_CACHE_NAMESPACE = "hierarchical_reducers"
-REDUCER_PROMPT_VERSION = "product-basb-hierarchical-reducer-v1"
-REDUCER_SCHEMA_VERSION = 1
+REDUCER_PROMPT_VERSION = "product-basb-hierarchical-reducer-v2"
+REDUCER_SCHEMA_VERSION = 2
 
 
 def _positive_int(configured: dict[str, Any], key: str, default: int) -> int:

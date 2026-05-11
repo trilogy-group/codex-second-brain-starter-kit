@@ -226,8 +226,8 @@ EXTERNAL_SYSTEM_TERMS = (
 )
 
 
-BUSINESS_VALUE_PROMPT_VERSION = "product-basb-business-value-v1"
-BUSINESS_VALUE_BATCH_PROMPT_VERSION = "product-basb-business-value-batch-v1"
+BUSINESS_VALUE_PROMPT_VERSION = "product-basb-business-value-v2"
+BUSINESS_VALUE_BATCH_PROMPT_VERSION = "product-basb-business-value-batch-v2"
 BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION = "business-value-fields-v2"
 BUSINESS_VALUE_CACHE_NAMESPACE = "business_value_synthesis"
 
@@ -307,6 +307,8 @@ def _compact_text(value: Any, limit: int = 500) -> str:
 def _looks_like_placeholder_intelligence(value: str) -> bool:
     cleaned = value.strip().lower()
     if not cleaned:
+        return True
+    if evidence_cards.is_failed_file_summary(cleaned) or evidence_cards.is_generic_title(cleaned):
         return True
     if "<img" in cleaned or cleaned.startswith("![") or cleaned.startswith("<"):
         return True
@@ -1411,8 +1413,9 @@ def source_record_to_evidence_row(kind: str, record: dict[str, Any]) -> evidence
 def repo_document_to_evidence_row(record: dict[str, Any]) -> evidence_index.EvidenceRow:
     item = record.get("item", {})
     source_ref = str(record.get("source_ref") or item.get("source_uri") or item.get("relative_path") or record.get("stem") or "")
-    title = str(item.get("title") or source_ref)
-    body = "\n".join([title, str(item.get("summary") or ""), str(record.get("text") or "")[:3000]])
+    title = evidence_cards.normalize_title(item.get("title"), fallback=source_ref)
+    summary = evidence_cards.clean_summary(item.get("summary"), fallback="")
+    body = "\n".join([title, summary, str(record.get("text") or "")[:3000]])
     return evidence_index.EvidenceRow(
         evidence_id=f"repo-doc:{source_ref}",
         kind="repo-doc",
@@ -2631,6 +2634,27 @@ def is_generated_note(path: Path) -> bool:
     return bool(re.search(r"(?m)^source:\s*[\"']?(?:generated|scaffold)[\"']?\s*$", head))
 
 
+BAD_GENERATED_NOTE_RE = re.compile(
+    r"\{\{\s*title\s*\}\}|unable to summarize file|maybe too big|^\s*#?\s*(?:\*\*)?whole file summary(?:\*\*)?\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def prune_bad_generated_notes(vault_path: Path) -> int:
+    if not vault_path.exists():
+        return 0
+    pruned = 0
+    for file_path in sorted(vault_path.rglob("*.md")):
+        if not is_generated_note(file_path):
+            continue
+        text = file_path.read_text(encoding="utf-8", errors="ignore")
+        if not BAD_GENERATED_NOTE_RE.search(text):
+            continue
+        file_path.unlink()
+        pruned += 1
+    return pruned
+
+
 def clear_generated_markdown_dir(path: Path) -> None:
     if not path.exists():
         ensure_dir(path)
@@ -3156,8 +3180,8 @@ def build_repo_document_note(
     capabilities: list[str],
     source_text: str,
 ) -> str:
-    title = str(item.get("title") or Path(str(item.get("relative_path") or stem)).stem)
-    summary = str(item.get("summary") or source_text[:700]).strip()
+    title = evidence_cards.normalize_title(item.get("title"), fallback=item.get("relative_path") or stem)
+    summary = evidence_cards.clean_summary(item.get("summary") or source_text[:700], fallback="")
     related_caps = [note_link(stem_for_capability(CAPABILITY_BY_KEY[key]["title"])) for key in capabilities if key in CAPABILITY_BY_KEY]
     lines = [
         frontmatter(
@@ -6087,7 +6111,19 @@ def main() -> None:
     external_links = read_json(paths.json_dir / "external_links.json")
     repo_snapshots = read_json(paths.json_dir / "repo_snapshots.json")
     repo_documents_path = paths.json_dir / "repo_documents.json"
-    repo_documents = read_json(repo_documents_path) if repo_documents_path.exists() else []
+    raw_repo_documents = read_json(repo_documents_path) if repo_documents_path.exists() else []
+    repo_documents: list[dict[str, Any]] = []
+    repo_documents_filtered_bad = 0
+    for item in raw_repo_documents:
+        if evidence_cards.is_invalid_evidence_card({
+            "kind": item.get("source_kind") or "repo-doc",
+            "source_path": item.get("relative_path") or item.get("source_ref") or "",
+            "title": item.get("title") or "",
+            "summary": item.get("summary") or item.get("text") or "",
+        }):
+            repo_documents_filtered_bad += 1
+            continue
+        repo_documents.append(item)
     docx_extracts = read_json(paths.json_dir / "docx_extracts.json")
     uploaded_documents_path = paths.json_dir / "uploaded_documents.json"
     uploaded_documents = read_json(uploaded_documents_path) if uploaded_documents_path.exists() else []
@@ -6101,6 +6137,7 @@ def main() -> None:
         external_links=len(external_links),
         repo_snapshots=len(repo_snapshots),
         repo_documents=len(repo_documents),
+        repo_documents_filtered_bad=repo_documents_filtered_bad,
         uploaded_documents=len(uploaded_documents),
     )
     source_inventory_units = max(1, len(support_inventory) + len(wiki_inventory) + len(external_links) + len(repo_snapshots) + len(repo_documents) + len(docx_extracts) + len(uploaded_documents))
@@ -6113,6 +6150,7 @@ def main() -> None:
         wiki_items=len(wiki_inventory),
         external_links=len(external_links),
         repo_documents=len(repo_documents),
+        repo_documents_filtered_bad=repo_documents_filtered_bad,
         uploaded_documents=len(uploaded_documents),
     )
 
@@ -6220,6 +6258,7 @@ def main() -> None:
             write_generated_note=write_generated_note,
             manifest_path=generated_notes_manifest_path,
         )
+        rendered_note_stats["pruned_bad_generated_notes"] = prune_bad_generated_notes(paths.vault)
 
     stage_started = time.perf_counter()
     article_note_stems: dict[str, str] = {}
@@ -6273,7 +6312,17 @@ def main() -> None:
     for item in repo_documents:
         absolute_path = Path(str(item.get("absolute_path") or ""))
         text = absolute_path.read_text(encoding="utf-8", errors="ignore") if absolute_path.exists() else str(item.get("summary") or "")
-        title = str(item.get("title") or item.get("relative_path") or "Repository Document")
+        if evidence_cards.is_invalid_evidence_card(
+            {
+                "source_kind": "repo-doc",
+                "title": item.get("title"),
+                "summary": item.get("summary"),
+                "source_uri": item.get("source_uri") or item.get("relative_path"),
+                "path": item.get("relative_path"),
+            }
+        ):
+            continue
+        title = evidence_cards.normalize_title(item.get("title"), fallback=item.get("relative_path") or "Repository Document")
         stem = safe_filename(f"Repo Doc - {item.get('repo', 'repo')} - {item.get('relative_path', title)}", limit=180)
         repo_document_stems[str(item.get("id") or item.get("source_uri") or item.get("relative_path") or stem)] = stem
         repo_document_records.append(

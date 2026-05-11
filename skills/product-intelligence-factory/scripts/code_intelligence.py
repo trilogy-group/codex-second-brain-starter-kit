@@ -194,6 +194,7 @@ def language_for_path(path: Path) -> str:
 
 
 GENERATED_PATH_PARTS = {
+    ".ai",
     ".chrome-extension-profile",
     ".next",
     ".turbo",
@@ -208,7 +209,10 @@ GENERATED_PATH_PARTS = {
 
 
 def is_generated_or_ignored_path(path: Path) -> bool:
-    return any(part in IGNORED_DIRS or part in GENERATED_PATH_PARTS or part.startswith(".chrome-extension-profile") for part in path.parts)
+    return path.name.casefold().endswith(".ai.md") or any(
+        part in IGNORED_DIRS or part in GENERATED_PATH_PARTS or part.startswith(".chrome-extension-profile")
+        for part in path.parts
+    )
 
 
 def git_tracked_files(repo_path: Path) -> set[str] | None:

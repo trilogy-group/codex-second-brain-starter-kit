@@ -151,7 +151,7 @@ The source-index and rebuild scripts now normalize every useful input into evide
 
 Supported evidence kinds include:
 - `repo-code`: source files, routes, schemas, tests, dependencies, ownership/churn, and code-reference notes
-- `repo-doc`: git-tracked Markdown, MDX, and repository documentation files
+- `repo-doc`: git-tracked Markdown, MDX, and repository documentation files; generated `.ai/` summaries and `*.ai.md` artifacts are excluded from source truth by default
 - `uploaded-doc`: uploaded text or HTML-like documents from the corpus
 - `pdf`: uploaded PDF files with durable file provenance and extracted text where available
 - `docx`: extracted DOCX text from the corpus
@@ -184,7 +184,7 @@ Key generated artifacts:
 
 Warm rebuild speed depends on stable evidence-card digests. Keep inventory and cache paths stable so unchanged business-value payloads reuse cached GPT outputs. The business-value inventory reports cache hits, skipped GPT calls, source-kind counts, unstable payload warnings, GPT calls, failures, and elapsed synthesis time.
 
-Quality guards now audit generated intelligence notes for unresolved placeholders such as `{{title}}`, scaffold residue, raw Python-style dict/list renderings, and code-only assumptions in products that have strong non-code evidence.
+Quality guards now audit generated intelligence notes for unresolved placeholders such as `{{title}}`, scaffold residue, raw Python-style dict/list renderings, failed file-summary text such as `Unable to summarize file. Maybe too big?`, and code-only assumptions in products that have strong non-code evidence. `.ai/*.ai.md` files are treated as generated artifacts: failed summaries are ignored entirely, and useful summaries may only supplement the original source file rather than becoming standalone product evidence.
 
 ## Performance for large source sets
 

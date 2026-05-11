@@ -8,7 +8,7 @@ from collections import Counter
 from typing import Any
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SUPPORTED_EVIDENCE_KINDS = {
     "repo-code",
     "repo-doc",
@@ -51,6 +51,99 @@ VOLATILE_KEYS = {
     "warm_cache_hit_ratio",
 }
 VOLATILE_PREFIXES = ("cache_", "timing_", "elapsed_", "runtime_", "diagnostic_")
+FAILED_FILE_SUMMARY_MARKERS = (
+    "unable to summarize file",
+    "maybe too big",
+)
+GENERIC_TITLE_KEYS = {
+    "wholefilesummary",
+    "summary",
+    "filesummary",
+    "untitled",
+    "index",
+}
+MARKDOWN_FORMAT_RE = re.compile(r"[*`]+")
+
+
+def strip_markdown_formatting(value: Any) -> str:
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", str(value or ""))
+    text = re.sub(r"^#+\s*", "", text.strip())
+    text = MARKDOWN_FORMAT_RE.sub("", text)
+    return re.sub(r"\s+", " ", text).strip(" :-")
+
+
+def _title_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", "", strip_markdown_formatting(value).casefold())
+
+
+def is_failed_file_summary(value: Any) -> bool:
+    text = strip_markdown_formatting(value).casefold()
+    return any(marker in text for marker in FAILED_FILE_SUMMARY_MARKERS)
+
+
+def is_generated_summary_artifact_path(value: Any) -> bool:
+    path_text = str(value or "").replace("\\", "/")
+    if not path_text:
+        return False
+    parts = [part for part in path_text.split("/") if part]
+    return ".ai" in parts or path_text.casefold().endswith(".ai.md")
+
+
+def is_generic_title(value: Any) -> bool:
+    return _title_key(value) in GENERIC_TITLE_KEYS
+
+
+def title_from_path(value: Any, *, fallback: str = "Source Evidence") -> str:
+    path = str(value or "").replace("\\", "/").strip("/")
+    if not path:
+        return fallback
+    parts = [part for part in path.split("/") if part and part != ".ai"]
+    name = path.rsplit("/", 1)[-1]
+    for suffix in (".ai.md", ".md", ".mdx", ".markdown"):
+        if name.casefold().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    else:
+        if "." in name:
+            name = name.rsplit(".", 1)[0]
+    stem = re.sub(r"[-_.]+", " ", name).strip()
+    if _title_key(stem) in GENERIC_TITLE_KEYS and len(parts) > 1:
+        parent = re.sub(r"[-_.]+", " ", parts[-2]).strip()
+        stem = parent if _title_key(stem) == "index" else f"{parent} {stem}".strip()
+    if not stem:
+        stem = parts[-1] if parts else fallback
+    words = []
+    for word in stem.split():
+        if word.isupper() or any(char.isdigit() for char in word):
+            words.append(word)
+        else:
+            words.append(word[:1].upper() + word[1:])
+    return " ".join(words).strip() or fallback
+
+
+def normalize_title(value: Any, *, fallback: Any = "Source Evidence") -> str:
+    fallback_title = title_from_path(fallback) or strip_markdown_formatting(fallback)
+    title = strip_markdown_formatting(value)
+    if not title or is_generic_title(title) or is_failed_file_summary(title):
+        title = fallback_title
+    if not title or is_generic_title(title) or is_failed_file_summary(title):
+        title = title_from_path(fallback_title)
+    return compact_text(title or "Source Evidence", 180)
+
+
+def clean_summary(value: Any, *, fallback: Any = "") -> str:
+    text = strip_markdown_formatting(value)
+    text = re.sub(r"^whole file summary:?\s*", "", text, flags=re.IGNORECASE).strip()
+    if is_failed_file_summary(text):
+        return ""
+    return compact_text(text or fallback, 900)
+
+
+def is_invalid_evidence_card(card: dict[str, Any]) -> bool:
+    source_uri = card.get("source_uri") or card.get("path") or card.get("source_ref") or card.get("id")
+    if str(card.get("source_kind") or card.get("kind") or "") == "repo-doc" and is_generated_summary_artifact_path(source_uri):
+        return True
+    return is_failed_file_summary(card.get("title")) or is_failed_file_summary(card.get("summary"))
 
 
 def compact_text(value: Any, limit: int = 700) -> str:
@@ -88,9 +181,10 @@ def normalize_card(card: dict[str, Any]) -> dict[str, Any]:
     source_kind = str(card.get("source_kind") or card.get("kind") or "generated-note").strip() or "generated-note"
     if source_kind not in SUPPORTED_EVIDENCE_KINDS:
         source_kind = "generated-note"
-    title = compact_text(card.get("title") or card.get("source_uri") or card.get("path") or card.get("id") or source_kind, 180)
-    summary = compact_text(card.get("summary") or card.get("body") or card.get("text") or title, 900)
     source_uri = str(card.get("source_uri") or card.get("citation_uri") or card.get("path") or card.get("source_ref") or "").strip()
+    title_fallback = card.get("source_uri") or card.get("path") or card.get("id") or source_kind
+    title = normalize_title(card.get("title"), fallback=title_fallback)
+    summary = clean_summary(card.get("summary") or card.get("body") or card.get("text"), fallback=title)
     evidence_id = str(card.get("id") or card.get("evidence_id") or f"{source_kind}:{stable_hash([title, source_uri, summary])[:16]}")
     code_anchors = card.get("code_anchors") or card.get("code_reference_links") or card.get("code_refs") or []
     if not isinstance(code_anchors, list):
@@ -117,6 +211,16 @@ def normalize_card(card: dict[str, Any]) -> dict[str, Any]:
 def cards_from_repo_documents(repo_documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cards: list[dict[str, Any]] = []
     for item in repo_documents:
+        if is_invalid_evidence_card(
+            {
+                "source_kind": "repo-doc",
+                "title": item.get("title"),
+                "summary": item.get("summary"),
+                "source_uri": item.get("source_uri") or item.get("relative_path"),
+                "path": item.get("relative_path"),
+            }
+        ):
+            continue
         cards.append(
             normalize_card(
                 {
@@ -269,7 +373,7 @@ def stable_cards(
     limit: int | None = None,
     include_generated_notes: bool = True,
 ) -> list[dict[str, Any]]:
-    normalized = [normalize_card(card) for card in cards]
+    normalized = [normalize_card(card) for card in cards if isinstance(card, dict) and not is_invalid_evidence_card(card)]
     compact = [
         {
             "id": card["id"],

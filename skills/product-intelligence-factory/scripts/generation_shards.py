@@ -28,8 +28,8 @@ import openai_requests
 
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
 VALID_SHARD_STATUSES = {"queued", "running", "succeeded", "failed", "rejected", "merged"}
-SHARD_PROMPT_VERSION = "product-basb-shard-agent-v1"
-SHARD_CACHE_SCHEMA_VERSION = 1
+SHARD_PROMPT_VERSION = "product-basb-shard-agent-v2"
+SHARD_CACHE_SCHEMA_VERSION = 2
 VOLATILE_SHARD_KEYS = {
     "cache_hit",
     "date",
@@ -933,7 +933,19 @@ def collect_shard_insights(inventory: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _is_placeholder_insight(item: dict[str, Any]) -> bool:
     text = " ".join(str(item.get(key) or "") for key in ("theme", "summary", "output_rationale")).casefold()
-    if any(marker in text for marker in ("repository ingestion gap", "lacks inspectable source", "placeholder", "no inspectable source", "do not use this as evidence")):
+    if any(
+        marker in text
+        for marker in (
+            "repository ingestion gap",
+            "lacks inspectable source",
+            "placeholder",
+            "no inspectable source",
+            "do not use this as evidence",
+            "whole file summary",
+            "unable to summarize file",
+            "maybe too big",
+        )
+    ):
         return True
     evidence_ids = _string_list(item.get("evidence_ids"), 8)
     code_surfaces = _string_list(item.get("code_surfaces"), 8)
