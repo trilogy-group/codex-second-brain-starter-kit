@@ -1522,6 +1522,63 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertEqual(contexts[0], str(certifi_path))
         self.assertEqual(contexts[1], {"cafile": str(certifi_path)})
 
+    def test_openai_request_helper_routes_through_tyler_provider_gateway(self) -> None:
+        helper = load_module(OPENAI_REQUESTS_SCRIPT, "openai_requests_gateway_test")
+        calls: list[dict[str, object]] = []
+
+        class FakeResponse:
+            def __init__(self, payload: dict[str, object]):
+                self.payload = payload
+
+            def read(self) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        def fake_urlopen(request, timeout, context=None):
+            del timeout, context
+            body = json.loads(request.data.decode("utf-8")) if getattr(request, "data", None) else {}
+            calls.append({"url": request.full_url, "body": body, "authorization": request.headers.get("Authorization")})
+            if request.full_url.endswith("/api/internal/provider-tasks"):
+                return FakeResponse({"task": {"id": 123, "status": "queued"}})
+            if request.full_url.endswith("/api/internal/provider-tasks/123"):
+                return FakeResponse(
+                    {
+                        "task": {"id": 123, "status": "succeeded"},
+                        "result": {"body_json": {"output_text": "gateway ok"}, "provider_headers": {"openai-request-id": "req-test"}},
+                    }
+                )
+            raise AssertionError(f"unexpected URL {request.full_url}")
+
+        request = helper.urllib.request.Request(
+            "https://api.openai.com/v1/responses",
+            data=json.dumps({"model": "gpt-5.5", "input": "hello"}).encode("utf-8"),
+            method="POST",
+        )
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "TYLER_PROVIDER_GATEWAY_BASE_URL": "http://tyler-api:8000",
+                "TYLER_PROVIDER_GATEWAY_TOKEN": "internal-token",
+                "TYLER_PROVIDER_GATEWAY_PRODUCT_ID": "12",
+                "TYLER_PROVIDER_GATEWAY_PRODUCT_SLUG": "influitive",
+                "TYLER_PROVIDER_GATEWAY_JOB_RUN_ID": "34",
+                "TYLER_PROVIDER_GATEWAY_POLL_SECONDS": "0.01",
+            },
+        ), mock.patch.object(helper.urllib.request, "urlopen", side_effect=fake_urlopen):
+            with helper.urlopen(request, timeout=600) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(payload["output_text"], "gateway ok")
+        self.assertEqual(calls[0]["authorization"], "Bearer internal-token")
+        self.assertEqual(calls[0]["body"]["operation"], "openai_http")
+        self.assertEqual(calls[0]["body"]["job_run_id"], 34)
+        self.assertEqual(calls[0]["body"]["payload"]["url"], "https://api.openai.com/v1/responses")
+
     def test_business_value_defaults_use_medium_entities_and_high_ontology_reasoning(self) -> None:
         rebuild = load_module(REBUILD_PRODUCT_BRAIN_SCRIPT, "business_value_reasoning_defaults_test")
 

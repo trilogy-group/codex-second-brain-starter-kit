@@ -79,6 +79,8 @@ Typical use cases:
 
 Full-fidelity LLM synthesis defaults to `gpt-5.5` with hybrid reasoning: `medium` for high-fanout source/theme reducers, generation shards, and business-value entity synthesis, and `high` for capability reducers, ontology reducers, Product Ontology v2, and semantic cluster synthesis. The workflow uses OpenAI's Responses API for these reasoning calls so the requested reasoning effort is explicit instead of silently falling back to a lower-quality chat-completions path.
 
+When Tyler launches the starter kit, OpenAI calls can be routed through Tyler's provider gateway by setting `TYLER_PROVIDER_GATEWAY_BASE_URL`, `TYLER_PROVIDER_GATEWAY_TOKEN`, `TYLER_PROVIDER_GATEWAY_PRODUCT_ID`, and `TYLER_PROVIDER_GATEWAY_JOB_RUN_ID`. The starter kit still builds the same prompts and inventories, but each Responses or embeddings request becomes a durable Tyler provider task with retries and live diagnostics instead of a long pod-local HTTP call.
+
 Keep these settings in `profile.intelligence_path` unless you are intentionally testing a different quality/cost tradeoff:
 
 ```yaml
