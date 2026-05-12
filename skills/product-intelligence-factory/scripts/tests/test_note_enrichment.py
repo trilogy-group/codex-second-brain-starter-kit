@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
 import tempfile
@@ -204,19 +205,97 @@ class NoteEnrichmentTests(unittest.TestCase):
                 external_links=[],
                 docx_extracts=[],
             )
+            self.assertEqual(ontology["schema_version"], 2)
+            self.assertNotIn("<img", ontology["product_purpose"])
+            self.assertIn("Support managers", ontology["product_purpose"])
+            self.assertEqual(ontology["target_personas"][0]["name"], "Support managers")
+            self.assertIn("reduce repeat escalations", ontology["business_value_drivers"][0]["business_value"])
+            self.assertEqual(ontology["capabilities_v2"][0]["title"], "Workspace Intelligence")
+            self.assertIn("user_problem", ontology["capabilities_v2"][0])
         finally:
             if old_fixture is None:
                 os.environ.pop("PRODUCT_BASB_BUSINESS_VALUE_FIXTURE", None)
             else:
                 os.environ["PRODUCT_BASB_BUSINESS_VALUE_FIXTURE"] = old_fixture
 
-        self.assertEqual(ontology["schema_version"], 2)
-        self.assertNotIn("<img", ontology["product_purpose"])
-        self.assertIn("Support managers", ontology["product_purpose"])
-        self.assertEqual(ontology["target_personas"][0]["name"], "Support managers")
-        self.assertIn("reduce repeat escalations", ontology["business_value_drivers"][0]["business_value"])
-        self.assertEqual(ontology["capabilities_v2"][0]["title"], "Workspace Intelligence")
-        self.assertIn("user_problem", ontology["capabilities_v2"][0])
+    def test_product_ontology_strips_inline_evidence_from_display_fields(self) -> None:
+        module = load_module(MODULE_PATH, "rebuild_product_brain_ontology_inline_evidence_test")
+        module.configure_runtime(
+            {
+                "product": {"name": "Acme", "slug": "acme"},
+                "sources": {"stale_doc_hosts": []},
+            },
+            {"capabilities": []},
+        )
+        synthesis = {
+            "product_purpose": "Acme helps teams run customer programs (evidence: reducer-summary:ontology:ontology-0001; apps/acme/src/programs.ts).",
+            "target_personas": [
+                {
+                    "name": "Program manager (evidence: docs/personas.md)",
+                    "problem": "Needs current campaign evidence (evidence: support/article-1.md).",
+                    "desired_outcome": "Faster campaign decisions (citations: docs/outcomes.md).",
+                    "evidence": [{"path": "docs/personas.md"}],
+                }
+            ],
+            "jobs_to_be_done": [
+                {
+                    "job": "Review customer campaigns (evidence: reducer-summary:theme-1).",
+                    "outcome": "Approve the right campaign faster.",
+                    "evidence": [{"path": "docs/jobs.md"}],
+                }
+            ],
+            "business_value_drivers": [
+                {
+                    "driver": "Support efficiency",
+                    "business_value": "Reduce campaign handoffs (evidence: apps/acme/src/support.ts).",
+                    "evidence": [{"path": "docs/value.md"}],
+                }
+            ],
+            "capabilities": [
+                {
+                    "title": "Campaign Review (evidence: apps/acme/src/campaigns.ts)",
+                    "target_persona": "Program manager",
+                    "user_problem": "Needs campaign confidence.",
+                    "business_value": "Speeds up campaign decisions.",
+                    "success_metric": "Campaign review time falls.",
+                    "value_score": 8,
+                    "evidence_confidence": "high",
+                    "implementation_leverage": "Uses campaign services.",
+                }
+            ],
+            "workflows": [],
+            "risks_and_opportunities": [],
+            "ontology_confidence": "high",
+        }
+
+        with mock.patch.object(module, "synthesize_single_business_value_cached", return_value=synthesis):
+            ontology = module.build_product_ontology(
+                manifest={"product": {"name": "Acme", "slug": "acme"}},
+                support_records=[],
+                wiki_records=[],
+                repo_snapshots=[],
+                repo_documents=[],
+                capability_rows=[{"title": "Campaign Review", "link": "[[Campaign Review]]", "support_count": 0, "wiki_count": 0, "code_count": 1}],
+                code_intel={"graph": {}, "files": []},
+                external_links=[],
+                docx_extracts=[],
+                uploaded_documents=[],
+            )
+
+        rendered = json.dumps(
+            {
+                "product_purpose": ontology["product_purpose"],
+                "target_personas": ontology["target_personas"],
+                "jobs_to_be_done": ontology["jobs_to_be_done"],
+                "business_value_drivers": ontology["business_value_drivers"],
+                "capabilities_v2": ontology["capabilities_v2"],
+            },
+            sort_keys=True,
+        )
+        self.assertNotIn("evidence:", rendered.lower())
+        self.assertNotIn("citations:", rendered.lower())
+        self.assertNotIn("apps/acme/src", rendered)
+        self.assertEqual(ontology["target_personas"][0]["evidence"][0]["path"], "docs/personas.md")
 
     def test_product_ontology_works_for_docs_only_project_without_code(self) -> None:
         module = load_module(MODULE_PATH, "rebuild_product_brain_docs_only_ontology_test")

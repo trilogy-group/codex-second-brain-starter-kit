@@ -226,9 +226,9 @@ EXTERNAL_SYSTEM_TERMS = (
 )
 
 
-BUSINESS_VALUE_PROMPT_VERSION = "product-basb-business-value-v2"
-BUSINESS_VALUE_BATCH_PROMPT_VERSION = "product-basb-business-value-batch-v2"
-BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION = "business-value-fields-v2"
+BUSINESS_VALUE_PROMPT_VERSION = "product-basb-business-value-v3"
+BUSINESS_VALUE_BATCH_PROMPT_VERSION = "product-basb-business-value-batch-v3"
+BUSINESS_VALUE_OUTPUT_CONTRACT_VERSION = "business-value-fields-v3"
 BUSINESS_VALUE_CACHE_NAMESPACE = "business_value_synthesis"
 
 
@@ -365,10 +365,10 @@ class OpenAIBusinessValueClient:
                     "risks_and_opportunities",
                     "ontology_confidence",
                 ],
-                "product_purpose": "One concrete sentence describing what the product helps users accomplish. Never return a title, heading, HTML, or image markdown.",
-                "target_personas": "Array of objects with name, problem, desired_outcome, evidence, and confidence.",
-                "business_value_drivers": "Array of objects with business_value, user_problem, success_metric, evidence, and confidence.",
-                "capabilities": "Array of objects with title, target_persona, user_problem, business_value, success_metric, value_score, evidence_confidence, and implementation_leverage.",
+                "product_purpose": "One concrete sentence describing what the product helps users accomplish. Never return a title, heading, HTML, image markdown, or inline evidence/source/path references.",
+                "target_personas": "Array of objects with name, problem, desired_outcome, evidence, and confidence. Put citations only in evidence/citations fields, never inline in name/problem/outcome text.",
+                "business_value_drivers": "Array of objects with business_value, user_problem, success_metric, evidence, and confidence. Put citations only in evidence/citations fields, never inline in display text.",
+                "capabilities": "Array of objects with title, target_persona, user_problem, business_value, success_metric, value_score, evidence_confidence, and implementation_leverage. Put citations only in evidence/citations fields.",
             }
         return {
             "required_fields": [
@@ -453,7 +453,8 @@ class OpenAIBusinessValueClient:
                 instructions=(
                     "You synthesize Product BASB business-value intelligence from compact evidence cards. "
                     "Use only the provided evidence. Do not return templates, headings as facts, raw HTML, or image markdown. "
-                    "Return JSON only. Every generated business claim must include evidence citations when available."
+                    "Return JSON only. Every generated business claim must include evidence citations when available, "
+                    "but citations belong only in evidence/citations fields; never append inline evidence, sources, or file paths to user-facing strings."
                 ),
                 user_content=json.dumps(
                     {
@@ -709,6 +710,41 @@ def _truncate_clean_text(text: str, limit: int) -> str:
 
 def _clean_text(value: Any, limit: int = 500) -> str:
     return _truncate_clean_text(re.sub(r"\s+", " ", str(value or "")).strip(), limit)
+
+
+INLINE_ONTOLOGY_EVIDENCE_RE = re.compile(r"\s*[\(\[]\s*(?:evidence|citations?|sources?)\s*:\s*.*?[\)\]]\.?", re.IGNORECASE)
+ONTOLOGY_EVIDENCE_KEYS = {
+    "citation_uri",
+    "citations",
+    "evidence",
+    "path",
+    "source_citations",
+    "source_evidence",
+    "source_uri",
+}
+
+
+def _strip_inline_ontology_evidence(value: str) -> str:
+    stripped = value.strip()
+    had_terminal_punctuation = stripped.endswith((".", "!", "?"))
+    cleaned = INLINE_ONTOLOGY_EVIDENCE_RE.sub("", stripped)
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if had_terminal_punctuation and cleaned and cleaned[-1] not in ".!?":
+        cleaned = f"{cleaned}."
+    return cleaned
+
+
+def _clean_ontology_display_fields(value: Any, *, parent_key: str | None = None) -> Any:
+    if parent_key in ONTOLOGY_EVIDENCE_KEYS:
+        return value
+    if isinstance(value, str):
+        return _strip_inline_ontology_evidence(value)
+    if isinstance(value, list):
+        return [_clean_ontology_display_fields(item, parent_key=parent_key) for item in value]
+    if isinstance(value, dict):
+        return {key: _clean_ontology_display_fields(item, parent_key=str(key)) for key, item in value.items()}
+    return value
 
 
 def _structured_text(value: Any, *, preferred_keys: tuple[str, ...], limit: int = 500, list_separator: str = "; ") -> str:
@@ -5083,6 +5119,8 @@ def build_business_value_report(product_ontology: dict[str, Any], capability_row
 
 
 def build_product_ontology_note(product_ontology: dict[str, Any], business_report: dict[str, Any]) -> str:
+    product_ontology = _clean_ontology_display_fields(product_ontology)
+
     def evidence_refs(value: Any) -> str:
         items = value if isinstance(value, list) else []
         refs: list[str] = []
@@ -5849,10 +5887,10 @@ def build_product_ontology(
         config=BUSINESS_VALUE_CONFIG or default_business_value_config({}),
         inventory=business_inventory,
     )
-    purpose = _business_text_field(synthesis, "product_purpose", 800)
-    target_personas = [item for item in synthesis.get("target_personas", []) if isinstance(item, dict)]
-    business_value_drivers = [item for item in synthesis.get("business_value_drivers", []) if isinstance(item, dict)]
-    capabilities_v2 = [item for item in synthesis.get("capabilities", []) if isinstance(item, dict)]
+    purpose = _strip_inline_ontology_evidence(_business_text_field(synthesis, "product_purpose", 800))
+    target_personas = [item for item in _clean_ontology_display_fields(synthesis.get("target_personas", [])) if isinstance(item, dict)]
+    business_value_drivers = [item for item in _clean_ontology_display_fields(synthesis.get("business_value_drivers", [])) if isinstance(item, dict)]
+    capabilities_v2 = [item for item in _clean_ontology_display_fields(synthesis.get("capabilities", [])) if isinstance(item, dict)]
     validation_errors = []
     if _looks_like_placeholder_intelligence(purpose):
         validation_errors.append("product_purpose must be a concrete product purpose, not HTML, image markdown, a title, or a template.")
@@ -5888,15 +5926,15 @@ def build_product_ontology(
         )
         if isinstance(repair, dict):
             synthesis = {**synthesis, **{key: value for key, value in repair.items() if value not in (None, "", [], {})}}
-        purpose = _business_text_field(synthesis, "product_purpose", 800)
-        target_personas = [item for item in synthesis.get("target_personas", []) if isinstance(item, dict)]
-        business_value_drivers = [item for item in synthesis.get("business_value_drivers", []) if isinstance(item, dict)]
-        capabilities_v2 = [item for item in synthesis.get("capabilities", []) if isinstance(item, dict)]
+        purpose = _strip_inline_ontology_evidence(_business_text_field(synthesis, "product_purpose", 800))
+        target_personas = [item for item in _clean_ontology_display_fields(synthesis.get("target_personas", [])) if isinstance(item, dict)]
+        business_value_drivers = [item for item in _clean_ontology_display_fields(synthesis.get("business_value_drivers", [])) if isinstance(item, dict)]
+        capabilities_v2 = [item for item in _clean_ontology_display_fields(synthesis.get("capabilities", [])) if isinstance(item, dict)]
     if _looks_like_placeholder_intelligence(purpose):
         raise SystemExit("GPT Product Ontology v2 synthesis returned an unusable product_purpose.")
-    jobs_to_be_done = [item for item in synthesis.get("jobs_to_be_done", []) if isinstance(item, dict)]
-    workflows_v2 = [item for item in synthesis.get("workflows", []) if isinstance(item, dict)]
-    risks_and_opportunities = [item for item in synthesis.get("risks_and_opportunities", []) if isinstance(item, dict)]
+    jobs_to_be_done = [item for item in _clean_ontology_display_fields(synthesis.get("jobs_to_be_done", [])) if isinstance(item, dict)]
+    workflows_v2 = [item for item in _clean_ontology_display_fields(synthesis.get("workflows", [])) if isinstance(item, dict)]
+    risks_and_opportunities = [item for item in _clean_ontology_display_fields(synthesis.get("risks_and_opportunities", [])) if isinstance(item, dict)]
     for capability in capabilities_v2:
         capability["value_score"] = _normalize_business_value_score(capability.get("value_score"))
     if not target_personas:
