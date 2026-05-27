@@ -6,6 +6,7 @@ import concurrent.futures
 import hashlib
 import importlib.util
 import json
+import os
 import re
 import ssl
 import subprocess
@@ -367,12 +368,40 @@ def _source_extract_workers(settings: dict[str, Any] | None = None, workers: int
     return max(1, int(settings.get("source_extract_workers", 1)))
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return max(1, int(default))
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return max(1, int(default))
+
+
+def _repo_snapshot_workers() -> int:
+    return _env_int("PRODUCT_BASB_REPO_SNAPSHOT_WORKERS", _env_int("TYLER_SECOND_BRAIN_REPO_SNAPSHOT_WORKERS", 1))
+
+
+def _repo_document_workers() -> int:
+    return _env_int("PRODUCT_BASB_REPO_DOCUMENT_WORKERS", _env_int("TYLER_SECOND_BRAIN_REPO_DOCUMENT_WORKERS", 1))
+
+
 def _run_ordered_source_tasks(items: list[Path], worker_count: int, task: Any) -> list[Any]:
     if not items:
         return []
     if worker_count <= 1:
         return [task(item) for item in items]
     with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="basb-source-extract") as executor:
+        return list(executor.map(task, items))
+
+
+def _run_ordered_repo_tasks(items: list[dict[str, Any]], worker_count: int, task: Any) -> list[Any]:
+    if not items:
+        return []
+    if worker_count <= 1:
+        return [task(item) for item in items]
+    max_workers = min(max(1, int(worker_count)), len(items))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="basb-repo-source") as executor:
         return list(executor.map(task, items))
 
 
@@ -618,26 +647,24 @@ def summarize_readme(path: Path) -> tuple[str, str]:
 
 def collect_repo_snapshots(data: dict[str, Any], paths: Paths) -> list[dict[str, Any]]:
     del paths
-    snapshots: list[dict[str, Any]] = []
-    for item in data["repositories"]["items"]:
+    repo_items = list(data["repositories"]["items"])
+
+    def collect_one(item: dict[str, Any]) -> dict[str, Any]:
         repo_path = Path(str(item["local_path"])).expanduser()
         if not repo_path.exists():
-            snapshots.append(
-                {
-                    "name": item["name"],
-                    "role": item["role"],
-                    "branch": item["default_branch"],
-                    "path": str(repo_path),
-                    "path_exists": False,
-                    "readme_title": "",
-                    "readme_summary": "",
-                    "top_dirs": [],
-                    "key_files": [],
-                    "monorepo_apps": [],
-                    "monorepo_services": [],
-                }
-            )
-            continue
+            return {
+                "name": item["name"],
+                "role": item["role"],
+                "branch": item["default_branch"],
+                "path": str(repo_path),
+                "path_exists": False,
+                "readme_title": "",
+                "readme_summary": "",
+                "top_dirs": [],
+                "key_files": [],
+                "monorepo_apps": [],
+                "monorepo_services": [],
+            }
         readme_title, readme_summary = summarize_readme(repo_path / "README.md")
         top_dirs = sorted([entry.name for entry in repo_path.iterdir() if entry.is_dir() and not entry.name.startswith(".")])[:20]
         key_files = [
@@ -651,22 +678,21 @@ def collect_repo_snapshots(data: dict[str, Any], paths: Paths) -> list[dict[str,
             monorepo_apps = sorted([entry.name for entry in (repo_path / "apps").iterdir() if entry.is_dir()])[:50]
         if (repo_path / "services").exists():
             monorepo_services = sorted([entry.name for entry in (repo_path / "services").iterdir() if entry.is_dir()])[:80]
-        snapshots.append(
-            {
-                "name": item["name"],
-                "role": item["role"],
-                "branch": item["default_branch"],
-                "path": str(repo_path),
-                "path_exists": True,
-                "readme_title": readme_title,
-                "readme_summary": readme_summary,
-                "top_dirs": top_dirs,
-                "key_files": key_files,
-                "monorepo_apps": monorepo_apps,
-                "monorepo_services": monorepo_services,
-            }
-        )
-    return snapshots
+        return {
+            "name": item["name"],
+            "role": item["role"],
+            "branch": item["default_branch"],
+            "path": str(repo_path),
+            "path_exists": True,
+            "readme_title": readme_title,
+            "readme_summary": readme_summary,
+            "top_dirs": top_dirs,
+            "key_files": key_files,
+            "monorepo_apps": monorepo_apps,
+            "monorepo_services": monorepo_services,
+        }
+
+    return _run_ordered_repo_tasks(repo_items, _repo_snapshot_workers(), collect_one)
 
 
 def _git_tracked_files(repo_path: Path) -> list[Path]:
@@ -708,32 +734,41 @@ def _empty_repo_document_quality_stats() -> dict[str, int]:
         "excluded_failed_file_summaries": 0,
         "excluded_generated_or_ignored_files": 0,
         "title_fallbacks": 0,
+        "failed_repositories": 0,
     }
 
 
 def collect_repo_documents_with_stats(data: dict[str, Any], paths: Paths) -> tuple[list[dict[str, Any]], dict[str, int]]:
     del paths
-    documents: list[dict[str, Any]] = []
     stats = _empty_repo_document_quality_stats()
     markdown_exts = {".md", ".mdx", ".markdown"}
-    for item in data.get("repositories", {}).get("items", []):
+    repo_items = list(data.get("repositories", {}).get("items", []))
+
+    def collect_one_repo(item: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        documents: list[dict[str, Any]] = []
+        repo_stats = _empty_repo_document_quality_stats()
         repo_path = Path(str(item.get("local_path") or "")).expanduser()
         if not repo_path.exists():
-            continue
+            return documents, repo_stats
         repo_name = str(item.get("name") or repo_path.name)
-        for relative_path in _git_tracked_files(repo_path):
+        try:
+            tracked_files = _git_tracked_files(repo_path)
+        except OSError:
+            repo_stats["failed_repositories"] += 1
+            return documents, repo_stats
+        for relative_path in tracked_files:
             if relative_path.suffix.lower() not in markdown_exts:
                 continue
             absolute_path = repo_path / relative_path
             if evidence_cards.is_generated_summary_artifact_path(relative_path):
-                stats["excluded_generated_summary_artifacts"] += 1
+                repo_stats["excluded_generated_summary_artifacts"] += 1
                 if absolute_path.exists():
                     artifact_text = absolute_path.read_text(encoding="utf-8", errors="ignore")
                     if evidence_cards.is_failed_file_summary(artifact_text):
-                        stats["excluded_failed_file_summaries"] += 1
+                        repo_stats["excluded_failed_file_summaries"] += 1
                 continue
             if code_intelligence.is_generated_or_ignored_path(relative_path):
-                stats["excluded_generated_or_ignored_files"] += 1
+                repo_stats["excluded_generated_or_ignored_files"] += 1
                 continue
             if not absolute_path.exists() or not absolute_path.is_file():
                 continue
@@ -741,10 +776,10 @@ def collect_repo_documents_with_stats(data: dict[str, Any], paths: Paths) -> tup
             raw_title = title_from_text(text, evidence_cards.title_from_path(relative_path))
             title = evidence_cards.normalize_title(raw_title, fallback=evidence_cards.title_from_path(relative_path))
             if title != evidence_cards.strip_markdown_formatting(raw_title):
-                stats["title_fallbacks"] += 1
+                repo_stats["title_fallbacks"] += 1
             summary = _first_meaningful_markdown_text(text)
             if evidence_cards.is_failed_file_summary(summary):
-                stats["excluded_failed_file_summaries"] += 1
+                repo_stats["excluded_failed_file_summaries"] += 1
                 continue
             if not summary:
                 continue
@@ -765,6 +800,13 @@ def collect_repo_documents_with_stats(data: dict[str, Any], paths: Paths) -> tup
                     "sha256": hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest(),
                 }
             )
+        return documents, repo_stats
+
+    documents: list[dict[str, Any]] = []
+    for repo_documents, repo_stats in _run_ordered_repo_tasks(repo_items, _repo_document_workers(), collect_one_repo):
+        documents.extend(repo_documents)
+        for key, value in repo_stats.items():
+            stats[key] = int(stats.get(key, 0)) + int(value)
     return sorted(documents, key=lambda entry: (entry["repo"], entry["relative_path"])), stats
 
 

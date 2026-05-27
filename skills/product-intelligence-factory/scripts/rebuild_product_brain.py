@@ -2097,6 +2097,8 @@ def retrieval_ranked_code_hits(
         absolute_path = str(metadata.get("absolute_path") or fallback_by_key.get(key, {}).get("absolute_path") or "")
         if not absolute_path:
             continue
+        if not Path(absolute_path).is_file():
+            continue
         seen.add(key)
         fallback = dict(fallback_by_key.get(key, {}))
         sample = normalize_code_match_sample(result.get("body"), limit=240)
@@ -2119,6 +2121,9 @@ def retrieval_ranked_code_hits(
         if key in seen:
             continue
         if allowed_repos and key[0] not in allowed_repos:
+            continue
+        absolute_path = str(hit.get("absolute_path") or "")
+        if absolute_path and not Path(absolute_path).is_file():
             continue
         ranked.append(hit)
         seen.add(key)
@@ -2827,6 +2832,8 @@ def split_identifier_words(value: str) -> str:
 
 
 def read_code_reference_text(path: Path, max_chars: int = 32000) -> str:
+    if not path.is_file():
+        return ""
     text = path.read_text(errors="ignore")
     if len(text) <= max_chars:
         return text
@@ -6492,7 +6499,7 @@ def main() -> None:
             evidence_index_path,
             base_evidence_rows,
             manifest_path=evidence_manifest_path,
-            delete_stale=False,
+            delete_stale=True,
         )
         record_timing(
             timings,

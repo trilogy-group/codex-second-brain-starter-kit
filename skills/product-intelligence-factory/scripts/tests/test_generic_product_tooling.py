@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from http.client import InvalidURL
 from pathlib import Path
@@ -704,6 +705,74 @@ class GenericToolingTests(unittest.TestCase):
         self.assertEqual(hits[0]["absolute_path"], str(source_path))
         self.assertEqual(hits[0]["retrieval_source"], "code-intelligence")
 
+    def test_retrieval_ranked_code_hits_skips_deleted_code_files(self) -> None:
+        module = load_module(REBUILD_SCRIPT, "rebuild_product_brain_stale_retrieval_hits_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            index_path = root / "evidence_index.sqlite"
+            live_path = root / "repo-one" / "src" / "live.py"
+            deleted_path = root / "repo-one" / "src" / "deleted.py"
+            live_path.parent.mkdir(parents=True)
+            live_path.write_text("def authenticate_session():\n    return True\n", encoding="utf-8")
+            module.evidence_index.rebuild_index(
+                index_path,
+                [
+                    module.evidence_index.EvidenceRow(
+                        evidence_id="code:repo-one:src/deleted.py",
+                        kind="code",
+                        title="Deleted authentication helper",
+                        body="deleted authenticate session code",
+                        source_ref="repo-one/src/deleted.py",
+                        path=str(deleted_path),
+                        metadata={
+                            "repo": "repo-one",
+                            "relative_path": "src/deleted.py",
+                            "absolute_path": str(deleted_path),
+                        },
+                    ),
+                    module.evidence_index.EvidenceRow(
+                        evidence_id="code:repo-one:src/live.py",
+                        kind="code",
+                        title="Live authentication helper",
+                        body="live authenticate session code",
+                        source_ref="repo-one/src/live.py",
+                        path=str(live_path),
+                        metadata={
+                            "repo": "repo-one",
+                            "relative_path": "src/live.py",
+                            "absolute_path": str(live_path),
+                        },
+                    ),
+                ],
+            )
+
+            hits = module.retrieval_ranked_code_hits(
+                index_path=index_path,
+                query="authenticate session",
+                fallback_hits=[],
+                limit=10,
+                repo_names=["repo-one"],
+            )
+
+        self.assertEqual([hit["relative_path"] for hit in hits], ["src/live.py"])
+
+    def test_analyze_code_reference_tolerates_deleted_reference_file(self) -> None:
+        module = load_module(REBUILD_SCRIPT, "rebuild_product_brain_deleted_reference_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            missing_path = Path(tmp_dir) / "repo-one" / "src" / "deleted.py"
+
+            analysis = module.analyze_code_reference(
+                {
+                    "repo": "repo-one",
+                    "relative_path": "src/deleted.py",
+                    "absolute_path": str(missing_path),
+                    "sample": "def removed_function(): pass",
+                }
+            )
+
+        self.assertEqual(analysis.artifact_kind, "Python module")
+        self.assertEqual(analysis.language, "Python")
+
     def test_repo_snapshots_tolerate_missing_repo_paths(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_missing_repo_test")
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -736,6 +805,56 @@ class GenericToolingTests(unittest.TestCase):
         self.assertEqual(len(snapshots), 1)
         self.assertFalse(snapshots[0]["path_exists"])
         self.assertEqual(snapshots[0]["top_dirs"], [])
+
+    def test_repo_snapshots_fan_out_per_repository(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_repo_snapshot_fanout_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_one = root / "repo-one"
+            repo_two = root / "repo-two"
+            repo_one.mkdir()
+            repo_two.mkdir()
+            (repo_one / "README.md").write_text("# Repo One\n\nOne", encoding="utf-8")
+            (repo_two / "README.md").write_text("# Repo Two\n\nTwo", encoding="utf-8")
+            barrier = threading.Barrier(2)
+            calls: list[str] = []
+
+            def fake_summarize(readme_path: Path):
+                calls.append(readme_path.parent.name)
+                barrier.wait(timeout=2)
+                return readme_path.parent.name, "summary"
+
+            manifest = {
+                "repositories": {
+                    "items": [
+                        {"name": "repo-one", "role": "core", "default_branch": "main", "local_path": str(repo_one)},
+                        {"name": "repo-two", "role": "web", "default_branch": "main", "local_path": str(repo_two)},
+                    ]
+                }
+            }
+            paths = module.Paths(
+                workspace=root / "workspace",
+                vault=root / "vault",
+                corpus=root / "corpus",
+                mirror=root / "mirror",
+                docx_extract=root / "docx",
+                repos_root=root / "repos",
+                links_dir=root / "mirror" / "external-pages",
+                json_dir=root / "mirror" / "inventories",
+            )
+            old_workers = os.environ.get("PRODUCT_BASB_REPO_SNAPSHOT_WORKERS")
+            os.environ["PRODUCT_BASB_REPO_SNAPSHOT_WORKERS"] = "2"
+            try:
+                with mock.patch.object(module, "summarize_readme", fake_summarize):
+                    snapshots = module.collect_repo_snapshots(manifest, paths)
+            finally:
+                if old_workers is None:
+                    os.environ.pop("PRODUCT_BASB_REPO_SNAPSHOT_WORKERS", None)
+                else:
+                    os.environ["PRODUCT_BASB_REPO_SNAPSHOT_WORKERS"] = old_workers
+
+        self.assertEqual([snapshot["name"] for snapshot in snapshots], ["repo-one", "repo-two"])
+        self.assertEqual(sorted(calls), ["repo-one", "repo-two"])
 
     def test_readme_summary_skips_image_html_and_uses_first_meaningful_product_text(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_readme_summary_test")
@@ -835,6 +954,57 @@ class GenericToolingTests(unittest.TestCase):
         self.assertEqual(quality["excluded_generated_summary_artifacts"], 1)
         self.assertEqual(quality["excluded_failed_file_summaries"], 1)
         self.assertEqual(quality["excluded_generated_or_ignored_files"], 1)
+
+    def test_repo_documents_fan_out_per_repository(self) -> None:
+        module = load_module(BUILD_SCRIPT, "build_source_indices_repo_document_fanout_test")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            repo_one = root / "repo-one"
+            repo_two = root / "repo-two"
+            repo_one.mkdir()
+            repo_two.mkdir()
+            (repo_one / "README.md").write_text("# Repo One\n\nCustomer workflow one.", encoding="utf-8")
+            (repo_two / "README.md").write_text("# Repo Two\n\nCustomer workflow two.", encoding="utf-8")
+            barrier = threading.Barrier(2)
+            calls: list[str] = []
+
+            def fake_tracked_files(repo_path: Path):
+                calls.append(repo_path.name)
+                barrier.wait(timeout=2)
+                return [Path("README.md")]
+
+            manifest = {
+                "repositories": {
+                    "items": [
+                        {"name": "repo-one", "role": "core", "default_branch": "main", "local_path": str(repo_one)},
+                        {"name": "repo-two", "role": "web", "default_branch": "main", "local_path": str(repo_two)},
+                    ]
+                }
+            }
+            paths = module.Paths(
+                workspace=root / "workspace",
+                vault=root / "vault",
+                corpus=root / "corpus",
+                mirror=root / "mirror",
+                docx_extract=root / "docx",
+                repos_root=root / "repos",
+                links_dir=root / "mirror" / "external-pages",
+                json_dir=root / "mirror" / "inventories",
+            )
+            old_workers = os.environ.get("PRODUCT_BASB_REPO_DOCUMENT_WORKERS")
+            os.environ["PRODUCT_BASB_REPO_DOCUMENT_WORKERS"] = "2"
+            try:
+                with mock.patch.object(module, "_git_tracked_files", fake_tracked_files):
+                    documents, quality = module.collect_repo_documents_with_stats(manifest, paths)
+            finally:
+                if old_workers is None:
+                    os.environ.pop("PRODUCT_BASB_REPO_DOCUMENT_WORKERS", None)
+                else:
+                    os.environ["PRODUCT_BASB_REPO_DOCUMENT_WORKERS"] = old_workers
+
+        self.assertEqual([document["repo"] for document in documents], ["repo-one", "repo-two"])
+        self.assertEqual(sorted(calls), ["repo-one", "repo-two"])
+        self.assertEqual(quality["failed_repositories"], 0)
 
     def test_uploaded_documents_collect_pdf_and_plaintext_source_evidence(self) -> None:
         module = load_module(BUILD_SCRIPT, "build_source_indices_uploaded_documents_test")
