@@ -1284,6 +1284,21 @@ def _coverage_limitations(*layers: list[dict[str, Any]]) -> list[dict[str, Any]]
     return limitations
 
 
+def _all_source_failures_message(source_results: list[dict[str, Any]]) -> str:
+    limitations = _coverage_limitations(source_results)
+    if not limitations:
+        return "All source reducers failed; cannot synthesize Product Ontology v2."
+    detail_lines = []
+    for item in limitations[:5]:
+        shard_id = str(item.get("id") or "unknown-shard")
+        reason = evidence_cards.compact_text(str(item.get("reason") or "Reducer did not complete."), 500)
+        detail_lines.append(f"- {shard_id}: {reason}")
+    remaining = len(limitations) - len(detail_lines)
+    if remaining > 0:
+        detail_lines.append(f"- ... {remaining} more source reducer failure(s)")
+    return "All source reducers failed; cannot synthesize Product Ontology v2.\nSource reducer failures:\n" + "\n".join(detail_lines)
+
+
 def _ontology_cards(ontology_results: list[dict[str, Any]], capability_results: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     source = [item for item in ontology_results if item.get("status") == "succeeded"] or [
         item for item in capability_results if item.get("status") == "succeeded"
@@ -1384,7 +1399,7 @@ def run_hierarchical_reducers(
         event_recorder=event_recorder,
     )
     if not any(item.get("status") == "succeeded" for item in source_results):
-        raise SystemExit("All source reducers failed; cannot synthesize Product Ontology v2.")
+        raise SystemExit(_all_source_failures_message(source_results))
 
     theme_specs = _theme_shard_specs(source_results, evidence_config)
     theme_results, theme_stats = _run_layer(

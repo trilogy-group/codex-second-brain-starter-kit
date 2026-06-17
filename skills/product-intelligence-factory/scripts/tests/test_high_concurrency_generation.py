@@ -2469,6 +2469,60 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertIn("source timeout", result["coverage_limitations"][0]["reason"])
         self.assertGreater(len(result["ontology_evidence_cards"]), 0)
 
+    def test_hierarchical_reducer_all_source_failures_include_reasons_in_exit(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_all_source_failure_exit_test")
+        cache_module = sys.modules["incremental_cache"]
+
+        class AllSourceFailureClient(reducers.FixtureHierarchicalReducerClient):
+            def reduce_many(
+                self,
+                specs: list[dict[str, object]],
+                *,
+                model: str,
+                reasoning_effort: str,
+                worker_count: int,
+            ) -> dict[str, dict[str, object]]:
+                if specs and specs[0].get("layer") == "source":
+                    raise RuntimeError("OpenAI Responses API returned HTTP 400: Bad Request: model_not_found")
+                return super().reduce_many(specs, model=model, reasoning_effort=reasoning_effort, worker_count=worker_count)
+
+        cards = [
+            {
+                "id": "wiki:1",
+                "source_kind": "wiki-page",
+                "title": "Workflow page",
+                "summary": "The workflow page describes customer-facing rollout steps.",
+                "source_uri": "wiki/1.md",
+                "terms": ["workflow"],
+            }
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with self.assertRaisesRegex(SystemExit, "model_not_found"):
+                reducers.run_hierarchical_reducers(
+                    cards=cards,
+                    capabilities=[{"key": "workflow", "title": "Workflow", "keywords": ["workflow"]}],
+                    evidence_config={
+                        "generated_notes_feed_synthesis": False,
+                        "max_cards_per_source_shard": 1,
+                        "max_cards_per_theme_shard": 1,
+                        "max_theme_summaries_per_capability_shard": 1,
+                        "max_capability_summaries_for_ontology": 1,
+                        "max_summary_chars": 300,
+                        "unlimited_total_shards": True,
+                    },
+                    generation_config={
+                        "source_shard_workers": 1,
+                        "theme_reducer_workers": 1,
+                        "capability_reducer_workers": 1,
+                        "ontology_reducer_workers": 1,
+                        "max_concurrent_openai_reducers": 1,
+                    },
+                    business_config={"llm_model": "gpt-5.5", "reasoning_effort": "high"},
+                    cache=cache_module.empty_incremental_cache(),
+                    output_dir=Path(tmp_dir),
+                    client=AllSourceFailureClient(),
+                )
+
     def test_openai_hierarchical_reducer_maps_single_item_without_id_to_requested_shard(self) -> None:
         reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_single_missing_id_test")
 
