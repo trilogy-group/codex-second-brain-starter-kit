@@ -558,6 +558,33 @@ def _ontology_shard_specs(capability_results: list[dict[str, Any]], config: dict
     ]
 
 
+def _http_error_detail(exc: HTTPError) -> str:
+    try:
+        raw = exc.read()
+    except Exception:
+        raw = b""
+    detail = ""
+    if raw:
+        decoded = raw.decode("utf-8", errors="replace").strip()
+        try:
+            parsed = json.loads(decoded)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            error = parsed.get("error")
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                detail = error["message"]
+            elif isinstance(error, str):
+                detail = error
+            elif isinstance(parsed.get("message"), str):
+                detail = parsed["message"]
+        if not detail:
+            detail = decoded
+    status = getattr(exc, "msg", "") or getattr(exc, "reason", "") or "request failed"
+    message = f"OpenAI Responses API returned HTTP {exc.code}: {status}"
+    return f"{message}: {detail}" if detail else message
+
+
 class OpenAIHierarchicalReducerClient:
     def __init__(
         self,
@@ -640,7 +667,7 @@ class OpenAIHierarchicalReducerClient:
                 provider_error = rate_limits.provider_rate_limit_from_http_error(exc)
                 if provider_error is not None:
                     raise provider_error from exc
-                raise
+                raise rate_limits.ProviderNonRetryableError(_http_error_detail(exc)) from exc
 
         raw, retry_count, wait_seconds = rate_limits.with_retries(
             action=send_request,

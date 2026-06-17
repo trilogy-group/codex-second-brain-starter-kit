@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import importlib.util
 import json
 import sqlite3
@@ -8,6 +9,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -2544,6 +2546,40 @@ class HighConcurrencyGenerationTests(unittest.TestCase):
         self.assertIn(expected_id, result)
         self.assertEqual(result[expected_id]["id"], expected_id)
         self.assertEqual(result[expected_id]["theme"], "AdvocateHub code shard")
+
+    def test_openai_hierarchical_reducer_surfaces_provider_400_body(self) -> None:
+        reducers = load_module(HIERARCHICAL_REDUCERS_SCRIPT, "hierarchical_reducers_provider_400_body_test")
+
+        def fake_urlopen(*_args: object, **_kwargs: object) -> object:
+            body = json.dumps({"error": {"message": "Unsupported parameter: text.format.type"}}).encode("utf-8")
+            raise urllib.error.HTTPError(
+                url="https://api.openai.com/v1/responses",
+                code=400,
+                msg="Bad Request",
+                hdrs={},
+                fp=io.BytesIO(body),
+            )
+
+        original_urlopen = reducers.openai_requests.urlopen
+        reducers.openai_requests.urlopen = fake_urlopen
+        try:
+            client = reducers.OpenAIHierarchicalReducerClient(api_key="test-key")
+            with self.assertRaisesRegex(RuntimeError, "Unsupported parameter: text.format.type"):
+                client.reduce_many(
+                    [
+                        {
+                            "id": "source-repo-code-influitive-advocatehub-influitive-0001",
+                            "layer": "source",
+                            "source_kind": "repo-code",
+                            "cards": [{"id": "code:one", "source_kind": "repo-code", "summary": "Code card."}],
+                        }
+                    ],
+                    model="gpt-5.5",
+                    reasoning_effort="high",
+                    worker_count=1,
+                )
+        finally:
+            reducers.openai_requests.urlopen = original_urlopen
 
     def test_stable_business_payload_excludes_generated_notes_from_upstream_keys(self) -> None:
         evidence = load_module(EVIDENCE_CARDS_SCRIPT, "evidence_cards_generated_cache_key_test")

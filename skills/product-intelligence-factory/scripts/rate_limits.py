@@ -36,6 +36,10 @@ class ProviderRateLimitError(RateLimitExceeded):
         self.headers = headers or {}
 
 
+class ProviderNonRetryableError(RuntimeError):
+    pass
+
+
 class RateLimitRecorder:
     def __init__(self, initial_events: list[dict[str, Any]] | None = None) -> None:
         self._events = list(initial_events or [])
@@ -433,6 +437,8 @@ def with_retries(
     for attempt in range(1, retry_attempts + 1):
         try:
             return action(), attempt - 1, total_wait
+        except ProviderNonRetryableError:
+            raise
         except ProviderRateLimitError as exc:
             last_error = exc
             if attempt >= retry_attempts:
